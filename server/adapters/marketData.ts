@@ -12,10 +12,11 @@ import type { DailyClose, FxProvider, PriceProvider, Quote, QuoteProvider } from
 export function createTiingo(apiKey: string): PriceProvider {
   return {
     async dailyCloses(ticker, start, end) {
-      const params = new URLSearchParams({ startDate: start, endDate: end, token: apiKey });
+      const params = new URLSearchParams({ startDate: start, endDate: end });
+      // Keys go in headers, never URLs: URLs end up in request logs and traces.
       const response = await fetch(
         `https://api.tiingo.com/tiingo/daily/${encodeURIComponent(ticker.toLowerCase())}/prices?${params}`,
-        { headers: { 'content-type': 'application/json' } },
+        { headers: { 'content-type': 'application/json', authorization: `Token ${apiKey}` } },
       );
       if (response.status === 404) return [];
       if (!response.ok) throw new Error(`Tiingo ${ticker}: HTTP ${response.status}`);
@@ -30,8 +31,10 @@ export function createTiingo(apiKey: string): PriceProvider {
 export function createFinnhub(apiKey: string): QuoteProvider {
   return {
     async quote(ticker) {
-      const params = new URLSearchParams({ symbol: ticker.toUpperCase(), token: apiKey });
-      const response = await fetch(`https://finnhub.io/api/v1/quote?${params}`);
+      const params = new URLSearchParams({ symbol: ticker.toUpperCase() });
+      const response = await fetch(`https://finnhub.io/api/v1/quote?${params}`, {
+        headers: { 'x-finnhub-token': apiKey },
+      });
       if (!response.ok) throw new Error(`Finnhub ${ticker}: HTTP ${response.status}`);
       const body = (await response.json()) as { c: number; d: number | null; dp: number | null; pc: number; t: number };
       // Unknown symbols come back as all zeros.

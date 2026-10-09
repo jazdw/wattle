@@ -177,3 +177,27 @@ describe('dev sign-in', () => {
     expect((await publicHost('/api/auth/dev?email=dev@example.com')).status).toBe(403);
   });
 });
+
+describe('household safety', () => {
+  it('refuses to guess a household once several exist', async () => {
+    const deps = await configured({ allowedEmails: ['loose@example.com'] });
+    await createHousehold(deps, 'One', 'one@example.com');
+    await createHousehold(deps, 'Two', 'two@example.com');
+    stubGoogle({ sub: 's-loose', email: 'loose@example.com', email_verified: true });
+    const { callback } = await signInWithGoogle(deps);
+    expect(callback.headers.get('location')).toBe('/login?auth=not_allowed');
+    const users = await deps.db.select().from(schema.users).where(eq(schema.users.email, 'loose@example.com'));
+    const memberships = await deps.db.select().from(schema.householdMembers).where(eq(schema.householdMembers.userId, users[0]?.id ?? ''));
+    expect(memberships).toHaveLength(0);
+  });
+
+  it('prunes expired sessions in the daily job', async () => {
+    const { runDaily } = await import('../server/services/jobs');
+    const deps = await createTestDeps();
+    await createHousehold(deps, 'Home', 'me@example.com');
+    const later = new Date(deps.now().getTime() + 31 * 24 * 3600 * 1000);
+    deps.now = () => later;
+    await runDaily(deps);
+    expect(await deps.db.select().from(schema.sessions)).toHaveLength(0);
+  });
+});

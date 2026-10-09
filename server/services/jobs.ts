@@ -3,7 +3,8 @@
  * sync each connection, collect pending balance-history reports, then write
  * the day's snapshot. Failures are isolated per connection and per household.
  */
-import { households } from '../db/schema';
+import { lt } from 'drizzle-orm';
+import { households, sessions } from '../db/schema';
 import { Tenant } from '../db/tenant';
 import type { Deps } from '../ports';
 import { addDays, marketDate } from '../../shared/dates';
@@ -24,6 +25,7 @@ export async function runDaily(deps: Deps): Promise<DailyReport> {
   const errors: string[] = [];
   await ensureFx(deps, addDays(date, -7), date);
   await cachePrune(deps);
+  await deps.db.delete(sessions).where(lt(sessions.expiresAt, deps.now().getTime()));
 
   const rows = await deps.db.select({ id: households.id }).from(households);
   for (const { id } of rows) {

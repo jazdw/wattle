@@ -4,11 +4,11 @@ import { createPlaidClient, PlaidApiError } from './plaid';
 
 /** Record requests and answer from a handler. */
 function stubFetch(handler: (url: string, body: unknown) => Response) {
-  const requests: { url: string; body: unknown }[] = [];
+  const requests: { url: string; body: unknown; headers: Headers }[] = [];
   vi.stubGlobal('fetch', async (input: RequestInfo | URL, init?: RequestInit) => {
     const url = String(input);
     const body = init?.body ? JSON.parse(String(init.body)) : undefined;
-    requests.push({ url, body });
+    requests.push({ url, body, headers: new Headers(init?.headers) });
     return handler(url, body);
   });
   return requests;
@@ -22,7 +22,7 @@ describe('Plaid client', () => {
   it('authenticates every call and targets the configured environment', async () => {
     const requests = stubFetch(() => Response.json({ accounts: [] }));
     await plaid.getAccounts('access-1');
-    expect(requests[0]).toEqual({
+    expect(requests[0]).toMatchObject({
       url: 'https://sandbox.plaid.com/accounts/get',
       body: { client_id: 'cid', secret: 'sec', access_token: 'access-1' },
     });
@@ -92,13 +92,14 @@ describe('market data', () => {
     );
     const tiingo = createTiingo('key');
     expect(await tiingo.dailyCloses('VTSAX', '2026-10-01', '2026-10-02')).toEqual([{ date: '2026-10-01', close: 101.5 }]);
-    expect(requests[0].url).toContain('/tiingo/daily/vtsax/prices?startDate=2026-10-01&endDate=2026-10-02&token=key');
+    expect(requests[0].url).toBe('https://api.tiingo.com/tiingo/daily/vtsax/prices?startDate=2026-10-01&endDate=2026-10-02');
+    expect(requests[0].headers.get('authorization')).toBe('Token key'); // never in the URL
     expect(await tiingo.dailyCloses('NOPE', '2026-10-01', '2026-10-02')).toEqual([]);
     await expect(tiingo.dailyCloses('BOOM', '2026-10-01', '2026-10-02')).rejects.toThrow('HTTP 500');
   });
 
   it('Finnhub: quotes, unknown symbols, errors', async () => {
-    stubFetch((url) =>
+    const requests = stubFetch((url) =>
       url.includes('symbol=ZZZ')
         ? Response.json({ c: 0, d: null, dp: null, pc: 0, t: 0 })
         : url.includes('symbol=ERR')
@@ -114,6 +115,8 @@ describe('market data', () => {
       previousClose: 308,
       time: 1_700_000_000_000,
     });
+    expect(requests[0].url).toBe('https://finnhub.io/api/v1/quote?symbol=VTI');
+    expect(requests[0].headers.get('x-finnhub-token')).toBe('key');
     expect(await finnhub.quote('ZZZ')).toBeNull();
     await expect(finnhub.quote('ERR')).rejects.toThrow('HTTP 429');
   });
