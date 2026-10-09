@@ -1,34 +1,21 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-label="Wattle">
-  <title>Wattle</title>
-  <defs>
-    <radialGradient id="puff" cx="40%" cy="35%" r="65%">
-      <stop offset="0" stop-color="#FFE57A"/>
-      <stop offset="0.55" stop-color="#F2B705"/>
-      <stop offset="1" stop-color="#C98A00"/>
-    </radialGradient>
-    <symbol id="ball" viewBox="-6 -6 12 12">
-      <circle r="4.4" fill="url(#puff)"/>
-      <!-- fluffy stamens -->
-      <circle r="4.9" fill="none" stroke="#F2B705" stroke-width="1.6" stroke-dasharray="0.5 1.1" stroke-linecap="round"/>
-    </symbol>
-  </defs>
-  <rect width="64" height="64" rx="14" fill="#1F3F37"/>
-  <!-- stem -->
-  <path d="M14 54 C 22 44, 30 34, 50 14" fill="none" stroke="#6B8F5E" stroke-width="2.2" stroke-linecap="round"/>
-  <path d="M27 39 C 31 37, 37 37, 44 39" fill="none" stroke="#6B8F5E" stroke-width="1.6" stroke-linecap="round"/>
-  <path d="M33 31 C 31 26, 30 21, 31 15" fill="none" stroke="#6B8F5E" stroke-width="1.6" stroke-linecap="round"/>
-  <!-- sickle-shaped phyllodes -->
-  <path d="M19 49 C 12 44, 9 37, 10 30 C 14 37, 17 42, 21 46 Z" fill="#4F7A5A"/>
-  <path d="M24 43 C 30 47, 38 49, 46 47 C 39 45, 32 43, 26 41 Z" fill="#5E8C66"/>
-  <path d="M40 23 C 45 25, 52 29, 55 35 C 50 31, 45 28, 39 26 Z" fill="#4F7A5A"/>
-  <!-- golden puffballs -->
-  <use href="#ball" x="40" y="31" width="13" height="13"/>
-  <use href="#ball" x="25" y="9" width="13" height="13"/>
-  <use href="#ball" x="44" y="6" width="14" height="14"/>
-  <use href="#ball" x="34" y="18" width="12" height="12"/>
-  <use href="#ball" x="16" y="20" width="12" height="12"/>
-  <use href="#ball" x="20" y="31" width="11" height="11"/>
-  <use href="#ball" x="50" y="22" width="8" height="8"/>
-  <use href="#ball" x="11" y="15" width="7" height="7"/>
-  <use href="#ball" x="36" y="7" width="7" height="7"/>
+<title>Wattle</title>
+<defs>
+<linearGradient id="tile" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#25493f"/><stop offset="1" stop-color="#142c25"/></linearGradient>
+<radialGradient id="glow" cx="0.55" cy="0.35" r="0.6"><stop offset="0" stop-color="#f2b705" stop-opacity="0.22"/><stop offset="1" stop-color="#f2b705" stop-opacity="0"/></radialGradient>
+<radialGradient id="head" cx="0.38" cy="0.32" r="0.75"><stop offset="0" stop-color="#fff0a0"/><stop offset="0.45" stop-color="#ffcf1f"/><stop offset="1" stop-color="#d79600"/></radialGradient>
+<linearGradient id="leaf" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#7fb06f"/><stop offset="1" stop-color="#3f7552"/></linearGradient>
+</defs>
+<rect width="64" height="64" rx="14" fill="url(#tile)"/>
+<rect width="64" height="64" rx="14" fill="url(#glow)"/>
+<!--art-->
+<path d="M24 44 Q12.88 46.76 4 54 Q18.7 58.39 24 44Z" fill="url(#leaf)"/><path d="M24 44 Q15.79 52.58 4 54" fill="none" stroke="#b9d39a" stroke-width="0.45" stroke-linecap="round" opacity="0.7"/>
+<path d="M12 56 C 22 44, 32 32, 52 12" fill="none" stroke="#8c7a3c" stroke-width="3" stroke-linecap="round"/>
+<path d="M27 41 C 24 36, 22 31, 21 27" fill="none" stroke="#8c7a3c" stroke-width="2.2" stroke-linecap="round"/>
+<path d="M40 26 C 44 27, 48 29, 50 33" fill="none" stroke="#8c7a3c" stroke-width="2.2" stroke-linecap="round"/>
+<circle cx="21.03" cy="22.38" r="8.77" fill="#0b1f1a" opacity="0.35"/><circle cx="20" cy="21" r="8.08" fill="url(#head)"/><circle cx="28.07" cy="24.11" r="1.46" fill="#e3a400"/><circle cx="28.15" cy="25" r="1.46" fill="#f2b705"/><circle cx="24.96" cy="26.62" r="1.46" fill="#e3a400"/><circle cx="23.23" cy="29.22" r="1.46" fill="#f2b705"/><circle cx="22.71" cy="28.49" r="1.46" fill="#e3a400"/><circle cx="19.19" cy="29.06" r="1.46" fill="#f2b705"/><circle cx="19.12" cy="28.65" r="1.46" fill="#f2b705"/><circle cx="16.07" cy="28.1" r="1.46" fill="#e3a400"/><circle cx="14.48" cy="27.02" r="1.46" fill="#f2b705"/><circle cx="13.88" cy="25.54" r="1.46" fill="#ffd23f"/><circle cx="12.52" cy="22.9" r="1.46" fill="#ffe36e"/><circle cx="11.88" cy="20.13" r="1.46" fill="#ffe36e"/><circle cx="11.98" cy="19.48" r="1.46" fill="#ffd23f"/><circle cx="14.31" cy="15.9" r="1.46" fill="#ffe36e"/><circle cx="15.98" cy="14.6" r="1.46" fill="#ffe36e"/><circle cx="16.31" cy="14.08" r="1.46" fill="#ffe36e"/><circle cx="19.29" cy="12.05" r="1.46" fill="#ffd23f"/><circle cx="20.53" cy="12.37" r="1.46" fill="#ffe36e"/><circle cx="23.83" cy="14.12" r="1.46" fill="#ffe36e"/><circle cx="26.9" cy="15.13" r="1.46" fill="#f2b705"/><circle cx="25.64" cy="15.21" r="1.46" fill="#ffe36e"/><circle cx="28.32" cy="17.67" r="1.46" fill="#e3a400"/><circle cx="27.73" cy="19.09" r="1.46" fill="#f2b705"/>
+<circle cx="41.03" cy="15.38" r="8.77" fill="#0b1f1a" opacity="0.35"/><circle cx="40" cy="14" r="8.08" fill="url(#head)"/><circle cx="48.5" cy="16.67" r="1.46" fill="#f2b705"/><circle cx="47.14" cy="17.45" r="1.46" fill="#f2b705"/><circle cx="44.85" cy="19.9" r="1.46" fill="#f2b705"/><circle cx="45.3" cy="21.24" r="1.46" fill="#f2b705"/><circle cx="41.85" cy="22.37" r="1.46" fill="#e3a400"/><circle cx="39.48" cy="22.47" r="1.46" fill="#f2b705"/><circle cx="39.18" cy="22.6" r="1.46" fill="#f2b705"/><circle cx="36.28" cy="20.64" r="1.46" fill="#e3a400"/><circle cx="33.56" cy="18.54" r="1.46" fill="#ffe36e"/><circle cx="32.91" cy="17.17" r="1.46" fill="#ffe36e"/><circle cx="31.36" cy="16.03" r="1.46" fill="#ffd23f"/><circle cx="32.06" cy="13.43" r="1.46" fill="#ffd23f"/><circle cx="31.35" cy="11.32" r="1.46" fill="#ffe36e"/><circle cx="32.26" cy="10.53" r="1.46" fill="#ffe36e"/><circle cx="35.67" cy="6.62" r="1.46" fill="#ffd23f"/><circle cx="36.49" cy="7.06" r="1.46" fill="#ffe36e"/><circle cx="40.18" cy="5.09" r="1.46" fill="#ffe36e"/><circle cx="40.55" cy="6.21" r="1.46" fill="#ffe36e"/><circle cx="43.17" cy="6.73" r="1.46" fill="#ffd23f"/><circle cx="43.75" cy="7.21" r="1.46" fill="#ffe36e"/><circle cx="46.09" cy="9.52" r="1.46" fill="#f2b705"/><circle cx="47.39" cy="11.62" r="1.46" fill="#f2b705"/><circle cx="47.94" cy="12.13" r="1.46" fill="#e3a400"/>
+<circle cx="32.86" cy="35.15" r="7.34" fill="#0b1f1a" opacity="0.35"/><circle cx="32" cy="34" r="6.77" fill="url(#head)"/><circle cx="38.7" cy="35" r="1.22" fill="#e3a400"/><circle cx="38.25" cy="36.37" r="1.22" fill="#e3a400"/><circle cx="37.12" cy="37.69" r="1.22" fill="#f2b705"/><circle cx="34.76" cy="40.07" r="1.22" fill="#e3a400"/><circle cx="32.98" cy="41.53" r="1.22" fill="#e3a400"/><circle cx="30.52" cy="40.58" r="1.22" fill="#f2b705"/><circle cx="30.16" cy="40.75" r="1.22" fill="#f2b705"/><circle cx="26.63" cy="38.79" r="1.22" fill="#ffd23f"/><circle cx="25.94" cy="36.4" r="1.22" fill="#ffe36e"/><circle cx="25.51" cy="34.43" r="1.22" fill="#ffe36e"/><circle cx="25.15" cy="32.81" r="1.22" fill="#ffe36e"/><circle cx="25.94" cy="32.65" r="1.22" fill="#ffd23f"/><circle cx="27.1" cy="30.15" r="1.22" fill="#ffd23f"/><circle cx="28.29" cy="28.09" r="1.22" fill="#ffe36e"/><circle cx="30.25" cy="27.26" r="1.22" fill="#ffd23f"/><circle cx="32.53" cy="27.45" r="1.22" fill="#ffe36e"/><circle cx="33.16" cy="26.49" r="1.22" fill="#ffd23f"/><circle cx="36.6" cy="29.04" r="1.22" fill="#ffd23f"/><circle cx="37.36" cy="28.79" r="1.22" fill="#e3a400"/><circle cx="37.58" cy="30.89" r="1.22" fill="#e3a400"/><circle cx="39.59" cy="34.23" r="1.22" fill="#e3a400"/>
+<circle cx="51.79" cy="35.06" r="6.73" fill="#0b1f1a" opacity="0.35"/><circle cx="51" cy="34" r="6.2" fill="url(#head)"/><circle cx="57.42" cy="35.98" r="1.12" fill="#e3a400"/><circle cx="55.77" cy="37.11" r="1.12" fill="#e3a400"/><circle cx="55.11" cy="37.98" r="1.12" fill="#e3a400"/><circle cx="53.34" cy="39.95" r="1.12" fill="#e3a400"/><circle cx="51.22" cy="40.2" r="1.12" fill="#e3a400"/><circle cx="50.38" cy="40.38" r="1.12" fill="#f2b705"/><circle cx="47.21" cy="39.25" r="1.12" fill="#f2b705"/><circle cx="46.36" cy="39.21" r="1.12" fill="#e3a400"/><circle cx="45.41" cy="36.29" r="1.12" fill="#ffd23f"/><circle cx="44.72" cy="35.27" r="1.12" fill="#ffd23f"/><circle cx="45" cy="32.02" r="1.12" fill="#ffe36e"/><circle cx="46.42" cy="30.09" r="1.12" fill="#ffe36e"/><circle cx="46.42" cy="29.96" r="1.12" fill="#ffd23f"/><circle cx="48" cy="27.77" r="1.12" fill="#ffe36e"/><circle cx="50.77" cy="28.23" r="1.12" fill="#ffd23f"/><circle cx="53.17" cy="27.58" r="1.12" fill="#ffe36e"/><circle cx="53.4" cy="28.58" r="1.12" fill="#ffe36e"/><circle cx="55.89" cy="30.35" r="1.12" fill="#e3a400"/><circle cx="56.75" cy="32.04" r="1.12" fill="#e3a400"/><circle cx="57.21" cy="34.37" r="1.12" fill="#e3a400"/>
+<!--/art-->
 </svg>

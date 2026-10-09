@@ -43,3 +43,38 @@ describe('allocation look-through', () => {
     expect(style.grid.large.growth).toBe(60_00);
   });
 });
+
+describe('heuristics', () => {
+  const guess = (name: string, type: string | null = 'mutual fund', extra: Record<string, unknown> = {}) =>
+    suggestClassification({ ticker: null, name, type, ...extra }).classification;
+
+  it('recognises common fund names', () => {
+    expect(guess('Emerging Markets Index').categories).toEqual({ em_stock: 1 });
+    expect(guess('International Growth Fund').categories.intl_stock).toBeGreaterThan(0.5);
+    expect(guess('Global Aggregate Bond').categories).toEqual({ intl_bond: 1 });
+    expect(guess('US REIT Index').categories).toEqual({ real_estate: 1 });
+    expect(guess('Stable Value Fund').categories).toEqual({ cash: 1 });
+    expect(guess('Bitcoin', 'cryptocurrency').categories).toEqual({ crypto: 1 });
+    expect(guess('Call option', 'derivative').categories).toEqual({ other: 1 });
+    expect(guess('Some ASX Fund', 'etf', { currency: 'AUD' }).categories).toEqual({ au_stock: 1 });
+  });
+
+  it('infers size and style from names', () => {
+    expect(guess('Small Cap Value Index')).toMatchObject({ sizes: { small: 0.8, mid: 0.2 }, styles: { value: 0.85, blend: 0.15 } });
+    expect(guess('Mid Cap Growth')).toMatchObject({ sizes: { mid: 0.85 }, styles: { growth: 0.85 } });
+    expect(guess('S&P 500 Index')).toMatchObject({ sizes: { large: 0.8 } });
+    expect(guess('Mystery Fund').sizes).toBeUndefined();
+  });
+
+  it('treats single stocks as US stocks without review', () => {
+    const result = suggestClassification({ ticker: 'AAPL', name: 'Apple Inc.', type: 'equity' });
+    expect(result).toMatchObject({ classification: { categories: { us_stock: 1 } }, needsReview: false });
+  });
+
+  it('weights size/style of fund-of-funds by their stock portion', () => {
+    const vt = suggestClassification({ ticker: 'VT', name: null, type: 'etf' }).classification;
+    expect(Object.values(vt.sizes!).reduce((sum, value) => sum + (value ?? 0), 0)).toBeCloseTo(1);
+    const vdhg = suggestClassification({ ticker: 'VDHG', name: null, type: 'etf' }).classification;
+    expect(vdhg.categories.au_stock).toBeGreaterThan(0.3);
+  });
+});

@@ -33,3 +33,4 @@ dist-ssr
 # local SQLite for the Node entry
 *.db
 *.db-journal
+coverage

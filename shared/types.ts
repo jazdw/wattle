@@ -66,6 +66,8 @@ export interface AccountSummary {
   /** Native currency, minor units; liabilities negative. */
   balance: number | null;
   balanceAsOf: number | null;
+  /** When the institution stopped reporting the account (excluded from totals). */
+  missingSince: number | null;
   /** Balance in the requested display currency. */
   displayBalance: number | null;
   holdingCount: number;

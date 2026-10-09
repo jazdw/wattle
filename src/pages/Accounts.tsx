@@ -221,6 +221,11 @@ function AccountList({
               {account.subtype ?? account.type}
               <Badge variant={account.ownerUserId ? 'outline' : 'gold'}>{ownerName(account.ownerUserId)}</Badge>
               {account.isHidden && <Badge variant="outline">Hidden — not synced or counted</Badge>}
+              {account.missingSince && !account.isHidden && (
+                <Badge variant="warning" title="Closed, or deselected when linking. History is kept; hide or disconnect to tidy up.">
+                  No longer reported — not counted
+                </Badge>
+              )}
               {account.holdingCount > 0 && <span>{account.holdingCount} holdings</span>}
             </p>
           </div>

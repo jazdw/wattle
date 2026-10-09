@@ -171,6 +171,7 @@ accountRoutes.get('/', async (c) => {
         category: row.category as AccountSummary['category'],
         balance: row.isHidden ? null : row.balance,
         balanceAsOf: row.balanceAsOf,
+        missingSince: row.missingSince,
         displayBalance:
           row.isHidden || row.balance === null
             ? null
@@ -303,13 +304,14 @@ accountRoutes.post('/:id/balances', async (c) => {
       .update(accounts)
       .set({ balance, balanceAsOf: deps.now().getTime() })
       .where(tenant.scope(accounts, eq(accounts.id, account.id)));
-    // Carried-forward copies after this date are stale now.
+    // Carried-forward snapshot copies after this date are stale now.
     await tenant.db
       .delete(accountDaily)
       .where(
         tenant.scope(
           accountDaily,
           eq(accountDaily.accountId, account.id),
+          eq(accountDaily.source, 'sync'),
           sql`${accountDaily.date} > ${body.date}`,
         ),
       );

@@ -166,7 +166,12 @@ async function upsertAccounts(
 ): Promise<Map<string, { id: string; currency: string }>> {
   const now = deps.now().getTime();
   const existing = await tenant.db
-    .select({ id: accounts.id, externalId: accounts.externalId, isHidden: accounts.isHidden })
+    .select({
+      id: accounts.id,
+      externalId: accounts.externalId,
+      isHidden: accounts.isHidden,
+      missingSince: accounts.missingSince,
+    })
     .from(accounts)
     .where(tenant.scope(accounts, eq(accounts.connectionId, connection.id)));
   const byExternal = new Map(existing.map((row) => [row.externalId, row]));
@@ -213,9 +218,21 @@ async function upsertAccounts(
     }
     await tenant.db
       .update(accounts)
-      .set({ ...descriptive, currency, balance: plaidBalance(account), balanceAsOf: now })
+      .set({ ...descriptive, currency, balance: plaidBalance(account), balanceAsOf: now, missingSince: null })
       .where(tenant.scope(accounts, eq(accounts.id, current.id)));
     visible.set(account.account_id, { id: current.id, currency });
+  }
+
+  // Accounts the institution no longer reports (closed, or deselected in
+  // Plaid Link): stop counting them, keep their history.
+  const reported = new Set(plaidAccounts.map((account) => account.account_id));
+  for (const row of existing) {
+    if (row.isHidden || reported.has(row.externalId ?? '') || row.missingSince) continue;
+    await tenant.db
+      .update(accounts)
+      .set({ missingSince: now, balance: null, balanceAsOf: now })
+      .where(tenant.scope(accounts, eq(accounts.id, row.id)));
+    await tenant.db.delete(holdings).where(tenant.scope(holdings, eq(holdings.accountId, row.id)));
   }
   return visible;
 }
@@ -318,7 +335,13 @@ async function syncHoldings(
   const institutionPrices = new Map<string, { price: number; date: string | null }>();
 
   const rows = result.holdings
-    .filter((holding) => visibleAccounts.has(holding.account_id) && securityIds.has(holding.security_id))
+    // Some institutions keep reporting fully sold positions with zero units.
+    .filter(
+      (holding) =>
+        visibleAccounts.has(holding.account_id) &&
+        securityIds.has(holding.security_id) &&
+        (holding.quantity !== 0 || holding.institution_value !== 0),
+    )
     .map((holding) => {
       const account = visibleAccounts.get(holding.account_id)!;
       const securityId = securityIds.get(holding.security_id)!;

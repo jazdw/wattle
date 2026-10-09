@@ -29,3 +29,27 @@ describe('CSV import', () => {
     expect(parseAmount('')).toBeNull();
   });
 });
+
+describe('generic CSV', () => {
+  it('handles other date formats, oldest-first files and bad rows', () => {
+    const rows = parseCsv('when,amount\n01/02/2026,100\n01/03/2026,"1,050.00"\nnot a date,5\n01/03/2026,1100\n');
+    const result = extractBalances(rows, { dateColumn: 0, balanceColumn: 1, dateFormat: 'MM/DD/YYYY', hasHeader: true });
+    expect(result.skipped).toBe(1);
+    // Oldest-first: the later row for Jan 3 is the closing balance.
+    expect(result.rows).toEqual([
+      { date: '2026-01-02', balance: 100 },
+      { date: '2026-01-03', balance: 1100 },
+    ]);
+  });
+
+  it('parses ISO dates and files without a header', () => {
+    const rows = parseCsv('2026-10-01,5\r\n2026-10-02,6');
+    expect(extractBalances(rows, { dateColumn: 0, balanceColumn: 1, dateFormat: 'YYYY-MM-DD', hasHeader: false }).rows).toHaveLength(2);
+  });
+
+  it('rejects impossible dates', async () => {
+    const { parseDate } = await import('./csv');
+    expect(parseDate('31/13/2026', 'DD/MM/YYYY')).toBeNull();
+    expect(parseDate('5/6/26', 'DD/MM/YYYY')).toBe('2026-06-05');
+  });
+});

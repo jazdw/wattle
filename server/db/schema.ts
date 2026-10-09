@@ -159,6 +159,11 @@ export const accounts = sqliteTable(
     /** Latest balance (minor units, account currency; liabilities negative). */
     balance: integer('balance'),
     balanceAsOf: integer('balance_as_of'),
+    /**
+     * Set when the institution stopped reporting this account (closed, or
+     * deselected in Plaid). It then drops out of totals; history is kept.
+     */
+    missingSince: integer('missing_since'),
     sort: integer('sort').notNull().default(0),
     createdAt: integer('created_at').notNull(),
   },
