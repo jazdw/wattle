@@ -118,7 +118,40 @@ npm run build
 DATABASE_URL=file:wattle.db PORT=8787 GOOGLE_CLIENT_ID=… TOKEN_ENC_KEY=… npm run node:start
 ```
 
-## Not built yet
-- Spending transactions for checking and credit cards (Plaid `/transactions/sync`), budgets and categories
-- Australian bank sync through a Consumer Data Right (CDR) aggregator (Basiq/Fiskil) or SimpleFIN, behind the same aggregator port
-- Automatic property valuations; invites and multiple households in the UI
+## Future improvements
+
+Ideas collected from a Reddit thread of people building similar apps, and from the open-source
+[Ghostfolio](https://github.com/ghostfolio/ghostfolio) and [Sure](https://github.com/we-promise/sure) projects.
+
+### Investments
+- **Returns excluding contributions.** Today the Growth page includes money added and withdrawn. Wattle already stores investment transactions, so it can compute time-weighted return (performance alone) and money-weighted return (your actual experience), plus dividends as total return. *(Ghostfolio)*
+- **Benchmarks.** Compare the portfolio's return with VT, the S&P 500 or a 60/40 mix over the same period.
+- **Risk checks ("X-ray").** Simple rules with pass/warn results. *(Ghostfolio)* For example:
+  - too much in one account or one stock
+  - USD/AUD currency exposure
+  - region concentration
+  - emergency-fund coverage in months of spending
+  - total fund fees (expense ratios) as a share of the portfolio
+- **Fund overlap.** The individual stocks shared across your funds (VTI, the S&P 500 and target-date funds overlap heavily). Needs fund-holdings data; check sources first.
+- **Dividends and fees.** A dividend timeline and fees paid per year, from investment transactions.
+- **Projections.** A FIRE / retirement projection from current balances, contribution rate and an assumed return range.
+- **Privacy mode.** One click blurs every amount, for looking at Wattle with others around. *(Ghostfolio's "Zen mode")*
+
+### Transactions phase (checking and credit cards)
+- **Sync** with Plaid `/transactions/sync`, fetching on demand and daily rather than continuously, which keeps Plaid usage down.
+- **Categories, merchants and tags**, with rules that categorise automatically and remember manual corrections. Only uncategorised transactions go to a classifier, and any single transaction can override the merchant's usual category (e.g. tyres bought at Costco are Auto, not Shopping).
+- **Classification model.** A small decision/classification model instead of a chat LLM, e.g. TypeSafe's [Jev](https://openrouter.ai/typesafe/jev-1.13): it returns typed choices with probabilities, so anything below a confidence threshold goes to a review queue. Could also suggest fund classifications (category, size, style) for funds without a seeded profile. It needs only merchant or fund names and amounts, never account details. Vendor-reported accuracy and cost are unverified.
+- **Transfers between our own accounts** (checking → brokerage, card payments) detected and linked so they aren't counted as income or spending. *(Sure)*
+- **Edits ripple through.** Editing or recategorising an old transaction updates every derived view (cash flow, budgets, balances).
+- **Cash flow and budgets.** Monthly income vs spending (a Sankey diagram is popular), category budgets with remaining amounts, and trends.
+- **Recurring transactions and a planner.** Upcoming bills and income, projected cash flow, and the ability to drop in a planned transaction and see its effect.
+- **Per-property pages.** Rent, mortgage and expenses for each property, with only net cash flow feeding the household budget.
+- **Search** across transactions, merchants and categories.
+- **Imports** that fill gaps without creating duplicates, for banks Plaid can't reach (Westpac CSV is already supported for balances).
+
+### Data sources and platform
+- Australian bank sync through a Consumer Data Right (CDR) aggregator (Basiq/Fiskil), behind the existing aggregator port.
+- SimpleFIN as a cheap fallback for balances and transactions where Plaid fails. It provides no holdings, and users report reliability problems.
+- Automatic property valuations.
+- Invites and multiple households in the UI.
+- Passkey (WebAuthn) sign-in as an alternative to Google.
