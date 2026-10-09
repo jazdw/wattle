@@ -106,7 +106,7 @@ The redirect URI is built from the request's origin, so no hostname is configure
 2. Set secrets: `npx wrangler secret put <NAME>` for `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`, `TOKEN_ENC_KEY`, `PLAID_CLIENT_ID`, `PLAID_SECRET`, `TIINGO_API_KEY`, `FINNHUB_API_KEY`, `ADMIN_TOKEN`. Set `PLAID_ENV` (var) to `production` when ready.
 3. Allow your Google accounts: `npm run allow -- add you@gmail.com partner@gmail.com`.
 4. Deploy with either:
-   - **GitHub Actions** (`.github/workflows/deploy.yml`): set the `CLOUDFLARE_API_TOKEN`, `CLOUDFLARE_ACCOUNT_ID` and `CUSTOM_DOMAIN` repository secrets and push to `main`. It typechecks, lints, tests, applies D1 migrations, then runs `wrangler deploy --domain $CUSTOM_DOMAIN`.
+   - **GitHub Actions** (`.github/workflows/deploy.yml`): every push to `main` typechecks, lints and tests. Once the `CLOUDFLARE_API_TOKEN`, `CLOUDFLARE_ACCOUNT_ID` and `CUSTOM_DOMAIN` repository secrets are set, it also applies D1 migrations and runs `wrangler deploy --domain $CUSTOM_DOMAIN`. Until then the deploy steps are skipped.
    - **By hand:** `npm run db:migrate:remote && npm run deploy -- --domain wattle.example.com`.
 
 **Workers plan:** use Workers Paid ($5/month). The free plan allows 10 ms of CPU and 50 outbound requests per invocation, and Wattle goes past that. Measured on Node, including SQLite's share:
@@ -115,6 +115,24 @@ The redirect URI is built from the request's origin, so no hostname is configure
 - a 2-year backfill takes about 250 ms per account
 
 Re-run the daily job by hand: `curl -X POST -H "Authorization: Bearer $ADMIN_TOKEN" https://<domain>/api/admin/run-daily`.
+
+### Cloudflare Access (Zero Trust), recommended
+A second lock in front of the app. Cloudflare's edge only lets your Google accounts reach the domain at all. Wattle's own Google sign-in still runs behind it (it decides which household member you are). It's free for up to 50 users. Requests from the daily cron never pass through Access, so it's unaffected.
+
+1. **Team name:** in Cloudflare → **Zero Trust → Settings → Team name and domain**, note `<team>.cloudflareaccess.com`.
+2. **Google OAuth client for Access** (separate from Wattle's): Google Cloud Console → **APIs & Services → Credentials → Create OAuth client → Web application**.
+   - Authorized JavaScript origin: `https://<team>.cloudflareaccess.com`
+   - Authorized redirect URI: `https://<team>.cloudflareaccess.com/cdn-cgi/access/callback`
+3. **Login method:** Zero Trust → **Integrations → Identity providers → Add new → Google**. Paste the client ID (as **App ID**) and the secret, save, then **Test**.
+4. **Applications:** Zero Trust → **Access controls → Applications → Create new application → Self-hosted**.
+   - **App:** hostname = your domain, no path. Policy **Allow**, Include → **Emails** → your addresses. Login method Google with **Instant authentication** on. Session duration around 7–30 days.
+   - **Plaid webhook:** hostname = your domain, path = `api/plaid/webhook`. Policy **Bypass**, Include → **Everyone**. Plaid can't sign in, and Wattle already verifies Plaid's signature on every webhook.
+5. **Check:**
+   - A private window should go through Google via `cloudflareaccess.com` before reaching Wattle's login.
+   - A Google account that isn't listed should be blocked by Cloudflare.
+   - `curl -i -X POST https://<domain>/api/plaid/webhook` should return Wattle's `401 {"error":"invalid signature"}`. A redirect to `cloudflareaccess.com` means the bypass isn't applying.
+
+Not built yet: Wattle could also verify the `Cf-Access-Jwt-Assertion` header Access adds to every request, so it would reject anything that didn't come through Access even if the policy were misconfigured.
 
 ### Running on Node instead
 
