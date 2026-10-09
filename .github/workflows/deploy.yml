@@ -1,4 +1,4 @@
-name: Deploy to Cloudflare
+name: Check and deploy
 
 on:
   push:
@@ -38,16 +38,24 @@ jobs:
       - name: Build
         run: npm run build
 
+      # Until the Cloudflare secrets are set, CI only checks the code and the
+      # deploy steps are skipped (the run stays green).
       - name: Check deploy secrets
+        id: secrets
         env:
           CUSTOM_DOMAIN: ${{ secrets.CUSTOM_DOMAIN }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
         run: |
-          if [ -z "$CUSTOM_DOMAIN" ]; then
-            echo "::error::Set the CUSTOM_DOMAIN Actions secret (e.g. wattle.example.com)."
-            exit 1
+          if [ -z "$CUSTOM_DOMAIN" ] || [ -z "$CLOUDFLARE_API_TOKEN" ] || [ -z "$CLOUDFLARE_ACCOUNT_ID" ]; then
+            echo "::notice::Deploy skipped: set CUSTOM_DOMAIN, CLOUDFLARE_API_TOKEN and CLOUDFLARE_ACCOUNT_ID to deploy."
+            echo "ready=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "ready=true" >> "$GITHUB_OUTPUT"
           fi
 
       - name: Apply D1 migrations
+        if: steps.secrets.outputs.ready == 'true'
         uses: cloudflare/wrangler-action@v4
         with:
           apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
@@ -56,6 +64,7 @@ jobs:
 
       # The custom domain lives in a secret so it isn't committed to the repo.
       - name: Deploy Worker
+        if: steps.secrets.outputs.ready == 'true'
         uses: cloudflare/wrangler-action@v4
         with:
           apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
