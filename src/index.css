@@ -96,6 +96,10 @@
 .recharts-cartesian-grid line {
   stroke: var(--color-border);
 }
-.recharts-tooltip-wrapper {
+.recharts-tooltip-wrapper,
+.recharts-wrapper,
+.recharts-surface,
+.recharts-sector,
+.recharts-layer {
   outline: none;
 }
