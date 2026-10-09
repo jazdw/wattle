@@ -38,6 +38,8 @@ migrations/  drizzle-kit SQL, applied by Wrangler (D1) or Drizzle's migrator (li
 ## How it works
 
 - **Households.** Every row of financial data belongs to a household (the tenant). Routes only reach data through `Tenant.scope()`, which always adds `household_id = ?`. `test/tenancy.test.ts` checks that two households can't see or change each other's data through any route.
+- **Unlinking.** Disconnecting a login keeps its accounts and history as manual accounts, unless you choose to delete them. Accounts an institution stops reporting (closed, or deselected in Plaid) are flagged "no longer reported" and drop out of totals, keeping their history.
+- **Sold positions.** Sold holdings disappear on the next sync. Their history stays, and charts show them falling to zero.
 - **Linking.** Each person links their own logins with Plaid Link: "Link investments" for brokerages, 401(k)s and HSAs, "Link bank / card" for checking, savings and cards. Accounts are tagged by owner (either of you, or joint). If you've both linked a joint account, **hide** one copy. Hidden accounts aren't synced or stored and don't count in any total.
 - **No account numbers.** Only Plaid's `mask` (last ≤4 characters) is stored. The `auth` product is never requested. `test/schema.test.ts` fails if a column for account or routing numbers appears.
 - **Secrets at rest.** Plaid access tokens and asset-report tokens are AES-256-GCM encrypted with `TOKEN_ENC_KEY`. The ciphertext is bound to its household and connection, and keys can be rotated (`v2:<new>,v1:<old>`).
@@ -63,11 +65,15 @@ node scripts/seed-demo.mjs            # optional: demo accounts + a year of hist
 
 On localhost the login page offers **dev sign-in** for the emails in `DEV_LOGIN_EMAILS`. It's disabled on any public hostname. Plaid sandbox logins: `user_good` / `pass_good`.
 
-Checks:
+Checks (CI runs the same):
 
 ```sh
-npm run typecheck && npm run lint && npm test
+npm run typecheck && npm run lint && npm run test:coverage
 ```
+
+Tests run the real app on in-memory SQLite with fake Plaid, Tiingo, Finnhub and FX providers (`test/fakes.ts`), and enforce D1's 100-parameter limit. Coverage thresholds cover server, shared and client logic. React components are checked by rendering the app.
+
+The logo is generated: `node scripts/logo.mjs && npm run icons`. This writes `public/logo.svg` (detailed, for app icons) and `public/favicon.svg` (simplified, to stay legible in a browser tab).
 
 The schema lives in `server/db/schema.ts`. After changing it, run `npm run db:generate` to write a new migration.
 
@@ -98,7 +104,10 @@ The redirect URI is built from the request's origin, so no hostname is configure
    - **GitHub Actions** (`.github/workflows/deploy.yml`): set the `CLOUDFLARE_API_TOKEN`, `CLOUDFLARE_ACCOUNT_ID` and `CUSTOM_DOMAIN` repository secrets and push to `main`. It typechecks, lints, tests, applies D1 migrations, then runs `wrangler deploy --domain $CUSTOM_DOMAIN`.
    - **By hand:** `npm run db:migrate:remote && npm run deploy -- --domain wattle.example.com`.
 
-**Workers plan:** syncing and backfilling take more CPU than the free plan's 10 ms per request. Use Workers Paid ($5/month).
+**Workers plan:** use Workers Paid ($5/month). The free plan allows 10 ms of CPU and 50 outbound requests per invocation, and Wattle goes past that. Measured on Node, including SQLite's share:
+- a routine sync takes about 20 ms
+- a 2-year history chart by category takes about 80 ms
+- a 2-year backfill takes about 250 ms per account
 
 Re-run the daily job by hand: `curl -X POST -H "Authorization: Bearer $ADMIN_TOKEN" https://<domain>/api/admin/run-daily`.
 

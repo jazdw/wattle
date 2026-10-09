@@ -4,7 +4,7 @@
  * rerunning a day overwrites that day's synced rows. Manually entered and
  * imported values for the day are never overwritten.
  */
-import { eq, sql } from 'drizzle-orm';
+import { eq, inArray, sql } from 'drizzle-orm';
 import { addDays, type IsoDate } from '../../shared/dates';
 import { chunkRows, runBatch } from '../db/batch';
 import { accountDaily, accounts, holdingDaily, holdings, securities } from '../db/schema';
@@ -63,29 +63,20 @@ export async function snapshotHousehold(deps: Deps, tenant: Tenant, date: IsoDat
     });
   }
 
+  // Snapshot rows are always `sync`; `manual` is reserved for values a person
+  // entered, which a snapshot never replaces (see setWhere below).
   const accountDailyRows: (typeof accountDaily.$inferInsert)[] = [];
-  const carried: (typeof accountDaily.$inferInsert)[] = [];
   for (const account of accountRows) {
-    const fromHoldings = totals.get(account.id);
-    if (fromHoldings !== undefined) {
-      accountDailyRows.push({
-        householdId: tenant.householdId,
-        accountId: account.id,
-        date,
-        balance: fromHoldings,
-        currency: account.currency,
-        source: account.source === 'manual' ? 'manual' : 'sync',
-      });
-    } else if (account.balance !== null) {
-      (account.source === 'manual' ? carried : accountDailyRows).push({
-        householdId: tenant.householdId,
-        accountId: account.id,
-        date,
-        balance: account.balance,
-        currency: account.currency,
-        source: account.source === 'manual' ? 'manual' : 'sync',
-      });
-    }
+    const balance = totals.get(account.id) ?? account.balance;
+    if (balance === null) continue;
+    accountDailyRows.push({
+      householdId: tenant.householdId,
+      accountId: account.id,
+      date,
+      balance,
+      currency: account.currency,
+      source: 'sync',
+    });
   }
 
   // Manual accounts tracked by holdings take their balance from them.
@@ -100,6 +91,22 @@ export async function snapshotHousehold(deps: Deps, tenant: Tenant, date: IsoDat
   }
 
   await runBatch(tenant.db, [
+    // Replace the day's synced positions so a sale made today drops out.
+    // Imported rows are left alone.
+    ...(visible.size > 0
+      ? [
+          tenant.db
+            .delete(holdingDaily)
+            .where(
+              tenant.scope(
+                holdingDaily,
+                eq(holdingDaily.date, date),
+                inArray(holdingDaily.accountId, [...visible]),
+                inArray(holdingDaily.source, ['sync', 'backfill']),
+              ),
+            ),
+        ]
+      : []),
     ...chunkRows(holdingDaily, holdingDailyRows).map((chunk) =>
       tenant.db
         .insert(holdingDaily)
@@ -126,9 +133,7 @@ export async function snapshotHousehold(deps: Deps, tenant: Tenant, date: IsoDat
           setWhere: sql`${accountDaily.source} in ('sync', 'backfill')`,
         }),
     ),
-    // Manual balances carry forward but never replace a value entered for the day.
-    ...chunkRows(accountDaily, carried).map((chunk) => tenant.db.insert(accountDaily).values(chunk).onConflictDoNothing()),
   ]);
 
-  return { accounts: accountDailyRows.length + carried.length, holdings: holdingDailyRows.length };
+  return { accounts: accountDailyRows.length, holdings: holdingDailyRows.length };
 }

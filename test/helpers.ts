@@ -34,7 +34,7 @@ export async function createTestDeps(overrides: Partial<Deps> = {}): Promise<Dep
   const db = drizzle(client, { schema });
   await migrate(db, { migrationsFolder: 'migrations' });
   const pending: Promise<unknown>[] = [];
-  return {
+  const deps: Deps = {
     db: db as unknown as Db,
     config: { allowedEmails: [], devLoginEmails: [], tokenEncKey: TEST_KEY, adminToken: 'admin-secret' },
     plaid: null,
@@ -47,7 +47,20 @@ export async function createTestDeps(overrides: Partial<Deps> = {}): Promise<Dep
     },
     ...overrides,
   };
+  pendingWork.set(deps, pending);
+  return deps;
 }
+
+const pendingWork = new WeakMap<Deps, Promise<unknown>[]>();
+
+/** Wait for work handed to `deps.background` (post-link backfills, webhook syncs). */
+export async function flush(deps: Deps): Promise<void> {
+  const pending = pendingWork.get(deps) ?? [];
+  while (pending.length > 0) await pending.shift();
+}
+
+/** Today's market date for the fixed test clock (2026-10-08 in New York). */
+export const TODAY = '2026-10-08';
 
 export async function createHousehold(deps: Deps, name: string, email: string) {
   const householdId = crypto.randomUUID();
@@ -60,19 +73,36 @@ export async function createHousehold(deps: Deps, name: string, email: string) {
   return { householdId, userId, cookie: `wt_session=${token}` };
 }
 
-export function client(deps: Deps, cookie?: string) {
+export interface TestResponse {
+  status: number;
+  // oxlint-disable-next-line typescript/no-explicit-any -- test convenience
+  body: any;
+  headers: Headers;
+}
+
+/**
+ * Calls the real app as a browser on ORIGIN would: same-origin `Origin` on
+ * writes (override with `headers`), optional session cookie, JSON bodies.
+ */
+export function client(deps: Deps, cookie?: string, origin = ORIGIN) {
   const app = createApp();
-  return async (path: string, init: RequestInit & { json?: unknown } = {}) => {
+  return async (path: string, init: RequestInit & { json?: unknown } = {}): Promise<TestResponse> => {
     const headers = new Headers(init.headers);
-    if (cookie) headers.set('cookie', cookie);
+    if (cookie && !headers.has('cookie')) headers.set('cookie', cookie);
     let body = init.body;
     if (init.json !== undefined) {
       headers.set('content-type', 'application/json');
       body = JSON.stringify(init.json);
     }
-    if (init.method && init.method !== 'GET') headers.set('origin', ORIGIN);
-    const response = await app.request(`${ORIGIN}${path}`, { ...init, headers, body }, { deps });
+    if (init.method && init.method !== 'GET' && !headers.has('origin')) headers.set('origin', origin);
+    const response = await app.request(`${origin}${path}`, { ...init, headers, body }, { deps });
     const text = await response.text();
-    return { status: response.status, body: text ? JSON.parse(text) : null };
+    let parsed: unknown = null;
+    try {
+      parsed = text ? JSON.parse(text) : null;
+    } catch {
+      parsed = text;
+    }
+    return { status: response.status, body: parsed, headers: response.headers };
   };
 }

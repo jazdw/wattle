@@ -1,5 +1,5 @@
 /**
- * Rasterises public/favicon.svg into the PWA PNG icons.
+ * Rasterises public/logo.svg into the PWA / home-screen PNG icons.
  * Run with: npm run icons
  */
 import { readFileSync, writeFileSync, mkdirSync } from 'node:fs';
@@ -8,15 +8,18 @@ import { fileURLToPath } from 'node:url';
 import { Resvg } from '@resvg/resvg-js';
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
-const svg = readFileSync(resolve(root, 'public/favicon.svg'), 'utf8');
+const svg = readFileSync(resolve(root, 'public/logo.svg'), 'utf8');
 const outDir = resolve(root, 'public/icons');
 mkdirSync(outDir, { recursive: true });
 
 // Maskable icons need the artwork inside the central 80% safe zone, on a
 // full-bleed background.
+// full-bleed background. scripts/logo.mjs marks the artwork with comments.
+if (!svg.includes('<!--art-->')) throw new Error('favicon.svg lacks <!--art--> markers; regenerate it with scripts/logo.mjs');
 const maskable = svg
-  .replace('<rect width="64" height="64" rx="14" fill="#1F3F37"/>', '<rect width="64" height="64" fill="#1F3F37"/><g transform="translate(6.4 6.4) scale(0.8)">')
-  .replace('</svg>', '</g></svg>');
+  .replaceAll(' rx="14"', '')
+  .replace('<!--art-->', '<g transform="translate(6.4 6.4) scale(0.8)">')
+  .replace('<!--/art-->', '</g>');
 
 const outputs = [
   ['icon-192.png', svg, 192],
