@@ -6,7 +6,8 @@ import { CATEGORIES, SIZES, STYLES } from './taxonomy';
 const isoDate = z.string().regex(/^\d{4}-\d{2}-\d{2}$/, 'Expected YYYY-MM-DD');
 const category = z.enum(CATEGORIES);
 const weights = <T extends readonly [string, ...string[]]>(keys: T) =>
-  z.partialRecord(z.enum(keys), z.number().min(0).max(1));
+  // Any non-negative numbers; the server normalises them to sum to 1.
+  z.partialRecord(z.enum(keys), z.number().min(0).max(1e6));
 
 export const classificationSchema = z.object({
   categories: weights(CATEGORIES),

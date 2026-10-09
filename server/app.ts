@@ -36,12 +36,6 @@ export function createApp(options: { assets?: (request: Request) => Promise<Resp
 
   app.get('/api/health', (c) => c.json({ ok: true, name: 'wattle' }));
 
-  app.route('/api/auth', authRoutes);
-  app.route('/api/plaid', plaidRoutes);
-  app.route('/api/connections', connectionRoutes);
-  app.route('/api/accounts', accountRoutes);
-  app.route('/api', portfolioRoutes);
-
   /** Run the daily job on demand (Bearer ADMIN_TOKEN). */
   app.post('/api/admin/run-daily', async (c) => {
     const token = c.env.deps.config.adminToken;
@@ -49,6 +43,13 @@ export function createApp(options: { assets?: (request: Request) => Promise<Resp
     if (!token || !safeEqual(header, `Bearer ${token}`)) return c.json({ error: 'forbidden' }, 403);
     return c.json(await runDaily(c.env.deps));
   });
+
+  app.route('/api/auth', authRoutes);
+  app.route('/api/plaid', plaidRoutes);
+  app.route('/api/connections', connectionRoutes);
+  app.route('/api/accounts', accountRoutes);
+  // Mounted last: its auth middleware covers every remaining /api path.
+  app.route('/api', portfolioRoutes);
 
   app.notFound((c) => {
     if (!c.req.path.startsWith('/api/') && options.assets) return options.assets(c.req.raw);

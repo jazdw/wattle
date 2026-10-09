@@ -19,7 +19,7 @@ const NAV = [
 ];
 
 export function Logo({ className }: { className?: string }) {
-  return <img src="/favicon.svg" alt="" className={cn('size-8 rounded-lg', className)} />;
+  return <img src="/logo.svg" alt="" className={cn('size-8 rounded-lg', className)} />;
 }
 
 export function Layout() {

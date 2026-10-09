@@ -168,6 +168,13 @@ async function holdingSeries(
       ),
     );
   const bySecurity = new Map<string, HistorySeries>();
+  // Days with any holding row: a security absent on such a day was not held
+  // (e.g. sold), so it reads as zero rather than a gap.
+  const covered = new Set<number>();
+  for (const row of rows) {
+    const position = index.get(row.date);
+    if (position !== undefined) covered.add(position);
+  }
   for (const row of rows) {
     const position = index.get(row.date);
     if (position === undefined) continue;
@@ -178,6 +185,9 @@ async function holdingSeries(
     }
     entry.values[position] = (entry.values[position] ?? 0) + convert(row.value, row.currency, row.date);
     if (row.estimated) estimated[position] = true;
+  }
+  for (const series of bySecurity.values()) {
+    for (const position of covered) series.values[position] ??= 0;
   }
   return [...bySecurity.values()].sort((a, b) => (b.values.at(-1) ?? 0) - (a.values.at(-1) ?? 0));
 }
