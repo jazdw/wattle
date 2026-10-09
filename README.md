@@ -1,4 +1,4 @@
-# Wattle
+# Wattle Wealth
 
 A private net-worth and investment tracker for a household. It pulls balances and holdings from Plaid, and you can add manual accounts for anything Plaid can't reach (Australian banks, super, property). It shows:
 
@@ -109,7 +109,7 @@ The redirect URI is built from the request's origin, so no hostname is configure
    - **GitHub Actions** (`.github/workflows/deploy.yml`): every push to `main` typechecks, lints and tests. Once the `CLOUDFLARE_API_TOKEN`, `CLOUDFLARE_ACCOUNT_ID` and `CUSTOM_DOMAIN` repository secrets are set, it also applies D1 migrations and runs `wrangler deploy --domain $CUSTOM_DOMAIN`. Until then the deploy steps are skipped.
    - **By hand:** `npm run db:migrate:remote && npm run deploy -- --domain wattle.example.com`.
 
-**Workers plan:** use Workers Paid ($5/month). The free plan allows 10 ms of CPU and 50 outbound requests per invocation, and Wattle goes past that. Measured on Node, including SQLite's share:
+**Workers plan:** use Workers Paid ($5/month). The free plan allows 10 ms of CPU and 50 outbound requests per invocation, and Wattle Wealth goes past that. Measured on Node, including SQLite's share:
 - a routine sync takes about 20 ms
 - a 2-year history chart by category takes about 80 ms
 - a 2-year backfill takes about 250 ms per account
@@ -117,22 +117,22 @@ The redirect URI is built from the request's origin, so no hostname is configure
 Re-run the daily job by hand: `curl -X POST -H "Authorization: Bearer $ADMIN_TOKEN" https://<domain>/api/admin/run-daily`.
 
 ### Cloudflare Access (Zero Trust), recommended
-A second lock in front of the app. Cloudflare's edge only lets your Google accounts reach the domain at all. Wattle's own Google sign-in still runs behind it (it decides which household member you are). It's free for up to 50 users. Requests from the daily cron never pass through Access, so it's unaffected.
+A second lock in front of the app. Cloudflare's edge only lets your Google accounts reach the domain at all. Wattle Wealth's own Google sign-in still runs behind it (it decides which household member you are). It's free for up to 50 users. Requests from the daily cron never pass through Access, so it's unaffected.
 
 1. **Team name:** in Cloudflare → **Zero Trust → Settings → Team name and domain**, note `<team>.cloudflareaccess.com`.
-2. **Google OAuth client for Access** (separate from Wattle's): Google Cloud Console → **APIs & Services → Credentials → Create OAuth client → Web application**.
+2. **Google OAuth client for Access** (separate from Wattle Wealth's): Google Cloud Console → **APIs & Services → Credentials → Create OAuth client → Web application**.
    - Authorized JavaScript origin: `https://<team>.cloudflareaccess.com`
    - Authorized redirect URI: `https://<team>.cloudflareaccess.com/cdn-cgi/access/callback`
 3. **Login method:** Zero Trust → **Integrations → Identity providers → Add new → Google**. Paste the client ID (as **App ID**) and the secret, save, then **Test**.
 4. **Applications:** Zero Trust → **Access controls → Applications → Create new application → Self-hosted**.
    - **App:** hostname = your domain, no path. Policy **Allow**, Include → **Emails** → your addresses. Login method Google with **Instant authentication** on. Session duration around 7–30 days.
-   - **Plaid webhook:** hostname = your domain, path = `api/plaid/webhook`. Policy **Bypass**, Include → **Everyone**. Plaid can't sign in, and Wattle already verifies Plaid's signature on every webhook.
+   - **Plaid webhook:** hostname = your domain, path = `api/plaid/webhook`. Policy **Bypass**, Include → **Everyone**. Plaid can't sign in, and Wattle Wealth already verifies Plaid's signature on every webhook.
 5. **Check:**
-   - A private window should go through Google via `cloudflareaccess.com` before reaching Wattle's login.
+   - A private window should go through Google via `cloudflareaccess.com` before reaching Wattle Wealth's login.
    - A Google account that isn't listed should be blocked by Cloudflare.
-   - `curl -i -X POST https://<domain>/api/plaid/webhook` should return Wattle's `401 {"error":"invalid signature"}`. A redirect to `cloudflareaccess.com` means the bypass isn't applying.
+   - `curl -i -X POST https://<domain>/api/plaid/webhook` should return Wattle Wealth's `401 {"error":"invalid signature"}`. A redirect to `cloudflareaccess.com` means the bypass isn't applying.
 
-Not built yet: Wattle could also verify the `Cf-Access-Jwt-Assertion` header Access adds to every request, so it would reject anything that didn't come through Access even if the policy were misconfigured.
+Not built yet: Wattle Wealth could also verify the `Cf-Access-Jwt-Assertion` header Access adds to every request, so it would reject anything that didn't come through Access even if the policy were misconfigured.
 
 ### Running on Node instead
 
@@ -144,7 +144,7 @@ DATABASE_URL=file:wattle.db PORT=8787 GOOGLE_CLIENT_ID=… TOKEN_ENC_KEY=… npm
 ## Future improvements
 
 ### Investments
-- **Returns excluding contributions.** Today the Growth page includes money added and withdrawn. Wattle already stores investment transactions, so it can compute time-weighted return (performance alone) and money-weighted return (your actual experience), plus dividends as total return.
+- **Returns excluding contributions.** Today the Growth page includes money added and withdrawn. Wattle Wealth already stores investment transactions, so it can compute time-weighted return (performance alone) and money-weighted return (your actual experience), plus dividends as total return.
 - **Benchmarks.** Compare the portfolio's return with VT, the S&P 500 or a 60/40 mix over the same period.
 - **Risk checks ("X-ray").** Simple rules with pass/warn results. For example:
   - too much in one account or one stock
@@ -155,7 +155,7 @@ DATABASE_URL=file:wattle.db PORT=8787 GOOGLE_CLIENT_ID=… TOKEN_ENC_KEY=… npm
 - **Fund overlap.** The individual stocks shared across your funds (VTI, the S&P 500 and target-date funds overlap heavily). Needs fund-holdings data; check sources first.
 - **Dividends and fees.** A dividend timeline and fees paid per year, from investment transactions.
 - **Projections.** A FIRE / retirement projection from current balances, contribution rate and an assumed return range.
-- **Privacy mode.** One click blurs every amount, for looking at Wattle with others around.
+- **Privacy mode.** One click blurs every amount, for looking at Wattle Wealth with others around.
 
 ### Transactions phase (checking and credit cards)
 - **Sync** with Plaid `/transactions/sync`, fetching on demand and daily rather than continuously, which keeps Plaid usage down.
