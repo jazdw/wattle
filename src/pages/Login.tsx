@@ -8,7 +8,7 @@ import { Alert } from '../components/ui/misc';
 import { useAuth } from '../hooks/useAuth';
 
 const MESSAGES: Record<string, string> = {
-  not_allowed: 'That Google account is not allowed to use Wattle.',
+  not_allowed: 'That Google account is not allowed to use Wattle Wealth.',
   invalid_state: 'Your sign-in session expired. Please try again.',
   token_error: 'Google rejected the sign-in. Please try again.',
   profile_error: 'Could not read your Google profile. Please try again.',
@@ -44,7 +44,7 @@ export function Login() {
     <div className="grid min-h-screen place-items-center bg-eucalypt px-4">
       <div className="w-full max-w-sm rounded-xl border bg-card p-8 text-center shadow-lg">
         <Logo className="mx-auto mb-4 size-16 rounded-2xl" />
-        <h1 className="text-2xl font-semibold">Wattle</h1>
+        <h1 className="text-2xl font-semibold">Wattle Wealth</h1>
         <p className="mb-6 mt-1 text-sm text-muted-foreground">Our household's net worth and investments, privately.</p>
         {error && (
           <div className="mb-4">

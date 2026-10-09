@@ -122,7 +122,7 @@ export function createPlaidClient(config: PlaidConfig): PlaidApi {
 
     async createLinkToken(options) {
       const body: Record<string, unknown> = {
-        client_name: 'Wattle',
+        client_name: 'Wattle Wealth',
         language: 'en',
         country_codes: ['US', 'CA'],
         user: { client_user_id: options.clientUserId },
