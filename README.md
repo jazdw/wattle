@@ -1,4 +1,8 @@
-# Wattle Wealth
+<p align="center">
+  <img src="public/logo.svg" alt="Wattle Wealth logo: a sprig of golden wattle" width="128" height="128">
+</p>
+
+<h1 align="center">Wattle Wealth</h1>
 
 A private net-worth and investment tracker for a household. It pulls balances and holdings from Plaid, and you can add manual accounts for anything Plaid can't reach (Australian banks, super, property). It shows:
 
