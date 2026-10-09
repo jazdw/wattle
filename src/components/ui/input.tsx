@@ -29,12 +29,13 @@ export function Label({ className, ...props }: ComponentProps<'label'>) {
   return <label className={cn('text-sm font-medium leading-none', className)} {...props} />;
 }
 
+/** A labelled control: wrapping it in <label> ties the text to the input for screen readers. */
 export function Field({ label, children, hint }: { label: string; children: React.ReactNode; hint?: string }) {
   return (
-    <div className="flex flex-col gap-1.5">
-      <Label>{label}</Label>
+    <label className="flex flex-col gap-1.5">
+      <span className="text-sm font-medium leading-none">{label}</span>
       {children}
-      {hint && <p className="text-xs text-muted-foreground">{hint}</p>}
-    </div>
+      {hint && <span className="text-xs text-muted-foreground">{hint}</span>}
+    </label>
   );
 }

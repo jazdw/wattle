@@ -65,13 +65,18 @@ node scripts/seed-demo.mjs            # optional: demo accounts + a year of hist
 
 On localhost the login page offers **dev sign-in** for the emails in `DEV_LOGIN_EMAILS`. It's disabled on any public hostname. Plaid sandbox logins: `user_good` / `pass_good`.
 
-Checks (CI runs the same):
+Checks (CI runs the same, except end-to-end tests):
 
 ```sh
 npm run typecheck && npm run lint && npm run test:coverage
 ```
 
-Tests run the real app on in-memory SQLite with fake Plaid, Tiingo, Finnhub and FX providers (`test/fakes.ts`), and enforce D1's 100-parameter limit. Coverage thresholds cover server, shared and client logic. React components are checked by rendering the app.
+Tests:
+
+| Command | What | Where |
+|---|---|---|
+| `npm test` | **Vitest**, two projects. `node`: the real API on in-memory SQLite with fake Plaid, Tiingo, Finnhub and FX providers (`test/fakes.ts`), enforcing D1's 100-parameter limit. `dom`: React pages and components in jsdom (React Testing Library) with the API served by MSW (`src/test/`). | local + CI (with coverage thresholds) |
+| `npm run test:e2e` | **Playwright** in the installed Google Chrome. Builds the app, serves it with the Node entry on a throwaway SQLite database, seeds demo data, and clicks through the main flows (`e2e/`). | local only |
 
 The logo is generated: `node scripts/logo.mjs && npm run icons`. This writes `public/logo.svg` (detailed, for app icons) and `public/favicon.svg` (simplified, to stay legible in a browser tab).
 

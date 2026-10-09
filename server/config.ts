@@ -15,6 +15,8 @@ export interface RawEnv {
   PLAID_ENV?: string;
   TIINGO_API_KEY?: string;
   FINNHUB_API_KEY?: string;
+  /** 'none' disables FX fetching (offline tests); default Frankfurter. */
+  FX_PROVIDER?: string;
 }
 
 function list(value: string | undefined): string[] {
@@ -50,7 +52,7 @@ export function depsFromEnv(env: RawEnv, db: Db, background: Deps['background'])
         : null,
     prices: env.TIINGO_API_KEY ? createTiingo(env.TIINGO_API_KEY) : null,
     quotes: env.FINNHUB_API_KEY ? createFinnhub(env.FINNHUB_API_KEY) : null,
-    fx: createFrankfurter(),
+    fx: env.FX_PROVIDER === 'none' ? null : createFrankfurter(),
     now: () => new Date(),
     background,
   };

@@ -13,6 +13,7 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "test:coverage": "vitest run --coverage",
+    "test:e2e": "playwright test",
     "cf-typegen": "wrangler types",
     "db:generate": "drizzle-kit generate",
     "db:create": "wrangler d1 create wattle",
@@ -43,14 +44,21 @@
     "@cloudflare/workers-types": "^5.20261009.1",
     "@hono/node-server": "^2.1.4",
     "@libsql/client": "^0.18.0",
+    "@playwright/test": "^1.64.0",
     "@resvg/resvg-js": "^2.6.2",
     "@tailwindcss/vite": "^4.3.3",
+    "@testing-library/dom": "^10.4.2",
+    "@testing-library/jest-dom": "^6.9.1",
+    "@testing-library/react": "^16.3.3",
+    "@testing-library/user-event": "^14.6.7",
     "@types/node": "^24.19.0",
     "@types/react": "^19.2.18",
     "@types/react-dom": "^19.2.7",
     "@vitejs/plugin-react": "^6.1.1",
     "@vitest/coverage-v8": "^5.0.3",
     "drizzle-kit": "^0.31.11",
+    "jsdom": "^27.4.0",
+    "msw": "^2.15.0",
     "oxlint": "^1.87.0",
     "plaid": "^48.0.0",
     "tailwindcss": "^4.3.3",
@@ -67,6 +75,7 @@
     "esbuild@0.18.20": true,
     "esbuild@0.25.12": true,
     "esbuild@0.28.2": true,
-    "fsevents": false
+    "fsevents": false,
+    "msw": false
   }
 }
