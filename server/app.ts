@@ -58,7 +58,7 @@ export function createApp(options: { assets?: (request: Request) => Promise<Resp
 
   app.onError((error, c) => {
     if (error instanceof HttpError) return c.json({ error: error.message }, error.status);
-    console.error('Unhandled error', error);
+    console.error('Unhandled error', error instanceof Error ? (error.stack ?? error.message) : error);
     return c.json({ error: 'Internal server error.' }, 500);
   });
 

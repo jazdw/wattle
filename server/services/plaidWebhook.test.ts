@@ -35,3 +35,43 @@ describe('verifyPlaidWebhook', () => {
     expect(await verifyPlaidWebhook(plaid, undefined, body, now)).toBe(false);
   });
 });
+
+describe('verification key cache', () => {
+  it('re-fetches keys after an hour and rejects retired keys', async () => {
+    const { sign, plaid } = await setup();
+    let calls = 0;
+    let retired = false;
+    const counting = {
+      getWebhookVerificationKey: async () => {
+        calls += 1;
+        const key = (await plaid.getWebhookVerificationKey()) as Record<string, unknown>;
+        return { ...key, expired_at: retired ? 1 : null } as never;
+      },
+    };
+    const body = '{"webhook_type":"HOLDINGS"}';
+    const check = async (date: Date) => {
+      const jwt = await sign({ iat: date.getTime() / 1000, request_body_sha256: await sha256Hex(body) }, 'rotating');
+      return verifyPlaidWebhook(counting, jwt, body, date);
+    };
+    const t0 = new Date('2026-10-09T00:00:00Z');
+    expect(await check(t0)).toBe(true);
+    expect(await check(new Date(t0.getTime() + 30 * 60_000))).toBe(true);
+    expect(calls).toBe(1); // cached within the hour
+
+    retired = true;
+    expect(await check(new Date(t0.getTime() + 61 * 60_000))).toBe(false);
+    expect(calls).toBe(2);
+  });
+
+  it('rejects webhooks when the key lookup fails', async () => {
+    const { sign } = await setup();
+    const failing = {
+      getWebhookVerificationKey: async () => {
+        throw new Error('network');
+      },
+    };
+    const now = new Date('2026-10-09T00:00:00Z');
+    const jwt = await sign({ iat: now.getTime() / 1000, request_body_sha256: await sha256Hex('{}') }, 'unknown-kid');
+    expect(await verifyPlaidWebhook(failing, jwt, '{}', now)).toBe(false);
+  });
+});
