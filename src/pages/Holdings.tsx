@@ -40,8 +40,10 @@ export function Holdings() {
       .filter((holding) => !needle || `${holding.ticker ?? ''} ${holding.name ?? ''}`.toLowerCase().includes(needle))
       .map((holding) => {
         const quote = holding.ticker ? quoteByTicker.get(holding.ticker) : undefined;
-        // Day change in display currency, scaled from the native quote.
-        const scale = holding.price ? holding.value / (holding.quantity * holding.price) : 1;
+        // Quotes are native-currency dollars; `value` is display-currency cents.
+        // `scale` is the FX factor between them.
+        const nativeMinor = holding.quantity * (holding.price ?? 0) * 100;
+        const scale = nativeMinor ? holding.value / nativeMinor : 1;
         const dayChange = quote ? Math.round(holding.quantity * quote.change * 100 * scale) : null;
         const liveValue = quote ? Math.round(holding.quantity * quote.price * 100 * scale) : holding.value;
         return { holding, quote, dayChange, liveValue, share: total ? holding.value / total : 0 };

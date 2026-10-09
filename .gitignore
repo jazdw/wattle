@@ -34,3 +34,8 @@ dist-ssr
 *.db
 *.db-journal
 coverage
+
+# Playwright
+e2e/.data
+e2e/.results
+e2e/.report
