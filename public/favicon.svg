@@ -1,0 +1,34 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-label="Wattle">
+  <title>Wattle</title>
+  <defs>
+    <radialGradient id="puff" cx="40%" cy="35%" r="65%">
+      <stop offset="0" stop-color="#FFE57A"/>
+      <stop offset="0.55" stop-color="#F2B705"/>
+      <stop offset="1" stop-color="#C98A00"/>
+    </radialGradient>
+    <symbol id="ball" viewBox="-6 -6 12 12">
+      <circle r="4.4" fill="url(#puff)"/>
+      <!-- fluffy stamens -->
+      <circle r="4.9" fill="none" stroke="#F2B705" stroke-width="1.6" stroke-dasharray="0.5 1.1" stroke-linecap="round"/>
+    </symbol>
+  </defs>
+  <rect width="64" height="64" rx="14" fill="#1F3F37"/>
+  <!-- stem -->
+  <path d="M14 54 C 22 44, 30 34, 50 14" fill="none" stroke="#6B8F5E" stroke-width="2.2" stroke-linecap="round"/>
+  <path d="M27 39 C 31 37, 37 37, 44 39" fill="none" stroke="#6B8F5E" stroke-width="1.6" stroke-linecap="round"/>
+  <path d="M33 31 C 31 26, 30 21, 31 15" fill="none" stroke="#6B8F5E" stroke-width="1.6" stroke-linecap="round"/>
+  <!-- sickle-shaped phyllodes -->
+  <path d="M19 49 C 12 44, 9 37, 10 30 C 14 37, 17 42, 21 46 Z" fill="#4F7A5A"/>
+  <path d="M24 43 C 30 47, 38 49, 46 47 C 39 45, 32 43, 26 41 Z" fill="#5E8C66"/>
+  <path d="M40 23 C 45 25, 52 29, 55 35 C 50 31, 45 28, 39 26 Z" fill="#4F7A5A"/>
+  <!-- golden puffballs -->
+  <use href="#ball" x="40" y="31" width="13" height="13"/>
+  <use href="#ball" x="25" y="9" width="13" height="13"/>
+  <use href="#ball" x="44" y="6" width="14" height="14"/>
+  <use href="#ball" x="34" y="18" width="12" height="12"/>
+  <use href="#ball" x="16" y="20" width="12" height="12"/>
+  <use href="#ball" x="20" y="31" width="11" height="11"/>
+  <use href="#ball" x="50" y="22" width="8" height="8"/>
+  <use href="#ball" x="11" y="15" width="7" height="7"/>
+  <use href="#ball" x="36" y="7" width="7" height="7"/>
+</svg>

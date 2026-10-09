@@ -1,0 +1,54 @@
+/**
+ * Cloudflare Worker configuration for Wattle.
+ *
+ * `database_id` is the production D1 database (not a secret). Create it with
+ * `npm run db:create` and paste the id below.
+ *
+ * Secrets are NOT stored here. Set them with `npx wrangler secret put <NAME>`:
+ *   GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET
+ *   TOKEN_ENC_KEY          (base64 32 bytes: `openssl rand -base64 32`)
+ *   PLAID_CLIENT_ID, PLAID_SECRET
+ *   TIINGO_API_KEY, FINNHUB_API_KEY
+ *
+ * Who can sign in is managed in the `allowed_emails` D1 table (see README).
+ */
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "wattle",
+  "main": "worker/index.ts",
+  "compatibility_date": "2026-09-26",
+  // Served only from the custom domain, which is kept out of the repo: CI
+  // deploys with `--domain` from the CUSTOM_DOMAIN Actions secret (see
+  // .github/workflows/deploy.yml). Manually: npm run deploy -- --domain <host>
+  "workers_dev": false,
+  "preview_urls": false,
+  "assets": {
+    "not_found_handling": "single-page-application",
+    "binding": "ASSETS",
+    // In SPA mode, browser navigations are answered with index.html before
+    // the Worker runs. API routes that the browser navigates to (the Google
+    // OAuth start and callback) must always reach the Worker.
+    "run_worker_first": ["/api/*"]
+  },
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "wattle",
+      "database_id": "00000000-0000-0000-0000-000000000000",
+      "migrations_dir": "migrations"
+    }
+  ],
+  // Daily snapshot: 02:00 UTC is after the US close (22:00 New York in
+  // summer, 21:00 in winter), once end-of-day prices are published.
+  "triggers": {
+    "crons": ["0 2 * * *"]
+  },
+  "vars": {
+    "ALLOWED_EMAILS": "",
+    "PLAID_ENV": "sandbox"
+  },
+  "observability": {
+    "enabled": true
+  },
+  "upload_source_maps": true
+}
