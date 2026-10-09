@@ -8,7 +8,10 @@ import { base64ToBytes, safeEqual, sha256Hex } from '../lib/encoding';
 import type { PlaidApi } from '../adapters/plaid';
 
 const MAX_AGE_SECONDS = 5 * 60;
-const keyCache = new Map<string, JsonWebKey & { expired_at?: number | null }>();
+/** Re-check keys hourly so a key Plaid retires stops being trusted. */
+const KEY_TTL_MS = 60 * 60 * 1000;
+type PlaidJwk = JsonWebKey & { expired_at?: number | null };
+const keyCache = new Map<string, { key: PlaidJwk; fetchedAt: number }>();
 
 function decodeJson<T>(segment: string): T {
   return JSON.parse(new TextDecoder().decode(base64ToBytes(segment))) as T;
@@ -35,12 +38,15 @@ export async function verifyPlaidWebhook(
   }
   if (header.alg !== 'ES256' || !header.kid) return false;
 
-  let jwk = keyCache.get(header.kid);
+  const cached = keyCache.get(header.kid);
+  let jwk = cached && now.getTime() - cached.fetchedAt < KEY_TTL_MS ? cached.key : null;
   if (!jwk) {
-    jwk = (await plaid.getWebhookVerificationKey(header.kid)) as unknown as JsonWebKey & {
-      expired_at?: number | null;
-    };
-    keyCache.set(header.kid, jwk);
+    try {
+      jwk = (await plaid.getWebhookVerificationKey(header.kid)) as unknown as PlaidJwk;
+    } catch {
+      return false;
+    }
+    keyCache.set(header.kid, { key: jwk, fetchedAt: now.getTime() });
   }
   if (jwk.expired_at) return false;
 

@@ -120,13 +120,10 @@ DATABASE_URL=file:wattle.db PORT=8787 GOOGLE_CLIENT_ID=… TOKEN_ENC_KEY=… npm
 
 ## Future improvements
 
-Ideas collected from a Reddit thread of people building similar apps, and from the open-source
-[Ghostfolio](https://github.com/ghostfolio/ghostfolio) and [Sure](https://github.com/we-promise/sure) projects.
-
 ### Investments
-- **Returns excluding contributions.** Today the Growth page includes money added and withdrawn. Wattle already stores investment transactions, so it can compute time-weighted return (performance alone) and money-weighted return (your actual experience), plus dividends as total return. *(Ghostfolio)*
+- **Returns excluding contributions.** Today the Growth page includes money added and withdrawn. Wattle already stores investment transactions, so it can compute time-weighted return (performance alone) and money-weighted return (your actual experience), plus dividends as total return.
 - **Benchmarks.** Compare the portfolio's return with VT, the S&P 500 or a 60/40 mix over the same period.
-- **Risk checks ("X-ray").** Simple rules with pass/warn results. *(Ghostfolio)* For example:
+- **Risk checks ("X-ray").** Simple rules with pass/warn results. For example:
   - too much in one account or one stock
   - USD/AUD currency exposure
   - region concentration
@@ -135,13 +132,13 @@ Ideas collected from a Reddit thread of people building similar apps, and from t
 - **Fund overlap.** The individual stocks shared across your funds (VTI, the S&P 500 and target-date funds overlap heavily). Needs fund-holdings data; check sources first.
 - **Dividends and fees.** A dividend timeline and fees paid per year, from investment transactions.
 - **Projections.** A FIRE / retirement projection from current balances, contribution rate and an assumed return range.
-- **Privacy mode.** One click blurs every amount, for looking at Wattle with others around. *(Ghostfolio's "Zen mode")*
+- **Privacy mode.** One click blurs every amount, for looking at Wattle with others around.
 
 ### Transactions phase (checking and credit cards)
 - **Sync** with Plaid `/transactions/sync`, fetching on demand and daily rather than continuously, which keeps Plaid usage down.
 - **Categories, merchants and tags**, with rules that categorise automatically and remember manual corrections. Only uncategorised transactions go to a classifier, and any single transaction can override the merchant's usual category (e.g. tyres bought at Costco are Auto, not Shopping).
 - **Classification model.** A small decision/classification model instead of a chat LLM, e.g. TypeSafe's [Jev](https://openrouter.ai/typesafe/jev-1.13): it returns typed choices with probabilities, so anything below a confidence threshold goes to a review queue. Could also suggest fund classifications (category, size, style) for funds without a seeded profile. It needs only merchant or fund names and amounts, never account details. Vendor-reported accuracy and cost are unverified.
-- **Transfers between our own accounts** (checking → brokerage, card payments) detected and linked so they aren't counted as income or spending. *(Sure)*
+- **Transfers between our own accounts** (checking → brokerage, card payments) detected and linked so they aren't counted as income or spending.
 - **Edits ripple through.** Editing or recategorising an old transaction updates every derived view (cash flow, budgets, balances).
 - **Cash flow and budgets.** Monthly income vs spending (a Sankey diagram is popular), category budgets with remaining amounts, and trends.
 - **Recurring transactions and a planner.** Upcoming bills and income, projected cash flow, and the ability to drop in a planned transaction and see its effect.

@@ -23,7 +23,13 @@ const client = createClient({ url: process.env.DATABASE_URL ?? 'file:wattle.db' 
 const db = drizzle(client, { schema });
 await migrate(db, { migrationsFolder: 'migrations' });
 
-const deps = depsFromEnv(process.env, db as unknown as Db, (work) => {
+// On Node the request host comes from the client's Host header, so the
+// "private host" check behind dev sign-in can be spoofed. Require an explicit
+// opt-in, and never set it on a reachable server.
+const env = { ...process.env };
+if (env.ALLOW_DEV_LOGIN !== '1') delete env.DEV_LOGIN_EMAILS;
+
+const deps = depsFromEnv(env, db as unknown as Db, (work) => {
   void work.catch((error) => console.error('Background work failed', error));
 });
 

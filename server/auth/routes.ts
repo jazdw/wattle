@@ -122,12 +122,15 @@ async function ensureMembership(deps: Deps, userId: string, allowance: Allowance
   let householdId = allowance.householdId;
   let role: 'owner' | 'member' = 'member';
   if (!householdId) {
-    const [first] = await deps.db
+    // Only safe while there is a single household: with several, an
+    // allow-list entry must name one (npm run allow -- add … --household <id>).
+    const existing = await deps.db
       .select({ id: households.id })
       .from(households)
       .orderBy(asc(households.createdAt))
-      .limit(1);
-    householdId = first?.id ?? null;
+      .limit(2);
+    if (existing.length > 1) throw new AmbiguousHouseholdError();
+    householdId = existing[0]?.id ?? null;
   }
   if (!householdId) {
     householdId = crypto.randomUUID();
@@ -136,6 +139,12 @@ async function ensureMembership(deps: Deps, userId: string, allowance: Allowance
   }
   await deps.db.insert(householdMembers).values({ householdId, userId, role, createdAt: now });
   return householdId;
+}
+
+class AmbiguousHouseholdError extends Error {
+  constructor() {
+    super('Allow-list entry must name a household when several exist.');
+  }
 }
 
 interface UserProfile {
@@ -287,7 +296,8 @@ authRoutes.get('/google/callback', async (c) => {
     );
     return c.redirect('/');
   } catch (error) {
-    console.error('OAuth callback failed', error);
+    if (error instanceof AmbiguousHouseholdError) return c.redirect('/login?auth=not_allowed');
+    console.error('OAuth callback failed', error instanceof Error ? error.message : error);
     return c.redirect('/login?auth=oauth_failed');
   }
 });
