@@ -1,0 +1,36 @@
+# Local development secrets for Wrangler.
+# Copy this file to `.dev.vars` and fill in real values. Never commit `.dev.vars`.
+#
+#   cp .dev.vars.example .dev.vars
+#
+# For deployed environments set these with `wrangler secret put <NAME>`.
+
+# Google OAuth 2.0 credentials (https://console.cloud.google.com/apis/credentials).
+# Authorised redirect URIs:
+#   http://localhost:5173/api/auth/google/callback
+#   https://<your-domain>/api/auth/google/callback
+GOOGLE_CLIENT_ID=""
+GOOGLE_CLIENT_SECRET=""
+
+# Comma-separated Google account emails allowed to sign in (they join the
+# first household). Production uses the allowed_emails table (npm run allow).
+ALLOWED_EMAILS="you@example.com,partner@example.com"
+
+# LOCAL DEVELOPMENT ONLY: sign in as these without Google (localhost/LAN only).
+DEV_LOGIN_EMAILS="you@example.com,partner@example.com"
+
+# 32-byte base64 key that encrypts Plaid access tokens at rest:
+#   openssl rand -base64 32
+TOKEN_ENC_KEY=""
+
+# Plaid (https://dashboard.plaid.com/developers/keys). Use the sandbox secret locally.
+PLAID_CLIENT_ID=""
+PLAID_SECRET=""
+PLAID_ENV="sandbox"
+
+# Market data (free tiers): https://www.tiingo.com, https://finnhub.io
+TIINGO_API_KEY=""
+FINNHUB_API_KEY=""
+
+# Bearer token for POST /api/admin/run-daily (manual reruns of the daily job).
+ADMIN_TOKEN=""
