@@ -12,7 +12,7 @@ describe('Login page', () => {
     server.use(signedOut());
     renderPage(<Login />, { route: '/login?auth=not_allowed' });
     expect(await screen.findByRole('link', { name: 'Sign in with Google' })).toHaveAttribute('href', '/api/auth/google');
-    expect(screen.getByText(/not allowed to use Wattle/)).toBeInTheDocument();
+    expect(screen.getByText(/not allowed to use Wattle Wealth/)).toBeInTheDocument();
   });
 
   it('lists dev accounts in development and signs in with one', async () => {

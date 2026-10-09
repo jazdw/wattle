@@ -73,7 +73,7 @@ function phyllode(base, tip, width, bend) {
 }
 
 const detailed = {
-  title: 'Wattle',
+  title: 'Wattle Wealth',
   detail: 1,
   leaves: [
     [[22, 45], [3, 52], 5.2, -4],
@@ -104,7 +104,7 @@ const detailed = {
 
 /** Browser-tab version: four big heads that stay legible at 16px. */
 const simple = {
-  title: 'Wattle',
+  title: 'Wattle Wealth',
   detail: 0,
   leaves: [[[24, 44], [4, 54], 6.5, -4]],
   stem: 'M12 56 C 22 44, 32 32, 52 12',
@@ -118,7 +118,7 @@ const simple = {
 };
 
 function render({ leaves, stem, stalks, heads, detail, title }) {
-  return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-label="Wattle">
+  return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-label="Wattle Wealth">
 <title>${title}</title>
 <defs>
 <linearGradient id="tile" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#25493f"/><stop offset="1" stop-color="#142c25"/></linearGradient>

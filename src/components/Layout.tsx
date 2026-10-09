@@ -35,7 +35,7 @@ export function Layout() {
       <aside className="sticky top-0 z-30 flex items-center gap-2 border-b bg-card/90 px-3 py-2 backdrop-blur md:h-screen md:flex-col md:items-stretch md:border-b-0 md:border-r md:px-3 md:py-4">
         <div className="flex items-center gap-2 md:mb-4 md:px-2">
           <Logo />
-          <span className="text-lg font-semibold tracking-tight">Wattle</span>
+          <span className="text-lg font-semibold tracking-tight">Wattle Wealth</span>
         </div>
         <nav className="flex flex-1 gap-1 overflow-x-auto md:flex-col md:overflow-visible">
           {NAV.map(({ to, label, icon: Icon, end }) => (
