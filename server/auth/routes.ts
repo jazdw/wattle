@@ -1,7 +1,7 @@
 /**
- * Google OAuth sign-in (authorization-code flow, no library) and DB-backed
- * sessions. Ported from WingPoint, with households: every user belongs to one
- * household, chosen by the allow-list entry they signed in with.
+ * Google sign-in routes (the OAuth flow itself is in ./google) and DB-backed
+ * sessions. Every user belongs to one household, chosen by the allow-list
+ * entry they signed in with.
  */
 import { and, asc, eq, gt, sql } from 'drizzle-orm';
 import { Hono } from 'hono';
@@ -101,9 +101,7 @@ export async function findAllowance(deps: Deps, email: string): Promise<Allowanc
     .from(allowedEmails)
     .where(eq(sql`lower(${allowedEmails.email})`, normalized))
     .limit(1);
-  if (row) return { householdId: row.householdId };
-  if (deps.config.allowedEmails.includes(normalized)) return { householdId: null };
-  return null;
+  return row ? { householdId: row.householdId } : null;
 }
 
 /**

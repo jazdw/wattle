@@ -38,9 +38,11 @@ function stubGoogle(claims: Record<string, unknown>, options: { tokenOk?: boolea
   return fetchMock;
 }
 
-async function configured(overrides: Partial<Deps['config']> = {}) {
+/** Deps with Google configured and `allowed` on the allow-list (joining the default household). */
+async function configured(allowed: string[] = []) {
   const deps = await createTestDeps();
-  deps.config = { ...deps.config, googleClientId: 'gid', googleClientSecret: 'gsecret', ...overrides };
+  deps.config = { ...deps.config, googleClientId: 'gid', googleClientSecret: 'gsecret' };
+  if (allowed.length) await deps.db.insert(schema.allowedEmails).values(allowed.map((email) => ({ email, addedAt: 0 })));
   return deps;
 }
 
@@ -92,7 +94,7 @@ describe('Google sign-in', () => {
   });
 
   it('sends the PKCE verifier with the code exchange', async () => {
-    const deps = await configured({ allowedEmails: ['me@example.com'] });
+    const deps = await configured(['me@example.com']);
     stubGoogle({ sub: 's-me', email: 'me@example.com', email_verified: true });
     const { location, callback } = await signInWithGoogle(deps);
     expect(callback.headers.get('location')).toBe('/');
@@ -106,7 +108,7 @@ describe('Google sign-in', () => {
   });
 
   it('rejects ID tokens for another app or another sign-in', async () => {
-    const deps = await configured({ allowedEmails: ['me@example.com'] });
+    const deps = await configured(['me@example.com']);
     stubGoogle({ sub: 's-me', email: 'me@example.com', email_verified: true, aud: 'someone-elses-client' });
     expect((await signInWithGoogle(deps)).callback.headers.get('location')).toBe('/login?auth=token_error');
     stubGoogle({ sub: 's-me', email: 'me@example.com', email_verified: true, nonce: 'replayed' });
@@ -125,7 +127,7 @@ describe('Google sign-in', () => {
   });
 
   it('refuses unverified emails and Google errors', async () => {
-    const deps = await configured({ allowedEmails: ['me@example.com'] });
+    const deps = await configured(['me@example.com']);
     stubGoogle({ sub: 's1', email: 'me@example.com', email_verified: false });
     expect((await signInWithGoogle(deps)).callback.headers.get('location')).toBe('/login?auth=email_unverified');
 
@@ -134,7 +136,7 @@ describe('Google sign-in', () => {
   });
 
   it('creates the first household for the first allowed user, and the partner joins it', async () => {
-    const deps = await configured({ allowedEmails: ['me@example.com', 'partner@example.com'] });
+    const deps = await configured(['me@example.com', 'partner@example.com']);
     stubGoogle({ sub: 's-me', email: 'me@example.com', email_verified: true, name: 'Me' });
     const first = (await signInWithGoogle(deps)).callback;
     expect(first.headers.get('location')).toBe('/');
@@ -166,7 +168,7 @@ describe('Google sign-in', () => {
   });
 
   it('updates the profile on later sign-ins', async () => {
-    const deps = await configured({ allowedEmails: ['me@example.com'] });
+    const deps = await configured(['me@example.com']);
     stubGoogle({ sub: 's-me', email: 'me@example.com', email_verified: true, name: 'Old' });
     await signInWithGoogle(deps);
     stubGoogle({ sub: 's-me', email: 'me@example.com', email_verified: true, name: 'New' });
@@ -224,7 +226,7 @@ describe('dev sign-in', () => {
 
 describe('household safety', () => {
   it('refuses to guess a household once several exist', async () => {
-    const deps = await configured({ allowedEmails: ['loose@example.com'] });
+    const deps = await configured(['loose@example.com']);
     await createHousehold(deps, 'One', 'one@example.com');
     await createHousehold(deps, 'Two', 'two@example.com');
     stubGoogle({ sub: 's-loose', email: 'loose@example.com', email_verified: true });

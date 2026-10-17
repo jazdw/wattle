@@ -63,6 +63,7 @@ migrations/  drizzle-kit SQL, applied by Wrangler (D1) or Drizzle's migrator (li
 npm install
 cp .dev.vars.example .dev.vars        # fill in keys; TOKEN_ENC_KEY: openssl rand -base64 32
 npm run db:migrate                    # local D1
+npm run allow -- add you@gmail.com --local   # Google accounts that can sign in
 npm run dev                           # http://localhost:5173
 node scripts/seed-demo.mjs            # optional: demo accounts + a year of history (dev sign-in)
 ```
@@ -114,7 +115,6 @@ Nothing in the repo is specific to one deployment. Everything that is lives in y
    - `TOKEN_ENC_KEY` (generate with `openssl rand -base64 32`)
    - `PLAID_CLIENT_ID`, `PLAID_SECRET`, `PLAID_ENV` (`sandbox` or `production`)
    - `TIINGO_API_KEY`, `FINNHUB_API_KEY`
-   - `ALLOWED_EMAILS` (optional)
 3. **Who can sign in:** `npm run allow -- add you@gmail.com partner@gmail.com`.
 4. **GitHub Actions** (`.github/workflows/deploy.yml`): every push to `main` typechecks, lints and tests. Once these repository secrets are set, it also builds with `D1_DATABASE_ID` (the Vite build puts it into the generated deploy config), applies D1 migrations and runs `wrangler deploy --domain $CUSTOM_DOMAIN`. Until then the deploy steps are skipped.
    - `CLOUDFLARE_API_TOKEN`
@@ -161,7 +161,6 @@ A second lock in front of the app. Cloudflare's edge only lets your Google accou
 | `TOKEN_ENC_KEY` | Worker secret | Encrypts Plaid tokens at rest |
 | `PLAID_CLIENT_ID`, `PLAID_SECRET`, `PLAID_ENV` | Worker secrets | Plaid (`sandbox` or `production`) |
 | `TIINGO_API_KEY`, `FINNHUB_API_KEY` | Worker secrets | Daily closes and history; live quotes |
-| `ALLOWED_EMAILS` | Worker secret (optional) | Extra sign-in allow-list; normally use `npm run allow` |
 | `ACCESS_TEAM_DOMAIN`, `ACCESS_AUD` | Worker secrets (optional) | Require a Cloudflare Access token on API requests |
 | `DEV_LOGIN_EMAILS` | `.dev.vars` only | Local dev sign-in without Google |
 | `FX_PROVIDER=none` | tests only | No live exchange-rate calls |
