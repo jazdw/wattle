@@ -19,6 +19,7 @@ CREATE TABLE `accounts` (
 	`connection_id` text,
 	`external_id` text,
 	`name` text NOT NULL,
+	`plaid_name` text,
 	`official_name` text,
 	`institution_name` text,
 	`mask` text,
@@ -30,7 +31,9 @@ CREATE TABLE `accounts` (
 	`category` text,
 	`balance` integer,
 	`balance_as_of` integer,
+	`missing_since` integer,
 	`sort` integer DEFAULT 0 NOT NULL,
+	`holdings_version` integer DEFAULT 0 NOT NULL,
 	`created_at` integer NOT NULL,
 	FOREIGN KEY (`household_id`) REFERENCES `households`(`id`) ON UPDATE no action ON DELETE cascade,
 	FOREIGN KEY (`connection_id`) REFERENCES `connections`(`id`) ON UPDATE no action ON DELETE set null,
@@ -59,10 +62,14 @@ CREATE TABLE `connections` (
 	`kind` text NOT NULL,
 	`status` text DEFAULT 'ok' NOT NULL,
 	`error_code` text,
+	`status_observed_at` integer,
 	`consent_expires_at` integer,
+	`consent_warning_at` integer,
 	`last_synced_at` integer,
 	`txn_synced_through` text,
 	`backfill_status` text DEFAULT 'pending' NOT NULL,
+	`history_as_of` text,
+	`history_stale_at` integer,
 	`asset_report_token_enc` text,
 	`asset_report_id` text,
 	`created_at` integer NOT NULL,
@@ -157,12 +164,46 @@ CREATE TABLE `investment_transactions` (
 CREATE INDEX `inv_txn_account_date` ON `investment_transactions` (`account_id`,`date`);--> statement-breakpoint
 CREATE INDEX `inv_txn_household` ON `investment_transactions` (`household_id`);--> statement-breakpoint
 CREATE UNIQUE INDEX `inv_txn_external` ON `investment_transactions` (`account_id`,`external_id`);--> statement-breakpoint
+CREATE TABLE `job_runs` (
+	`id` text PRIMARY KEY NOT NULL,
+	`job` text NOT NULL,
+	`date` text NOT NULL,
+	`started_at` integer NOT NULL,
+	`finished_at` integer NOT NULL,
+	`households` integer NOT NULL,
+	`errors` text NOT NULL
+);
+--> statement-breakpoint
+CREATE INDEX `job_runs_started` ON `job_runs` (`started_at`);--> statement-breakpoint
 CREATE TABLE `kv_cache` (
 	`key` text PRIMARY KEY NOT NULL,
 	`value` text NOT NULL,
 	`expires_at` integer NOT NULL
 );
 --> statement-breakpoint
+CREATE TABLE `leases` (
+	`key` text PRIMARY KEY NOT NULL,
+	`household_id` text NOT NULL,
+	`holder` text,
+	`until` integer,
+	`note_at` integer,
+	FOREIGN KEY (`household_id`) REFERENCES `households`(`id`) ON UPDATE no action ON DELETE cascade
+);
+--> statement-breakpoint
+CREATE TABLE `price_runs` (
+	`id` text PRIMARY KEY NOT NULL,
+	`kind` text NOT NULL,
+	`started_at` integer NOT NULL,
+	`finished_at` integer NOT NULL,
+	`outcome` text DEFAULT 'ok' NOT NULL,
+	`error` text,
+	`note` text,
+	`calls` text NOT NULL,
+	`saved` integer NOT NULL,
+	`changes` text NOT NULL
+);
+--> statement-breakpoint
+CREATE INDEX `price_runs_started` ON `price_runs` (`started_at`);--> statement-breakpoint
 CREATE TABLE `prices_daily` (
 	`ticker` text NOT NULL,
 	`date` text NOT NULL,
@@ -203,6 +244,27 @@ CREATE TABLE `sessions` (
 );
 --> statement-breakpoint
 CREATE INDEX `sessions_user` ON `sessions` (`user_id`);--> statement-breakpoint
+CREATE TABLE `sync_runs` (
+	`id` text PRIMARY KEY NOT NULL,
+	`household_id` text NOT NULL,
+	`connection_id` text NOT NULL,
+	`action` text NOT NULL,
+	`trigger` text NOT NULL,
+	`started_at` integer NOT NULL,
+	`finished_at` integer NOT NULL,
+	`outcome` text NOT NULL,
+	`error_code` text,
+	`error_message` text,
+	`note` text,
+	`plaid_calls` text NOT NULL,
+	`counts` text NOT NULL,
+	`changes` text NOT NULL,
+	`truncated` integer DEFAULT false NOT NULL,
+	FOREIGN KEY (`household_id`) REFERENCES `households`(`id`) ON UPDATE no action ON DELETE cascade,
+	FOREIGN KEY (`connection_id`) REFERENCES `connections`(`id`) ON UPDATE no action ON DELETE cascade
+);
+--> statement-breakpoint
+CREATE INDEX `sync_runs_connection_started` ON `sync_runs` (`household_id`,`connection_id`,`started_at`);--> statement-breakpoint
 CREATE TABLE `targets` (
 	`id` text PRIMARY KEY NOT NULL,
 	`household_id` text NOT NULL,
@@ -212,6 +274,7 @@ CREATE TABLE `targets` (
 	`band_pct` real DEFAULT 5 NOT NULL,
 	`excluded_account_ids` text DEFAULT '[]' NOT NULL,
 	`excluded_categories` text DEFAULT '[]' NOT NULL,
+	`version` integer DEFAULT 0 NOT NULL,
 	`updated_at` integer NOT NULL,
 	FOREIGN KEY (`household_id`) REFERENCES `households`(`id`) ON UPDATE no action ON DELETE cascade
 );

@@ -35,44 +35,34 @@ jobs:
       - name: Test
         run: npm run test:coverage
 
-      # The build fills this deployment's database id into the deploy config
-      # it generates (see vite.config.ts); without the secret it keeps the
-      # placeholder and the deploy steps below are skipped.
+      # Checks the production build works; the deploy step rebuilds with the
+      # real database id.
       - name: Build
-        env:
-          D1_DATABASE_ID: ${{ secrets.D1_DATABASE_ID }}
         run: npm run build
 
       # Until the Cloudflare secrets are set, CI only checks the code and the
-      # deploy steps are skipped (the run stays green).
+      # deploy step is skipped (the run stays green).
       - name: Check deploy secrets
         id: secrets
         env:
           CUSTOM_DOMAIN: ${{ secrets.CUSTOM_DOMAIN }}
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-          D1_DATABASE_ID: ${{ secrets.D1_DATABASE_ID }}
         run: |
-          if [ -z "$CUSTOM_DOMAIN" ] || [ -z "$CLOUDFLARE_API_TOKEN" ] || [ -z "$CLOUDFLARE_ACCOUNT_ID" ] || [ -z "$D1_DATABASE_ID" ]; then
-            echo "::notice::Deploy skipped: set CUSTOM_DOMAIN, CLOUDFLARE_API_TOKEN, CLOUDFLARE_ACCOUNT_ID and D1_DATABASE_ID to deploy."
+          if [ -z "$CUSTOM_DOMAIN" ] || [ -z "$CLOUDFLARE_API_TOKEN" ] || [ -z "$CLOUDFLARE_ACCOUNT_ID" ]; then
+            echo "::notice::Deploy skipped: set CUSTOM_DOMAIN, CLOUDFLARE_API_TOKEN and CLOUDFLARE_ACCOUNT_ID to deploy."
             echo "ready=false" >> "$GITHUB_OUTPUT"
           else
             echo "ready=true" >> "$GITHUB_OUTPUT"
           fi
 
-      - name: Apply D1 migrations
+      # Finds (or creates) the D1 database by name, builds with its id, applies
+      # migrations and deploys to the custom domain (scripts/deploy.mjs). The
+      # domain lives in a secret so it isn't committed to the repo.
+      - name: Deploy
         if: steps.secrets.outputs.ready == 'true'
-        uses: cloudflare/wrangler-action@v4
-        with:
-          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-          command: d1 migrations apply wattle --remote
-
-      # The custom domain lives in a secret so it isn't committed to the repo.
-      - name: Deploy Worker
-        if: steps.secrets.outputs.ready == 'true'
-        uses: cloudflare/wrangler-action@v4
-        with:
-          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-          command: deploy --domain ${{ secrets.CUSTOM_DOMAIN }}
+        env:
+          CUSTOM_DOMAIN: ${{ secrets.CUSTOM_DOMAIN }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: npm run deploy
