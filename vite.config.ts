@@ -25,7 +25,7 @@ export default defineConfig(({ mode }) => {
       cloudflare({
         // Deployment-specific values come from the environment at build time,
         // never the repo: wrangler.jsonc keeps a placeholder database id, and
-        // the deploy job builds with D1_DATABASE_ID set. Local dev needs none.
+        // scripts/deploy.mjs builds with D1_DATABASE_ID set. Local dev needs none.
         config: (config) => {
           const databaseId = process.env.D1_DATABASE_ID
           const database = config.d1_databases?.find((binding) => binding.binding === 'DB')

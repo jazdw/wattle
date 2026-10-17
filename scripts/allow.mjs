@@ -13,6 +13,7 @@
 // --keep-sessions is given.
 
 import { spawnSync } from 'node:child_process';
+import { remoteConfig } from './remote-d1.mjs';
 
 const DATABASE = 'wattle';
 
@@ -76,7 +77,8 @@ function execute(command, local) {
       'd1',
       'execute',
       DATABASE,
-      local ? '--local' : '--remote',
+      // Production: wrangler.jsonc only has a placeholder id (see remote-d1.mjs).
+      ...(local ? ['--local'] : ['--remote', '--config', remoteConfig()]),
       '--json',
       '--command',
       command,
