@@ -62,6 +62,10 @@ describe('linking', () => {
     expect(portfolio.allCategories.us_stock).toBe(1500_00);
     expect(portfolio.allCategories.cash).toBe(500_00);
 
+    // Plaid's previous closes land in the shared price table for the snapshot.
+    const plaidCloses = await deps.db.select().from(schema.pricesDaily).where(eq(schema.pricesDaily.source, 'plaid'));
+    expect(plaidCloses).toEqual([expect.objectContaining({ ticker: 'VTI', date: '2026-10-08', close: 100 })]);
+
     // Securities are classified on arrival from the seeded profiles.
     const [vti] = await deps.db.select().from(schema.securities).where(eq(schema.securities.ticker, 'VTI'));
     expect(vti.classificationSource).toBe('seed');

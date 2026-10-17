@@ -32,3 +32,10 @@ export async function runBatch(db: Db, statements: BatchItem<'sqlite'>[]): Promi
     if (slice.length > 0) await batcher.batch(slice);
   }
 }
+
+/** Split values for `IN (...)` lists so each query stays under D1's parameter limit. */
+export function inChunks<T>(values: T[], size = 90): T[][] {
+  const chunks: T[][] = [];
+  for (let index = 0; index < values.length; index += size) chunks.push(values.slice(index, index + size));
+  return chunks;
+}

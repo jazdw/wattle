@@ -2,7 +2,7 @@
 import { and, count, desc, eq, ne, sql } from 'drizzle-orm';
 import { Hono } from 'hono';
 import { suggestClassification } from '../../shared/classify';
-import { addDays, marketDate } from '../../shared/dates';
+import { marketDate } from '../../shared/dates';
 import { convertMinor, toMinor } from '../../shared/money';
 import {
   accountPatchSchema,
@@ -29,7 +29,7 @@ import { HttpError, notFound, readBody, requestCurrency } from '../lib/http';
 import type { Deps } from '../ports';
 import { backfillConnection } from '../services/backfill';
 import { toCurrency } from '../services/portfolio';
-import { closeLookup, ensureCloses, fxLookup } from '../services/pricing';
+import { closeLookup, ensureRecentCloses, fxLookup } from '../services/pricing';
 import { snapshotHousehold } from '../services/snapshots';
 import { getConnection, purgeAccountData, removeConnection, syncConnection } from '../services/sync';
 
@@ -364,7 +364,7 @@ accountRoutes.put('/:id/holdings', async (c) => {
   const today = marketDate(deps.now());
 
   const tickers = body.holdings.filter((holding) => holding.price === undefined).map((holding) => holding.ticker.toUpperCase());
-  await ensureCloses(deps, tickers, addDays(today, -7), today);
+  await ensureRecentCloses(deps, tickers, today);
   const closes = await closeLookup(deps, tickers, today, today);
 
   const rows: (typeof holdings.$inferInsert)[] = [];

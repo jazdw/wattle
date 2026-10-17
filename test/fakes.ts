@@ -143,15 +143,29 @@ export function fakePlaid(initial: Partial<PlaidState> = {}): PlaidApi & { state
 /* Market data                                                         */
 /* ------------------------------------------------------------------ */
 
-export function fakePrices(series: Record<string, DailyClose[]>): PriceProvider & { calls: string[] } {
+/**
+ * A price provider over fixed series. With `bulk`, it also answers
+ * latestCloses for those tickers (like Tiingo's IEX endpoint for stocks/ETFs).
+ */
+export function fakePrices(
+  series: Record<string, DailyClose[]>,
+  bulk?: Record<string, DailyClose>,
+): PriceProvider & { calls: string[] } {
   const calls: string[] = [];
-  return {
+  const provider: PriceProvider & { calls: string[] } = {
     calls,
     async dailyCloses(ticker, start, end) {
       calls.push(`${ticker}:${start}:${end}`);
       return (series[ticker.toUpperCase()] ?? []).filter((row) => row.date >= start && row.date <= end);
     },
   };
+  if (bulk) {
+    provider.latestCloses = async (tickers) => {
+      calls.push(`bulk:${tickers.join(',')}`);
+      return new Map(tickers.filter((ticker) => bulk[ticker]).map((ticker) => [ticker, bulk[ticker]]));
+    };
+  }
+  return provider;
 }
 
 export function fakeQuotes(quotes: Record<string, Partial<Quote>>): QuoteProvider & { calls: string[] } {

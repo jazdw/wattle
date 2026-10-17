@@ -9,11 +9,13 @@ import { suggestClassification } from '../../shared/classify';
 import { addDays, marketDate } from '../../shared/dates';
 import { toMinor } from '../../shared/money';
 import { PlaidApiError, type LinkKind } from '../adapters/plaid';
-import { chunkRows, runBatch } from '../db/batch';
-import { accounts, connections, holdings, investmentTransactions, securities } from '../db/schema';
+import type { BatchItem } from 'drizzle-orm/batch';
+import { chunkRows, inChunks, runBatch } from '../db/batch';
+import { accounts, connections, holdings, investmentTransactions, pricesDaily, securities } from '../db/schema';
 import type { Tenant } from '../db/tenant';
 import type { Deps } from '../ports';
 import { decryptToken, encryptToken, loadTokenKeys, tokenAad } from './crypto';
+import { saveCloses } from './pricing';
 
 export type ConnectionRow = typeof connections.$inferSelect;
 
@@ -260,45 +262,53 @@ export async function upsertSecurities(
   const now = deps.now().getTime();
   const today = marketDate(deps.now());
 
-  const existing = await tenant.db
-    .select({ id: securities.id, externalId: securities.externalId })
-    .from(securities)
-    .where(
-      tenant.scope(
-        securities,
-        inArray(
-          securities.externalId,
-          plaidSecurities.map((security) => security.security_id),
-        ),
-      ),
-    );
-  const byExternal = new Map(existing.map((row) => [row.externalId, row.id]));
+  const byExternal = new Map<string | null, string>();
+  for (const chunk of inChunks(plaidSecurities.map((security) => security.security_id))) {
+    const rows = await tenant.db
+      .select({ id: securities.id, externalId: securities.externalId })
+      .from(securities)
+      .where(tenant.scope(securities, inArray(securities.externalId, chunk)));
+    for (const row of rows) byExternal.set(row.externalId, row.id);
+  }
+
+  // All writes go out as one batch rather than one call per security.
+  const statements: BatchItem<'sqlite'>[] = [];
+  const inserts: (typeof securities.$inferInsert)[] = [];
+  // Plaid's previous close is public market data: store it in the shared
+  // price table so the nightly snapshot needn't ask Tiingo for these tickers.
+  const closes: (typeof pricesDaily.$inferInsert)[] = [];
 
   for (const security of plaidSecurities) {
     const ticker = security.ticker_symbol?.toUpperCase() ?? null;
     const lastPrice = security.close_price ?? null;
     const lastPriceDate = security.close_price_as_of ?? (lastPrice !== null ? today : null);
     const currency = security.iso_currency_code ?? 'USD';
+    const isPublic = isPublicSecurity(security);
+    if (isPublic && ticker && lastPrice !== null && security.close_price_as_of) {
+      closes.push({ ticker, date: security.close_price_as_of, close: lastPrice, currency, source: 'plaid' });
+    }
     const id = byExternal.get(security.security_id);
     if (id) {
-      await tenant.db
-        .update(securities)
-        .set({
-          ticker,
-          name: security.name,
-          type: security.type,
-          subtype: security.subtype ?? null,
-          currency,
-          isPublic: isPublicSecurity(security),
-          ...(lastPrice !== null ? { lastPrice, lastPriceDate } : {}),
-        })
-        .where(tenant.scope(securities, eq(securities.id, id)));
+      statements.push(
+        tenant.db
+          .update(securities)
+          .set({
+            ticker,
+            name: security.name,
+            type: security.type,
+            subtype: security.subtype ?? null,
+            currency,
+            isPublic,
+            ...(lastPrice !== null ? { lastPrice, lastPriceDate } : {}),
+          })
+          .where(tenant.scope(securities, eq(securities.id, id))),
+      );
       ids.set(security.security_id, id);
       continue;
     }
     const suggestion = suggestClassification({ ticker, name: security.name, type: security.type, currency });
     const newId = crypto.randomUUID();
-    await tenant.db.insert(securities).values({
+    inserts.push({
       id: newId,
       householdId: tenant.householdId,
       externalId: security.security_id,
@@ -307,7 +317,7 @@ export async function upsertSecurities(
       type: security.type,
       subtype: security.subtype ?? null,
       currency,
-      isPublic: isPublicSecurity(security),
+      isPublic,
       classification: suggestion.classification,
       classificationSource: suggestion.source,
       needsReview: suggestion.needsReview,
@@ -316,7 +326,12 @@ export async function upsertSecurities(
       createdAt: now,
     });
     ids.set(security.security_id, newId);
+    byExternal.set(security.security_id, newId);
   }
+  for (const chunk of chunkRows(securities, inserts)) statements.push(tenant.db.insert(securities).values(chunk));
+  await runBatch(tenant.db, statements);
+  // Tiingo's official closes win over Plaid's for the same day.
+  await saveCloses(deps, closes, { replace: false });
   return ids;
 }
 
@@ -371,12 +386,15 @@ async function syncHoldings(
     ]);
   }
 
-  for (const [securityId, { price, date }] of institutionPrices) {
-    await tenant.db
-      .update(securities)
-      .set({ lastPrice: price, lastPriceDate: date ?? marketDate(deps.now()) })
-      .where(tenant.scope(securities, eq(securities.id, securityId), eq(securities.isPublic, false)));
-  }
+  await runBatch(
+    tenant.db,
+    [...institutionPrices].map(([securityId, { price, date }]) =>
+      tenant.db
+        .update(securities)
+        .set({ lastPrice: price, lastPriceDate: date ?? marketDate(deps.now()) })
+        .where(tenant.scope(securities, eq(securities.id, securityId), eq(securities.isPublic, false))),
+    ),
+  );
   return rows.length;
 }
 
