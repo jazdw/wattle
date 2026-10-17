@@ -4,9 +4,8 @@ import type { Db } from './ports';
 
 describe('config', () => {
   it('parses lists and leaves unset secrets undefined', () => {
-    const config = configFromEnv({ ALLOWED_EMAILS: ' A@x.com, b@x.com ,', GOOGLE_CLIENT_ID: '' });
-    expect(config.allowedEmails).toEqual(['a@x.com', 'b@x.com']);
-    expect(config.devLoginEmails).toEqual([]);
+    const config = configFromEnv({ DEV_LOGIN_EMAILS: ' A@x.com, b@x.com ,', GOOGLE_CLIENT_ID: '' });
+    expect(config.devLoginEmails).toEqual(['a@x.com', 'b@x.com']);
     expect(config.googleClientId).toBeUndefined();
   });
 

@@ -36,7 +36,7 @@ export async function createTestDeps(overrides: Partial<Deps> = {}): Promise<Dep
   const pending: Promise<unknown>[] = [];
   const deps: Deps = {
     db: db as unknown as Db,
-    config: { allowedEmails: [], devLoginEmails: [], tokenEncKey: TEST_KEY },
+    config: { devLoginEmails: [], tokenEncKey: TEST_KEY },
     plaid: null,
     prices: null,
     quotes: null,

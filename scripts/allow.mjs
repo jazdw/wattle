@@ -148,9 +148,7 @@ switch (command) {
       `Removed (${target}): ${list.join(', ')}` +
         (options.keepSessions ? ' — existing sessions kept.' : ' — and signed out everywhere.'),
     );
-    console.log(
-      'Their household data is kept. Emails in the ALLOWED_EMAILS variable (if any) still work.',
-    );
+    console.log('Their household data is kept.');
     break;
   }
 

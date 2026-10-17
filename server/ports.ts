@@ -14,8 +14,6 @@ import type { PlaidApi } from './adapters/plaid';
 export type Db = BaseSQLiteDatabase<'async', any, typeof schema>;
 
 export interface Config {
-  /** Comma-separated allow-list from the environment (joins the default household). */
-  allowedEmails: string[];
   /** LOCAL DEVELOPMENT ONLY: emails that can sign in without Google on a private host. */
   devLoginEmails: string[];
   googleClientId?: string;
