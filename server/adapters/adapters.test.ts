@@ -98,6 +98,30 @@ describe('market data', () => {
     await expect(tiingo.dailyCloses('BOOM', '2026-10-01', '2026-10-02')).rejects.toThrow('HTTP 500');
   });
 
+  it('Tiingo: latest closes for many tickers in one request', async () => {
+    const requests = stubFetch(() =>
+      Response.json([
+        { ticker: 'VTI', timestamp: '2026-10-08T20:00:00+00:00', tngoLast: 301.5 }, // 16:00 New York: the close
+        { ticker: 'SPY', timestamp: '2026-10-08T15:00:00+00:00', tngoLast: 600 }, // 11:00: intraday, not a close
+        { ticker: 'QQQ', timestamp: '2026-10-08T20:00:00+00:00', tngoLast: 500 }, // not requested
+        { ticker: 'IWM', timestamp: '2026-10-08T20:30:00+00:00', tngoLast: null },
+      ]),
+    );
+    const closes = await createTiingo('key').latestCloses!(['vti', 'SPY', 'IWM']);
+    expect([...closes]).toEqual([['VTI', { date: '2026-10-08', close: 301.5 }]]);
+    expect(requests).toHaveLength(1);
+    expect(requests[0].url).toBe('https://api.tiingo.com/iex/?tickers=vti%2Cspy%2Ciwm');
+    expect(requests[0].headers.get('authorization')).toBe('Token key');
+  });
+
+  it('Tiingo: splits large bulk requests and reports errors', async () => {
+    const requests = stubFetch(() => Response.json([]));
+    await createTiingo('key').latestCloses!(Array.from({ length: 150 }, (_, index) => `T${index}`));
+    expect(requests).toHaveLength(2);
+    stubFetch(() => new Response('', { status: 403 }));
+    await expect(createTiingo('key').latestCloses!(['VTI'])).rejects.toThrow('HTTP 403');
+  });
+
   it('Finnhub: quotes, unknown symbols, errors', async () => {
     const requests = stubFetch((url) =>
       url.includes('symbol=ZZZ')

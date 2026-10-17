@@ -2,7 +2,7 @@ import { and, eq } from 'drizzle-orm';
 import { describe, expect, it } from 'vitest';
 import * as schema from '../server/db/schema';
 import { Tenant } from '../server/db/tenant';
-import { closeLookup, ensureCloses, fxLookup } from '../server/services/pricing';
+import { closeLookup, ensureCloses, ensureRecentCloses, fxLookup, saveCloses } from '../server/services/pricing';
 import { snapshotHousehold } from '../server/services/snapshots';
 import { closes, fakeFx, fakePrices } from './fakes';
 import { client, createHousehold, createTestDeps, TODAY } from './helpers';
@@ -43,6 +43,62 @@ describe('daily closes', () => {
       },
     });
     await expect(ensureCloses(deps, ['VTI'], '2026-09-01', '2026-09-10')).resolves.toBeUndefined();
+  });
+});
+
+describe('recent closes (nightly snapshot, manual holdings)', () => {
+  const close = (date: string, value: number) => ({ date, close: value });
+
+  it('skips tickers whose latest close is already stored (e.g. from Plaid)', async () => {
+    const prices = fakePrices({ VTI: [close(TODAY, 1)] }, { VTI: close(TODAY, 1) });
+    const deps = await createTestDeps({ prices });
+    await saveCloses(deps, [{ ticker: 'VTI', date: TODAY, close: 300, currency: 'USD', source: 'plaid' }], { replace: false });
+    await ensureRecentCloses(deps, ['VTI'], TODAY);
+    expect(prices.calls).toEqual([]);
+  });
+
+  it('fetches stocks/ETFs in one bulk request and only funds one at a time', async () => {
+    const prices = fakePrices({ VTSAX: [close(TODAY, 150)] }, { VTI: close(TODAY, 300), QQQ: close(TODAY, 500) });
+    const deps = await createTestDeps({ prices });
+    await ensureRecentCloses(deps, ['vti', 'QQQ', 'VTSAX'], TODAY);
+    expect(prices.calls).toEqual(['bulk:VTI,QQQ,VTSAX', `VTSAX:2026-10-01:${TODAY}`]);
+    const lookup = await closeLookup(deps, ['VTI', 'QQQ', 'VTSAX'], TODAY, TODAY);
+    expect([lookup('VTI', TODAY), lookup('QQQ', TODAY), lookup('VTSAX', TODAY)]).toEqual([300, 500, 150]);
+  });
+
+  it("tolerates a fund's NAV being a trading day behind (published after midnight)", async () => {
+    const prices = fakePrices({}, {});
+    const deps = await createTestDeps({ prices });
+    await saveCloses(deps, [{ ticker: 'VTSAX', date: '2026-10-07', close: 150, currency: 'USD', source: 'plaid' }], { replace: false });
+    await ensureRecentCloses(deps, ['VTSAX'], TODAY);
+    expect(prices.calls).toEqual(['bulk:VTSAX']);
+  });
+
+  it('expects no close on weekends', async () => {
+    const prices = fakePrices({}, {});
+    const deps = await createTestDeps({ prices });
+    await saveCloses(deps, [{ ticker: 'VTI', date: '2026-10-09', close: 300, currency: 'USD', source: 'tiingo' }], { replace: true });
+    await ensureRecentCloses(deps, ['VTI'], '2026-10-11'); // Sunday; Friday's close is the latest
+    expect(prices.calls).toEqual([]);
+  });
+
+  it('falls back to single requests when the bulk request fails, and remembers unknown tickers', async () => {
+    const prices = fakePrices({ VTI: [close(TODAY, 300)] });
+    prices.latestCloses = async () => {
+      throw new Error('HTTP 403');
+    };
+    const deps = await createTestDeps({ prices });
+    await ensureRecentCloses(deps, ['VTI', 'NOPE'], TODAY);
+    await ensureRecentCloses(deps, ['NOPE'], TODAY);
+    expect(prices.calls).toEqual([`VTI:2026-10-01:${TODAY}`, `NOPE:2026-10-01:${TODAY}`]);
+  });
+
+  it('lets Tiingo replace a Plaid close for the same day, but not the reverse', async () => {
+    const deps = await createTestDeps();
+    await saveCloses(deps, [{ ticker: 'VTI', date: TODAY, close: 299, currency: 'USD', source: 'plaid' }], { replace: false });
+    await saveCloses(deps, [{ ticker: 'VTI', date: TODAY, close: 300, currency: 'USD', source: 'tiingo' }], { replace: true });
+    await saveCloses(deps, [{ ticker: 'VTI', date: TODAY, close: 301, currency: 'USD', source: 'plaid' }], { replace: false });
+    expect((await closeLookup(deps, ['VTI'], TODAY, TODAY))('VTI', TODAY)).toBe(300);
   });
 });
 

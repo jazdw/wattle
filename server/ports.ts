@@ -33,6 +33,12 @@ export interface DailyClose {
 export interface PriceProvider {
   /** Daily closes for `ticker` between the dates (inclusive). Empty when unknown. */
   dailyCloses(ticker: string, start: IsoDate, end: IsoDate): Promise<DailyClose[]>;
+  /**
+   * Latest closes for many tickers in as few requests as possible (optional).
+   * Tickers it can't price in bulk are left out; callers fall back to
+   * dailyCloses for those.
+   */
+  latestCloses?(tickers: string[]): Promise<Map<string, DailyClose>>;
 }
 
 export interface Quote {

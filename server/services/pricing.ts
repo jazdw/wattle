@@ -4,72 +4,155 @@
  * value forward over weekends and holidays.
  */
 import { and, desc, eq, gte, inArray, lte, max, min, sql } from 'drizzle-orm';
-import { addDays, type IsoDate } from '../../shared/dates';
+import { addDays, lastTradingDay, type IsoDate } from '../../shared/dates';
 import type { Currency, FxRates } from '../../shared/money';
-import { chunkRows, runBatch } from '../db/batch';
+import { chunkRows, inChunks, runBatch } from '../db/batch';
 import { fxDaily, pricesDaily } from '../db/schema';
-import type { Deps } from '../ports';
-import { cacheGet, cacheSet } from './cache';
+import type { DailyClose, Deps } from '../ports';
+import { cacheGet, cacheGetMany, cacheSet, cacheSetMany } from './cache';
 
 /** Look back this far for the last close before a range starts. */
 const CARRY_DAYS = 10;
+/** How long to remember that the provider doesn't know a ticker. */
+const UNKNOWN_TTL_SECONDS = 7 * 24 * 3600;
+
+type PriceRow = typeof pricesDaily.$inferInsert;
+
+const unknownKey = (ticker: string) => `noprice:${ticker}`;
+
+function normalise(tickers: string[]): string[] {
+  return [...new Set(tickers.map((ticker) => ticker.toUpperCase()))];
+}
+
+/** First and last stored close per ticker. */
+async function coverage(deps: Deps, tickers: string[]) {
+  const byTicker = new Map<string, { first: IsoDate | null; last: IsoDate | null }>();
+  for (const chunk of inChunks(tickers)) {
+    const rows = await deps.db
+      .select({ ticker: pricesDaily.ticker, first: min(pricesDaily.date), last: max(pricesDaily.date) })
+      .from(pricesDaily)
+      .where(inArray(pricesDaily.ticker, chunk))
+      .groupBy(pricesDaily.ticker);
+    for (const row of rows) byTicker.set(row.ticker, { first: row.first, last: row.last });
+  }
+  return byTicker;
+}
+
+/** Tickers the provider recently said it doesn't know (one query). */
+async function knownUnknowns(deps: Deps, tickers: string[]): Promise<Set<string>> {
+  const found = await cacheGetMany<boolean>(deps, tickers.map(unknownKey));
+  return new Set(tickers.filter((ticker) => found.has(unknownKey(ticker))));
+}
+
+/** Store closes; a later source (Tiingo) replaces an earlier one (Plaid) for the same day. */
+export async function saveCloses(deps: Deps, rows: PriceRow[], options: { replace: boolean }): Promise<void> {
+  if (rows.length === 0) return;
+  await runBatch(
+    deps.db,
+    chunkRows(pricesDaily, rows).map((chunk) => {
+      const insert = deps.db.insert(pricesDaily).values(chunk);
+      return options.replace
+        ? insert.onConflictDoUpdate({
+            target: [pricesDaily.ticker, pricesDaily.date],
+            set: { close: sql`excluded.close`, source: sql`excluded.source` },
+          })
+        : insert.onConflictDoNothing();
+    }),
+  );
+}
 
 /**
- * Make sure prices_daily covers [start, end] for each ticker, fetching only
- * the missing edges. Tickers the provider doesn't know are remembered for a
- * week so they aren't requested every day.
+ * Make sure each ticker has its latest close as of `date` (the nightly
+ * snapshot, manual holdings). Prices Plaid already supplied count. What's
+ * missing is fetched in bulk where the provider can (Tiingo's IEX endpoint for
+ * stocks and ETFs), then one request per remaining ticker (mutual funds).
+ */
+export async function ensureRecentCloses(deps: Deps, tickers: string[], date: IsoDate): Promise<void> {
+  if (!deps.prices || tickers.length === 0) return;
+  const expected = lastTradingDay(date);
+  const unique = normalise(tickers);
+  const have = await coverage(deps, unique);
+  const unknown = await knownUnknowns(deps, unique);
+  const stale = unique.filter((ticker) => !unknown.has(ticker) && !((have.get(ticker)?.last ?? '') >= expected));
+  if (stale.length === 0) return;
+
+  const rows: PriceRow[] = [];
+  let bulk = new Map<string, DailyClose>();
+  if (deps.prices.latestCloses) {
+    try {
+      bulk = await deps.prices.latestCloses(stale);
+    } catch (error) {
+      console.warn('Bulk price fetch failed', error instanceof Error ? error.message : error);
+    }
+  }
+  for (const [ticker, close] of bulk) rows.push({ ticker, date: close.date, close: close.close, currency: 'USD', source: 'tiingo' });
+
+  const newlyUnknown: string[] = [];
+  for (const ticker of stale) {
+    const last = have.get(ticker)?.last ?? null;
+    const fromBulk = bulk.get(ticker);
+    if (fromBulk && fromBulk.date >= expected) continue;
+    // Mutual fund NAVs publish after midnight New York, so the nightly run
+    // usually sees yesterday's. One trading day behind is fine: the next run
+    // fills it in.
+    if (last && last >= lastTradingDay(addDays(expected, -1)) && !fromBulk) continue;
+    let closes: DailyClose[];
+    try {
+      closes = await deps.prices.dailyCloses(ticker, last ? addDays(last, 1) : addDays(date, -7), date);
+    } catch (error) {
+      console.warn('Price fetch failed', ticker, error instanceof Error ? error.message : error);
+      continue;
+    }
+    if (closes.length === 0 && !last && !fromBulk) newlyUnknown.push(ticker);
+    for (const close of closes) rows.push({ ticker, date: close.date, close: close.close, currency: 'USD', source: 'tiingo' });
+  }
+  await saveCloses(deps, rows, { replace: true });
+  await cacheSetMany(deps, newlyUnknown.map((ticker) => [unknownKey(ticker), true]), UNKNOWN_TTL_SECONDS);
+}
+
+/**
+ * Make sure prices_daily covers [start, end] for each ticker (history
+ * backfill), fetching only the missing edges. There's no bulk history
+ * endpoint, so this is one request per ticker that needs it.
  */
 export async function ensureCloses(deps: Deps, tickers: string[], start: IsoDate, end: IsoDate): Promise<void> {
   if (!deps.prices || tickers.length === 0) return;
-  const unique = [...new Set(tickers.map((ticker) => ticker.toUpperCase()))];
-  const coverage = await deps.db
-    .select({ ticker: pricesDaily.ticker, first: min(pricesDaily.date), last: max(pricesDaily.date) })
-    .from(pricesDaily)
-    .where(inArray(pricesDaily.ticker, unique))
-    .groupBy(pricesDaily.ticker);
-  const byTicker = new Map(coverage.map((row) => [row.ticker, row]));
+  const unique = normalise(tickers);
+  const have = await coverage(deps, unique);
+  const unknown = await knownUnknowns(deps, unique);
+  const rows: PriceRow[] = [];
+  const newlyUnknown: string[] = [];
 
   for (const ticker of unique) {
-    if (await cacheGet(deps, `noprice:${ticker}`)) continue;
-    const have = byTicker.get(ticker);
+    if (unknown.has(ticker)) continue;
+    const stored = have.get(ticker);
     const ranges: [IsoDate, IsoDate][] = [];
-    if (!have?.first || !have.last) {
+    if (!stored?.first || !stored.last) {
       ranges.push([start, end]);
     } else {
       // Small gaps at the edges (weekends) are expected; refetch only when
       // the stored range falls short by more than a long weekend.
-      if (have.first > addDays(start, 4)) ranges.push([start, addDays(have.first, -1)]);
-      if (have.last < end) ranges.push([addDays(have.last, 1), end]);
+      if (stored.first > addDays(start, 4)) ranges.push([start, addDays(stored.first, -1)]);
+      if (stored.last < lastTradingDay(end)) ranges.push([addDays(stored.last, 1), end]);
     }
-
     for (const [from, to] of ranges) {
       if (from > to) continue;
-      let closes;
+      let closes: DailyClose[];
       try {
         closes = await deps.prices.dailyCloses(ticker, from, to);
       } catch (error) {
         console.warn('Price fetch failed', ticker, error instanceof Error ? error.message : error);
         continue;
       }
-      if (closes.length === 0 && !have) {
-        await cacheSet(deps, `noprice:${ticker}`, true, 7 * 24 * 3600);
+      if (closes.length === 0 && !stored) {
+        newlyUnknown.push(ticker);
         break;
       }
-      const rows = closes.map((close) => ({ ticker, date: close.date, close: close.close, currency: 'USD', source: 'tiingo' }));
-      await runBatch(
-        deps.db,
-        chunkRows(pricesDaily, rows).map((chunk) =>
-          deps.db
-            .insert(pricesDaily)
-            .values(chunk)
-            .onConflictDoUpdate({
-              target: [pricesDaily.ticker, pricesDaily.date],
-              set: { close: sql`excluded.close` },
-            }),
-        ),
-      );
+      for (const close of closes) rows.push({ ticker, date: close.date, close: close.close, currency: 'USD', source: 'tiingo' });
     }
   }
+  await saveCloses(deps, rows, { replace: true });
+  await cacheSetMany(deps, newlyUnknown.map((ticker) => [unknownKey(ticker), true]), UNKNOWN_TTL_SECONDS);
 }
 
 export type CloseLookup = (ticker: string, date: IsoDate) => number | null;
@@ -78,13 +161,13 @@ export type CloseLookup = (ticker: string, date: IsoDate) => number | null;
 export async function closeLookup(deps: Deps, tickers: string[], start: IsoDate, end: IsoDate): Promise<CloseLookup> {
   const unique = [...new Set(tickers.map((ticker) => ticker.toUpperCase()))];
   const series = new Map<string, { date: IsoDate; close: number }[]>();
-  if (unique.length > 0) {
+  for (const chunk of inChunks(unique)) {
     const rows = await deps.db
       .select({ ticker: pricesDaily.ticker, date: pricesDaily.date, close: pricesDaily.close })
       .from(pricesDaily)
       .where(
         and(
-          inArray(pricesDaily.ticker, unique),
+          inArray(pricesDaily.ticker, chunk),
           gte(pricesDaily.date, addDays(start, -CARRY_DAYS)),
           lte(pricesDaily.date, end),
         ),
