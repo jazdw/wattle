@@ -8,8 +8,8 @@
  *  - Settings and secrets are set on the Worker, so deploys never reset them:
  *      npx wrangler secret put <NAME>
  *    GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET, TOKEN_ENC_KEY, PLAID_CLIENT_ID,
- *    PLAID_SECRET, PLAID_ENV, TIINGO_API_KEY, FINNHUB_API_KEY, and optionally
- *    ALLOWED_EMAILS (otherwise use the allowed_emails table: npm run allow).
+ *    PLAID_SECRET, PLAID_ENV, TIINGO_API_KEY, FINNHUB_API_KEY.
+ *  - Who can sign in is kept in the allowed_emails table: npm run allow.
  */
 {
   "$schema": "node_modules/wrangler/config-schema.json",

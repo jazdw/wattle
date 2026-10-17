@@ -4,7 +4,6 @@ import type { Config, Db, Deps } from './ports';
 
 /** Environment variables / secrets, identical on Workers (.dev.vars) and Node (process.env). */
 export interface RawEnv {
-  ALLOWED_EMAILS?: string;
   DEV_LOGIN_EMAILS?: string;
   GOOGLE_CLIENT_ID?: string;
   GOOGLE_CLIENT_SECRET?: string;
@@ -31,7 +30,6 @@ function list(value: string | undefined): string[] {
 
 export function configFromEnv(env: RawEnv): Config {
   return {
-    allowedEmails: list(env.ALLOWED_EMAILS),
     devLoginEmails: list(env.DEV_LOGIN_EMAILS),
     googleClientId: env.GOOGLE_CLIENT_ID || undefined,
     googleClientSecret: env.GOOGLE_CLIENT_SECRET || undefined,
