@@ -1,10 +1,10 @@
 /**
  * Cloudflare Worker configuration for Wattle Wealth. Nothing in this file is
  * specific to one deployment:
- *  - database_id is a placeholder. The build substitutes the real id when
- *    D1_DATABASE_ID is set (see vite.config.ts); the deploy job sets it from
- *    a repository secret. Local development doesn't need one.
- *  - The domain comes from the CUSTOM_DOMAIN repository secret (--domain).
+ *  - database_id is a placeholder. `npm run deploy` finds the real database
+ *    by name (creating it the first time; scripts/remote-d1.mjs) and builds
+ *    with its id (see vite.config.ts). Local development doesn't need one.
+ *  - The domain comes from CUSTOM_DOMAIN (a repository secret in CI).
  *  - Settings and secrets are set on the Worker, so deploys never reset them:
  *      npx wrangler secret put <NAME>
  *    GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET, TOKEN_ENC_KEY, PLAID_CLIENT_ID,

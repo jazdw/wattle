@@ -1,1 +1,0 @@
-ALTER TABLE `accounts` ADD `missing_since` integer;

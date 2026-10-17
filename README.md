@@ -126,18 +126,18 @@ The redirect URI is built from the request's origin, so no hostname is configure
 ### Deploy
 Nothing in the repo is specific to one deployment. Everything that is lives in your Cloudflare account or your GitHub repository secrets.
 
-1. **Database:** `npm run db:create`. Note the id it prints; don't edit `wrangler.jsonc` (it keeps a placeholder).
-2. **Worker secrets:** these persist across deploys. For each `<NAME>`, run `npx wrangler secret put <NAME>`:
+1. **Log in:** `npx wrangler login`.
+2. **Deploy:** `CUSTOM_DOMAIN=wattle.example.com npm run deploy`. It finds the D1 database named `wattle` (creating it the first time), builds with its id, applies migrations and deploys to the domain. The id is never written to the repo: `wrangler.jsonc` keeps a placeholder.
+3. **Worker secrets:** these persist across deploys. For each `<NAME>`, run `npx wrangler secret put <NAME>`:
    - `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`
    - `TOKEN_ENC_KEY` (generate with `openssl rand -base64 32`)
    - `PLAID_CLIENT_ID`, `PLAID_SECRET`, `PLAID_ENV` (`sandbox` or `production`)
    - `TIINGO_API_KEY`, `FINNHUB_API_KEY`
-3. **Who can sign in:** `npm run allow -- add you@gmail.com partner@gmail.com`.
-4. **GitHub Actions** (`.github/workflows/deploy.yml`): every push to `main` typechecks, lints and tests. Once these repository secrets are set, it also builds with `D1_DATABASE_ID` (the Vite build puts it into the generated deploy config), applies D1 migrations and runs `wrangler deploy --domain $CUSTOM_DOMAIN`. Until then the deploy steps are skipped.
+4. **Who can sign in:** `npm run allow -- add you@gmail.com partner@gmail.com`.
+5. **GitHub Actions** (`.github/workflows/deploy.yml`): every push to `main` typechecks, lints and tests. Once these repository secrets are set, it also runs `npm run deploy`. Until then the deploy step is skipped.
    - `CLOUDFLARE_API_TOKEN`
    - `CLOUDFLARE_ACCOUNT_ID`
    - `CUSTOM_DOMAIN`
-   - `D1_DATABASE_ID`
 
 The nightly job runs from the Cron Trigger. Locally, `npm run daily` triggers it on the dev server.
 
@@ -173,7 +173,6 @@ A second lock in front of the app. Cloudflare's edge only lets your Google accou
 |---|---|---|
 | `CLOUDFLARE_API_TOKEN`, `CLOUDFLARE_ACCOUNT_ID` | GitHub secrets | Let the deploy job use your Cloudflare account |
 | `CUSTOM_DOMAIN` | GitHub secret | Domain to deploy to (`wrangler deploy --domain`) |
-| `D1_DATABASE_ID` | GitHub secret | The production database; put into the build's deploy config |
 | `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET` | Worker secrets | Google sign-in |
 | `TOKEN_ENC_KEY` | Worker secret | Encrypts Plaid tokens at rest |
 | `PLAID_CLIENT_ID`, `PLAID_SECRET`, `PLAID_ENV` | Worker secrets | Plaid (`sandbox` or `production`) |
