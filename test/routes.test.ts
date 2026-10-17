@@ -184,15 +184,6 @@ describe('household settings', () => {
 });
 
 describe('daily job', () => {
-  it('requires the admin token', async () => {
-    const { deps } = await household();
-    const anonymous = client(deps);
-    expect((await anonymous('/api/admin/run-daily', { method: 'POST' })).status).toBe(403);
-    expect((await anonymous('/api/admin/run-daily', { method: 'POST', headers: { authorization: 'Bearer wrong' } })).status).toBe(403);
-    const ok = await anonymous('/api/admin/run-daily', { method: 'POST', headers: { authorization: 'Bearer admin-secret' } });
-    expect(ok.body).toMatchObject({ date: TODAY, households: 1, errors: [] });
-  });
-
   it('syncs every household, isolates failures and snapshots the day', async () => {
     const plaid = fakePlaid({ accounts: [account('brk', 'investment', 1000)], securities: [security('s', 'VTI', 'etf', 100)], holdings: [holding('brk', 's', 10, 100)] });
     const { deps, api } = await household({ plaid });

@@ -22,8 +22,6 @@ export interface Config {
   googleClientSecret?: string;
   /** base64-encoded 32-byte key(s) for encrypting aggregator tokens: "v1:<key>[,v0:<key>]" or just "<key>". */
   tokenEncKey?: string;
-  /** Shared secret for /api/admin/* (cron fallbacks, manual reruns). */
-  adminToken?: string;
 }
 
 export interface DailyClose {

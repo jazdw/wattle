@@ -7,14 +7,12 @@ import { accountRoutes, connectionRoutes } from './routes/accounts';
 import { authRoutes } from './auth/routes';
 import type { AppEnv } from './env';
 import { HttpError } from './lib/http';
-import { safeEqual } from './lib/encoding';
 import { plaidRoutes } from './routes/plaid';
 import { portfolioRoutes } from './routes/portfolio';
-import { runDaily } from './services/jobs';
 
 /** Requests from the browser that change state must come from our own origin. */
 const SAFE_METHODS = new Set(['GET', 'HEAD', 'OPTIONS']);
-const ORIGIN_EXEMPT = new Set(['/api/plaid/webhook', '/api/admin/run-daily']);
+const ORIGIN_EXEMPT = new Set(['/api/plaid/webhook']);
 
 export function createApp(options: { assets?: (request: Request) => Promise<Response> } = {}) {
   const app = new Hono<AppEnv>();
@@ -35,14 +33,6 @@ export function createApp(options: { assets?: (request: Request) => Promise<Resp
   });
 
   app.get('/api/health', (c) => c.json({ ok: true, name: 'wattle' }));
-
-  /** Run the daily job on demand (Bearer ADMIN_TOKEN). */
-  app.post('/api/admin/run-daily', async (c) => {
-    const token = c.env.deps.config.adminToken;
-    const header = c.req.header('authorization') ?? '';
-    if (!token || !safeEqual(header, `Bearer ${token}`)) return c.json({ error: 'forbidden' }, 403);
-    return c.json(await runDaily(c.env.deps));
-  });
 
   app.route('/api/auth', authRoutes);
   app.route('/api/plaid', plaidRoutes);

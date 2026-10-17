@@ -31,6 +31,3 @@ PLAID_ENV="sandbox"
 # Market data (free tiers): https://www.tiingo.com, https://finnhub.io
 TIINGO_API_KEY=""
 FINNHUB_API_KEY=""
-
-# Bearer token for POST /api/admin/run-daily (manual reruns of the daily job).
-ADMIN_TOKEN=""

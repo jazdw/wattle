@@ -21,7 +21,8 @@
     "db:migrate:remote": "wrangler d1 migrations apply wattle --remote",
     "node:start": "tsx node/server.ts",
     "icons": "node scripts/generate-icons.mjs",
-    "allow": "node scripts/allow.mjs"
+    "allow": "node scripts/allow.mjs",
+    "daily": "curl -fsS -o /dev/null \"http://localhost:5173/cdn-cgi/handler/scheduled?cron=0+2+*+*+*\" && echo \"Daily job triggered (see the dev server log).\""
   },
   "dependencies": {
     "@tanstack/react-query": "^5.90.2",

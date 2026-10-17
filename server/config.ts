@@ -9,7 +9,6 @@ export interface RawEnv {
   GOOGLE_CLIENT_ID?: string;
   GOOGLE_CLIENT_SECRET?: string;
   TOKEN_ENC_KEY?: string;
-  ADMIN_TOKEN?: string;
   PLAID_CLIENT_ID?: string;
   PLAID_SECRET?: string;
   PLAID_ENV?: string;
@@ -33,7 +32,6 @@ export function configFromEnv(env: RawEnv): Config {
     googleClientId: env.GOOGLE_CLIENT_ID || undefined,
     googleClientSecret: env.GOOGLE_CLIENT_SECRET || undefined,
     tokenEncKey: env.TOKEN_ENC_KEY || undefined,
-    adminToken: env.ADMIN_TOKEN || undefined,
   };
 }
 
