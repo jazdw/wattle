@@ -3,17 +3,45 @@
  * holding_daily row per holding, valued at the day's close. Idempotent —
  * rerunning a day overwrites that day's synced rows. Manually entered and
  * imported values for the day are never overwritten.
+ *
+ * One snapshot per household at a time (its lease), written atomically. A
+ * change that finds a snapshot running leaves a note, and the running one goes
+ * again: every change is followed by a snapshot that read it, so the last
+ * snapshot written always reflects the latest data.
  */
 import { eq, inArray, sql } from 'drizzle-orm';
 import type { IsoDate } from '../../shared/dates';
-import { chunkRows, runBatch } from '../db/batch';
+import { chunkRows, runAtomic } from '../db/batch';
 import { accountDaily, accounts, holdingDaily, holdings, securities } from '../db/schema';
 import type { Tenant } from '../db/tenant';
 import type { Deps } from '../ports';
+import { holdWhile, Lease, snapshotLease } from './lease';
 import { closeLookup, ensureRecentCloses } from './pricing';
 import { priceOn } from './valuation';
 
-export async function snapshotHousehold(deps: Deps, tenant: Tenant, date: IsoDate): Promise<{ accounts: number; holdings: number }> {
+export async function snapshotHousehold(
+  deps: Deps,
+  tenant: Tenant,
+  date: IsoDate,
+): Promise<{ accounts: number; holdings: number; skipped?: boolean }> {
+  const key = snapshotLease(tenant.householdId);
+  let lease = await Lease.acquire(deps, tenant, key);
+  if (!lease) {
+    await Lease.leaveNote(deps, tenant, key);
+    // The holder may have released just before the note: then run it ourselves.
+    lease = await Lease.acquire(deps, tenant, key);
+    if (!lease) return { accounts: 0, holdings: 0, skipped: true };
+  }
+  const held = lease;
+  let result = { accounts: 0, holdings: 0 };
+  await holdWhile(held, async () => {
+    result = await snapshotOnce(deps, tenant, date, held);
+  });
+  return result;
+}
+
+async function snapshotOnce(deps: Deps, tenant: Tenant, date: IsoDate, lease: Lease): Promise<{ accounts: number; holdings: number }> {
+  const startedAt = deps.now().getTime();
   const accountRows = await tenant.db
     .select()
     .from(accounts)
@@ -80,17 +108,17 @@ export async function snapshotHousehold(deps: Deps, tenant: Tenant, date: IsoDat
   }
 
   // Manual accounts tracked by holdings take their balance from them.
-  for (const account of accountRows) {
+  const balanceUpdates = accountRows.flatMap((account) => {
     const fromHoldings = totals.get(account.id);
-    if (account.source === 'manual' && fromHoldings !== undefined && fromHoldings !== account.balance) {
-      await tenant.db
-        .update(accounts)
-        .set({ balance: fromHoldings, balanceAsOf: deps.now().getTime() })
-        .where(tenant.scope(accounts, eq(accounts.id, account.id)));
-    }
-  }
+    return account.source === 'manual' && fromHoldings !== undefined && fromHoldings !== account.balance
+      ? [tenant.db.update(accounts).set({ balance: fromHoldings, balanceAsOf: deps.now().getTime() }).where(tenant.scope(accounts, eq(accounts.id, account.id)))]
+      : [];
+  });
 
-  await runBatch(tenant.db, [
+  await lease.renew();
+  await runAtomic(tenant.db, [
+    ...balanceUpdates,
+    lease.clearNotesBefore(startedAt),
     // Replace the day's synced positions so a sale made today drops out.
     // Imported rows are left alone.
     ...(visible.size > 0

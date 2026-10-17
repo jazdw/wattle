@@ -57,5 +57,6 @@ export function depsFromEnv(env: RawEnv, db: Db, background: Deps['background'])
     fx: env.FX_PROVIDER === 'none' ? null : createFrankfurter(),
     now: () => new Date(),
     background,
+    sleep: (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
   };
 }

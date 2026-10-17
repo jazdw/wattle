@@ -48,6 +48,23 @@ migrations/  drizzle-kit SQL, applied by Wrangler (D1) or Drizzle's migrator (li
 - **No account numbers.** Only Plaid's `mask` (last ≤4 characters) is stored. The `auth` product is never requested. `test/schema.test.ts` fails if a column for account or routing numbers appears.
 - **Secrets at rest.** Plaid access tokens and asset-report tokens are AES-256-GCM encrypted with `TOKEN_ENC_KEY`. The ciphertext is bound to its household and connection, and keys can be rotated (`v2:<new>,v1:<old>`).
 - **Daily job** (cron `0 2 * * *` UTC, after US close). It syncs every connection, fetches closes and FX, and writes one `account_daily` and one `holding_daily` row per account and holding. Manual and imported values are never overwritten.
+- **Concurrency.** Two people, a webhook and the nightly job can all act at once; the rules (`services/lease.ts`, enforced by `test/writes.test.ts`):
+  - **Leases**, at most one holder per key, taken with one atomic conditional write and renewed (checking the holder) right before every write batch. They expire after 2 minutes, so a run killed mid-way can't block anything for long.
+    - `connection:<id>`: everything that changes a Plaid connection's data, including syncs, history loads, bank history, disconnecting, re-linking, and hiding its accounts.
+    - `snapshot:<household>`: the daily snapshot.
+    - `account:<id>`: a manual account's holdings, balance entries and deletion.
+    - `targets:<household>`: the target allocation.
+  - **Notes.** Something that finds a lease taken (a Plaid webhook, a history load, a snapshot request) leaves a note, and the holder runs again before releasing. Only a successful run clears a note, so a failure doesn't lose it.
+  - **Atomic writes.** Each sync pass fetches from Plaid first, then writes everything, with its log entry, in one D1 batch (a transaction). Every other multi-step change is one batch too.
+  - **No lost edits.** Manual holdings and targets carry a version. A save from an editor opened before someone else's save is refused ("changed by someone else, reload").
+  - **Newest information wins** for a connection's status: a "login required" webhook isn't overwritten by a sync that fetched before it. Consent warnings are their own field, cleared by re-linking.
+  - **Late transactions.** A transaction dated before the investment history was built makes that history be rebuilt.
+- **Activity logs** (kept two years, pruned by the daily job).
+  - `sync_runs` (per household): every sync, history load and bank-history collection, including checks that found nothing to do (with the reason), with what triggered it, Plaid's `request_id` for each call (what Plaid support asks for), counts, and what changed: balances before → after, holdings' units before → after, accounts added or no longer reported. Status changes Plaid reports by webhook are logged too. Shown under **Accounts → Activity**.
+  - `price_runs` (global): every price and FX check, with the tickers, what came back, and any stored close that was replaced with a different value; written atomically with the prices it stores. Not shown in the app, since the tickers would reveal what households hold. Query it with `npx wrangler d1 execute wattle --remote --command "SELECT * FROM price_runs ORDER BY started_at DESC LIMIT 20"`.
+  - `job_runs` (global): each nightly run, with the households processed and any errors.
+  - Known gap: if two households' snapshots fetch the same ticker at the same moment, a `price_runs` entry can name a "before" value the other fetch had already replaced. The stored price is right; only that log detail is off, and it can't happen with one household. Closing it would mean serialising all price writes, which isn't worth it.
+  - Raw Plaid responses are not stored.
 - **History backfill.** When an account is linked:
   - Investment accounts are rebuilt from up to 24 months of transactions and daily closes. Days where the institution's history has gaps are marked *estimated* and shaded in charts.
   - Bank and card accounts use Plaid Asset Report daily balances (up to 2 years).

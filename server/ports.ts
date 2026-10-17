@@ -31,6 +31,8 @@ export interface DailyClose {
 
 /** End-of-day prices (Tiingo). */
 export interface PriceProvider {
+  /** Shown in the price log, e.g. 'tiingo'. */
+  readonly name: string;
   /** Daily closes for `ticker` between the dates (inclusive). Empty when unknown. */
   dailyCloses(ticker: string, start: IsoDate, end: IsoDate): Promise<DailyClose[]>;
   /**
@@ -58,6 +60,7 @@ export interface QuoteProvider {
 
 /** Daily FX rates (Frankfurter / ECB). Returns rate converting 1 `base` into `quote`. */
 export interface FxProvider {
+  readonly name: string;
   rates(base: Currency, quote: Currency, start: IsoDate, end: IsoDate): Promise<{ date: IsoDate; rate: number }[]>;
 }
 
@@ -71,4 +74,6 @@ export interface Deps {
   now: () => Date;
   /** Keep work running after the response is sent (ctx.waitUntil on Workers). */
   background: (work: Promise<unknown>) => void;
+  /** Wait (e.g. for a lease); tests make it instant. */
+  sleep: (ms: number) => Promise<void>;
 }
