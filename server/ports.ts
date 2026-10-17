@@ -22,6 +22,8 @@ export interface Config {
   googleClientSecret?: string;
   /** base64-encoded 32-byte key(s) for encrypting aggregator tokens: "v1:<key>[,v0:<key>]" or just "<key>". */
   tokenEncKey?: string;
+  /** When set, /api requests must carry a valid Cloudflare Access token for this team and application. */
+  access?: { teamDomain: string; audience: string };
 }
 
 export interface DailyClose {
