@@ -1,9 +1,17 @@
-import type { ComponentProps } from 'react';
+import { useId, type ComponentProps } from 'react';
 import { cn } from '@/lib/utils';
 
+/** Every form control gets an id (browsers expect an id or name on each) unless the caller gives one. */
+function useControlId(props: { id?: string; name?: string }): string | undefined {
+  const generated = useId();
+  return props.id ?? (props.name ? undefined : generated);
+}
+
 export function Input({ className, ...props }: ComponentProps<'input'>) {
+  const id = useControlId(props);
   return (
     <input
+      id={id}
       className={cn(
         'flex h-9 w-full rounded-md border border-input bg-card px-3 py-1 text-sm shadow-xs placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:opacity-50',
         className,
@@ -14,8 +22,10 @@ export function Input({ className, ...props }: ComponentProps<'input'>) {
 }
 
 export function NativeSelect({ className, ...props }: ComponentProps<'select'>) {
+  const id = useControlId(props);
   return (
     <select
+      id={id}
       className={cn(
         'flex h-9 w-full rounded-md border border-input bg-card px-2 py-1 text-sm shadow-xs focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:opacity-50',
         className,
