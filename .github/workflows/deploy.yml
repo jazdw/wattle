@@ -40,17 +40,17 @@ jobs:
       - name: Build
         run: npm run build
 
-      # Until the Cloudflare secrets are set, CI only checks the code and the
+      # Until the Cloudflare token and settings are set, CI only checks the code and the
       # deploy step is skipped (the run stays green).
-      - name: Check deploy secrets
+      - name: Check deploy settings
         id: secrets
         env:
-          CUSTOM_DOMAIN: ${{ secrets.CUSTOM_DOMAIN }}
+          CUSTOM_DOMAIN: ${{ vars.CUSTOM_DOMAIN }}
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
         run: |
           if [ -z "$CUSTOM_DOMAIN" ] || [ -z "$CLOUDFLARE_API_TOKEN" ] || [ -z "$CLOUDFLARE_ACCOUNT_ID" ]; then
-            echo "::notice::Deploy skipped: set CUSTOM_DOMAIN, CLOUDFLARE_API_TOKEN and CLOUDFLARE_ACCOUNT_ID to deploy."
+            echo "::notice::Deploy skipped: set the CLOUDFLARE_API_TOKEN secret and the CLOUDFLARE_ACCOUNT_ID and CUSTOM_DOMAIN variables to deploy."
             echo "ready=false" >> "$GITHUB_OUTPUT"
           else
             echo "ready=true" >> "$GITHUB_OUTPUT"
@@ -58,11 +58,12 @@ jobs:
 
       # Finds (or creates) the D1 database by name, builds with its id, applies
       # migrations and deploys to the custom domain (scripts/deploy.mjs). The
-      # domain lives in a secret so it isn't committed to the repo.
+      # account id and domain are repository variables (not secret, just not
+      # committed); only the API token is a secret.
       - name: Deploy
         if: steps.secrets.outputs.ready == 'true'
         env:
-          CUSTOM_DOMAIN: ${{ secrets.CUSTOM_DOMAIN }}
+          CUSTOM_DOMAIN: ${{ vars.CUSTOM_DOMAIN }}
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
         run: npm run deploy

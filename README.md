@@ -124,7 +124,7 @@ The redirect URI is built from the request's origin, so no hostname is configure
 - Both are optional. Without them, holdings are valued at the institution's prices and no live quotes are shown.
 
 ### Deploy
-Nothing in the repo is specific to one deployment. Everything that is lives in your Cloudflare account or your GitHub repository secrets.
+Nothing in the repo is specific to one deployment. Everything that is lives in your Cloudflare account or your GitHub repository settings.
 
 1. **Log in:** `npx wrangler login`.
 2. **Deploy:** `CUSTOM_DOMAIN=wattle.example.com npm run deploy`. It finds the D1 database named `wattle` (creating it the first time), builds with its id, applies migrations and deploys to the domain. The id is never written to the repo: `wrangler.jsonc` keeps a placeholder.
@@ -134,10 +134,9 @@ Nothing in the repo is specific to one deployment. Everything that is lives in y
    - `PLAID_CLIENT_ID`, `PLAID_SECRET`, `PLAID_ENV` (`sandbox` or `production`)
    - `TIINGO_API_KEY`, `FINNHUB_API_KEY`
 4. **Who can sign in:** `npm run allow -- add you@gmail.com partner@gmail.com`.
-5. **GitHub Actions** (`.github/workflows/deploy.yml`): every push to `main` typechecks, lints and tests. Once these repository secrets are set, it also runs `npm run deploy`. Until then the deploy step is skipped.
-   - `CLOUDFLARE_API_TOKEN`
-   - `CLOUDFLARE_ACCOUNT_ID`
-   - `CUSTOM_DOMAIN`
+5. **GitHub Actions** (`.github/workflows/deploy.yml`): every push to `main` typechecks, lints and tests. Once these are set, it also runs `npm run deploy`. Until then the deploy step is skipped.
+   - Secret: `CLOUDFLARE_API_TOKEN` (`gh secret set CLOUDFLARE_API_TOKEN`). The "Edit Cloudflare Workers" template, plus Account → D1 → Edit.
+   - Variables: `CLOUDFLARE_ACCOUNT_ID` and `CUSTOM_DOMAIN` (`gh variable set NAME --body VALUE`). Not secret, just kept out of the repo.
 
 The nightly job runs from the Cron Trigger. Locally, `npm run daily` triggers it on the dev server.
 
@@ -171,8 +170,9 @@ A second lock in front of the app. Cloudflare's edge only lets your Google accou
 ### Configuration reference
 | Setting | Where | Purpose |
 |---|---|---|
-| `CLOUDFLARE_API_TOKEN`, `CLOUDFLARE_ACCOUNT_ID` | GitHub secrets | Let the deploy job use your Cloudflare account |
-| `CUSTOM_DOMAIN` | GitHub secret | Domain to deploy to (`wrangler deploy --domain`) |
+| `CLOUDFLARE_API_TOKEN` | GitHub secret | Lets the deploy job use your Cloudflare account |
+| `CLOUDFLARE_ACCOUNT_ID` | GitHub variable | Which Cloudflare account to deploy to |
+| `CUSTOM_DOMAIN` | GitHub variable | Domain to deploy to (`wrangler deploy --domain`) |
 | `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET` | Worker secrets | Google sign-in |
 | `TOKEN_ENC_KEY` | Worker secret | Encrypts Plaid tokens at rest |
 | `PLAID_CLIENT_ID`, `PLAID_SECRET`, `PLAID_ENV` | Worker secrets | Plaid (`sandbox` or `production`) |
