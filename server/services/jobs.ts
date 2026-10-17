@@ -1,14 +1,15 @@
 /**
  * The daily job (cron on Workers, node-cron on Node): for every household,
- * sync each connection, collect pending balance-history reports, then write
+ * sync each connection (which also collects ready balance-history reports), then write
  * the day's snapshot. Failures are isolated per connection and per household.
+ * Each run is recorded in job_runs; old log entries are pruned here.
  */
 import { lt } from 'drizzle-orm';
-import { households, sessions } from '../db/schema';
+import { households, jobRuns, sessions } from '../db/schema';
 import { Tenant } from '../db/tenant';
 import type { Deps } from '../ports';
 import { addDays, marketDate } from '../../shared/dates';
-import { collectBalanceHistory, backfillConnection, pendingReports } from './backfill';
+import { pruneLogs } from './activity';
 import { cachePrune } from './cache';
 import { ensureFx } from './pricing';
 import { snapshotHousehold } from './snapshots';
@@ -21,32 +22,24 @@ export interface DailyReport {
 }
 
 export async function runDaily(deps: Deps): Promise<DailyReport> {
+  const startedAt = deps.now().getTime();
   const date = marketDate(deps.now());
   const errors: string[] = [];
   await ensureFx(deps, addDays(date, -7), date);
   await cachePrune(deps);
-  await deps.db.delete(sessions).where(lt(sessions.expiresAt, deps.now().getTime()));
+  await pruneLogs(deps);
+  await deps.db.delete(sessions).where(lt(sessions.expiresAt, startedAt));
 
   const rows = await deps.db.select({ id: households.id }).from(households);
   for (const { id } of rows) {
     const tenant = new Tenant(deps.db, id);
     for (const connection of await activeConnections(tenant)) {
       try {
-        await syncConnection(deps, tenant, connection.id);
-        // Investment history needs the transactions fetched by the first
-        // successful sync; retry backfills that couldn't run at link time.
-        if (connection.kind === 'investments' && connection.backfillStatus === 'pending') {
-          await backfillConnection(deps, tenant, connection.id, null);
-        }
+        // Also collects ready bank reports and runs history loads that are due
+        // (never run, abandoned, or invalidated by a late transaction).
+        await syncConnection(deps, tenant, connection.id, 'nightly');
       } catch (error) {
         errors.push(`sync ${connection.id}: ${error instanceof Error ? error.message : String(error)}`);
-      }
-    }
-    for (const connectionId of await pendingReports(tenant)) {
-      try {
-        await collectBalanceHistory(deps, tenant, connectionId);
-      } catch (error) {
-        errors.push(`assets ${connectionId}: ${error instanceof Error ? error.message : String(error)}`);
       }
     }
     try {
@@ -56,5 +49,14 @@ export async function runDaily(deps: Deps): Promise<DailyReport> {
     }
   }
   if (errors.length > 0) console.error('Daily job errors', errors);
+  await deps.db.insert(jobRuns).values({
+    id: crypto.randomUUID(),
+    job: 'daily',
+    date,
+    startedAt,
+    finishedAt: deps.now().getTime(),
+    households: rows.length,
+    errors,
+  });
   return { date, households: rows.length, errors };
 }

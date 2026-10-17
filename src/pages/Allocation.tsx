@@ -220,6 +220,8 @@ function TargetDialog({
   const [excludedAccounts, setExcludedAccounts] = useState<string[]>([]);
   const [excludedCategories, setExcludedCategories] = useState<Category[]>([]);
   const [initialised, setInitialised] = useState(false);
+  /** The version this editor loaded: saving is refused if someone saved since. */
+  const [loadedVersion, setLoadedVersion] = useState<number | undefined>(undefined);
 
   if (open && !initialised) {
     setWeights(
@@ -228,6 +230,7 @@ function TargetDialog({
     setBand(String(target?.bandPct ?? 5));
     setExcludedAccounts(target?.excludedAccountIds ?? []);
     setExcludedCategories(target?.excludedCategories ?? ['real_estate']);
+    setLoadedVersion(target?.version);
     setInitialised(true);
   }
   if (!open && initialised) setInitialised(false);
@@ -247,6 +250,7 @@ function TargetDialog({
           bandPct: Number(band) || 0,
           excludedAccountIds: excludedAccounts,
           excludedCategories,
+          version: loadedVersion,
         }),
       }),
     onSuccess: () => {

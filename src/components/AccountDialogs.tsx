@@ -317,11 +317,13 @@ export function HoldingsDialog({ account, onClose }: { account: AccountSummary |
   const invalidate = useInvalidate();
   const [drafts, setDrafts] = useState<HoldingDraft[] | null>(null);
   const [loadedFor, setLoadedFor] = useState<string | null>(null);
+  /** The version this editor loaded: saving is refused if someone saved since. */
+  const [loadedVersion, setLoadedVersion] = useState<number | undefined>(undefined);
 
   const current = useQuery({
     queryKey: ['account-holdings', account?.id],
     queryFn: () =>
-      api<{ holdings: { ticker: string | null; name: string | null; quantity: number; price: number | null; isPublic: boolean }[] }>(
+      api<{ holdings: { ticker: string | null; name: string | null; quantity: number; price: number | null; isPublic: boolean }[]; version: number }>(
         `/api/accounts/${account!.id}/holdings`,
       ),
     enabled: account !== null,
@@ -329,6 +331,7 @@ export function HoldingsDialog({ account, onClose }: { account: AccountSummary |
 
   if (account && current.data && loadedFor !== account.id) {
     setLoadedFor(account.id);
+    setLoadedVersion(current.data.version);
     setDrafts(
       current.data.holdings.map((holding) => ({
         ticker: holding.ticker ?? '',
@@ -352,6 +355,7 @@ export function HoldingsDialog({ account, onClose }: { account: AccountSummary |
               quantity: Number(draft.quantity),
               ...(draft.price ? { price: Number(draft.price) } : {}),
             })),
+          version: loadedVersion,
         }),
       }),
     onSuccess: () => {

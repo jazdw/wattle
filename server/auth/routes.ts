@@ -13,6 +13,7 @@ import { Tenant } from '../db/tenant';
 import type { AppEnv } from '../env';
 import { finishSignIn, startSignIn, type PendingSignIn } from './google';
 import { base64ToBytes, bytesToBase64Url, randomToken, sha256Hex } from '../lib/encoding';
+import { stableId } from '../services/ids';
 import type { Db, Deps } from '../ports';
 
 export const SESSION_COOKIE = 'wt_session';
@@ -132,12 +133,25 @@ async function ensureMembership(deps: Deps, userId: string, allowance: Allowance
     householdId = existing[0]?.id ?? null;
   }
   if (!householdId) {
-    householdId = crypto.randomUUID();
-    role = 'owner';
-    await deps.db.insert(households).values({ id: householdId, name: 'Our household', createdAt: now });
+    // The very first sign-in. A fixed id, so two people signing in for the
+    // first time at the same moment both join one household (the second
+    // insert is ignored) instead of creating two.
+    householdId = await stableId('household:first');
+    const created = await deps.db
+      .insert(households)
+      .values({ id: householdId, name: 'Our household', createdAt: now })
+      .onConflictDoNothing()
+      .returning({ id: households.id });
+    if (created.length > 0) role = 'owner';
   }
-  await deps.db.insert(householdMembers).values({ householdId, userId, role, createdAt: now });
-  return householdId;
+  // A user belongs to one household (unique): a duplicate sign-in at the same
+  // moment is ignored, and both read back the one membership.
+  await deps.db.insert(householdMembers).values({ householdId, userId, role, createdAt: now }).onConflictDoNothing();
+  const [membership] = await deps.db
+    .select({ householdId: householdMembers.householdId })
+    .from(householdMembers)
+    .where(eq(householdMembers.userId, userId));
+  return membership!.householdId;
 }
 
 class AmbiguousHouseholdError extends Error {
@@ -157,29 +171,13 @@ async function upsertUser(deps: Deps, profile: UserProfile): Promise<string> {
   const now = deps.now().getTime();
   const name = profile.name ?? profile.email;
   const picture = profile.picture ?? null;
-  const [existing] = await deps.db
-    .select({ id: users.id })
-    .from(users)
-    .where(eq(users.googleSub, profile.sub))
-    .limit(1);
-  if (existing) {
-    await deps.db
-      .update(users)
-      .set({ email: profile.email, name, picture, lastLoginAt: now })
-      .where(eq(users.id, existing.id));
-    return existing.id;
-  }
-  const id = crypto.randomUUID();
-  await deps.db.insert(users).values({
-    id,
-    googleSub: profile.sub,
-    email: profile.email,
-    name,
-    picture,
-    createdAt: now,
-    lastLoginAt: now,
-  });
-  return id;
+  // One statement, so two sign-ins of the same person at once can't both insert.
+  const [row] = await deps.db
+    .insert(users)
+    .values({ id: crypto.randomUUID(), googleSub: profile.sub, email: profile.email, name, picture, createdAt: now, lastLoginAt: now })
+    .onConflictDoUpdate({ target: users.googleSub, set: { email: profile.email, name, picture, lastLoginAt: now } })
+    .returning({ id: users.id });
+  return row!.id;
 }
 
 async function signIn(c: Context<AppEnv>, profile: UserProfile, allowance: Allowance): Promise<void> {

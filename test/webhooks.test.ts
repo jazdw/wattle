@@ -1,3 +1,4 @@
+import { desc, sql } from 'drizzle-orm';
 import { describe, expect, it } from 'vitest';
 import * as schema from '../server/db/schema';
 import { account, fakePlaid, holding, security, signWebhook } from './fakes';
@@ -52,19 +53,27 @@ describe('Plaid webhooks', () => {
   });
 
   it('tracks connection health', async () => {
-    const { send, connection, plaid } = await setup();
+    const { deps, send, connection, plaid, api } = await setup();
     await send({ webhook_type: 'ITEM', webhook_code: 'ERROR', item_id: 'item-1', error: { error_code: 'ITEM_LOGIN_REQUIRED' } });
     expect(await connection()).toMatchObject({ status: 'login_required', errorCode: 'ITEM_LOGIN_REQUIRED' });
+    // The status change is in the sync log too.
+    const [logged] = await deps.db.select().from(schema.syncRuns).orderBy(desc(sql`rowid`)).limit(1);
+    expect(logged).toMatchObject({ trigger: 'webhook', note: 'Plaid reported ITEM:ERROR (ITEM_LOGIN_REQUIRED).' });
 
     await send({ webhook_type: 'ITEM', webhook_code: 'ERROR', item_id: 'item-1', error: { error_code: 'INSTITUTION_DOWN' } });
     expect((await connection()).status).toBe('error');
 
-    await send({ webhook_type: 'ITEM', webhook_code: 'PENDING_EXPIRATION', item_id: 'item-1' });
-    expect((await connection()).status).toBe('pending_expiration');
+    // A consent warning is its own field: it doesn't hide the error, and a
+    // sync doesn't clear it (re-linking does).
+    await send({ webhook_type: 'ITEM', webhook_code: 'PENDING_EXPIRATION', item_id: 'item-1', consent_expiration_time: '2026-11-01T00:00:00Z' });
+    expect(await connection()).toMatchObject({ status: 'error', consentExpiresAt: Date.parse('2026-11-01T00:00:00Z') });
+    expect((await connection()).consentWarningAt).not.toBeNull();
+    expect((await api('/api/connections')).body.connections[0].status).toBe('error');
 
     plaid.state.failWith = null;
     await send({ webhook_type: 'ITEM', webhook_code: 'LOGIN_REPAIRED', item_id: 'item-1' });
     expect((await connection()).status).toBe('ok');
+    expect((await api('/api/connections')).body.connections[0].status).toBe('pending_expiration');
 
     await send({ webhook_type: 'ITEM', webhook_code: 'USER_PERMISSION_REVOKED', item_id: 'item-1' });
     expect((await connection()).status).toBe('error');
@@ -85,6 +94,8 @@ describe('Plaid webhooks', () => {
     expect(await ready.connection()).toMatchObject({ backfillStatus: 'done', assetReportId: null });
 
     const failed = await setup('banking');
+    failed.plaid.state.assetReportGetError = 'ASSET_REPORT_GENERATION_FAILED';
+    // The webhook triggers a sync, which asks Plaid and records the failure.
     await failed.send({ webhook_type: 'ASSETS', webhook_code: 'ERROR', asset_report_id: 'ar-1' });
     expect(await failed.connection()).toMatchObject({ backfillStatus: 'failed', assetReportTokenEnc: null });
   });

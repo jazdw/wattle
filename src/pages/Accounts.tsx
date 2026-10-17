@@ -1,8 +1,9 @@
 import { useMutation, useQueryClient } from '@tanstack/react-query';
-import { EyeOff, Layers, Pencil, Plus, RefreshCw, Upload } from 'lucide-react';
+import { EyeOff, History, Layers, Pencil, Plus, RefreshCw, Upload } from 'lucide-react';
 import { useState } from 'react';
 import type { AccountSummary, ConnectionSummary } from '../../shared/types';
 import { api } from '../api';
+import { ActivityDialog } from '../components/ActivityDialog';
 import { EditAccountDialog, HoldingsDialog, ImportDialog, NewAccountDialog } from '../components/AccountDialogs';
 import { PageHeader } from '../components/Layout';
 import { PlaidLinkButton } from '../components/PlaidLinkButton';
@@ -45,6 +46,7 @@ export function Accounts() {
   const [editing, setEditing] = useState<AccountSummary | null>(null);
   const [holdingsFor, setHoldingsFor] = useState<AccountSummary | null>(null);
   const [removing, setRemoving] = useState<string | null>(null);
+  const [activityFor, setActivityFor] = useState<ConnectionSummary | null>(null);
 
   const sync = useMutation({
     mutationFn: (id: string) => api(`/api/connections/${id}/sync`, { method: 'POST' }),
@@ -131,6 +133,9 @@ export function Accounts() {
                   <Button variant="outline" size="sm" onClick={() => sync.mutate(connection.id)} disabled={sync.isPending}>
                     <RefreshCw className={sync.isPending && sync.variables === connection.id ? 'animate-spin' : undefined} /> Sync
                   </Button>
+                  <Button variant="ghost" size="sm" onClick={() => setActivityFor(connection)}>
+                    <History /> Activity
+                  </Button>
                   {removing === connection.id ? (
                     <Button variant="destructive" size="sm" onClick={() => remove.mutate(connection.id)} disabled={remove.isPending}>
                       Confirm disconnect
@@ -189,6 +194,7 @@ export function Accounts() {
       <ImportDialog accounts={accounts.data?.accounts ?? []} open={importing} onOpenChange={setImporting} />
       <EditAccountDialog account={editing} onClose={() => setEditing(null)} />
       <HoldingsDialog account={holdingsFor} onClose={() => setHoldingsFor(null)} />
+      <ActivityDialog connection={activityFor} onClose={() => setActivityFor(null)} />
     </>
   );
 }

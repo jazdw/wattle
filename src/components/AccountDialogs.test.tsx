@@ -75,7 +75,7 @@ describe('manual accounts', () => {
   it('edits holdings by ticker, with unit prices for unlisted funds', async () => {
     server.use(
       http.get('*/api/accounts/super/holdings', () =>
-        HttpResponse.json({ holdings: [{ ticker: 'VAS', name: 'Vanguard Australian Shares', quantity: 100, price: 100, value: 10000_00, isPublic: true }] }),
+        HttpResponse.json({ holdings: [{ ticker: 'VAS', name: 'Vanguard Australian Shares', quantity: 100, price: 100, value: 10000_00, isPublic: true }], version: 4 }),
       ),
       http.put('*/api/accounts/super/holdings', () => HttpResponse.json({ ok: true, unpriced: 0 })),
     );
@@ -98,6 +98,7 @@ describe('manual accounts', () => {
         { ticker: 'VAS', name: 'Vanguard Australian Shares', quantity: 100 },
         { ticker: 'REST-BAL', quantity: 1000, price: 1.85 },
       ],
+      version: 4, // what the editor loaded
     });
   });
 

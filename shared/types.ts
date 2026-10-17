@@ -47,6 +47,30 @@ export interface ConnectionSummary {
   createdAt: number;
 }
 
+/** One change a sync made to stored data (balances in minor units, holdings in units). */
+export type SyncChange =
+  | { kind: 'balance'; accountId: string; account: string; before: number | null; after: number | null; currency: string }
+  | { kind: 'account_added' | 'account_missing'; accountId: string; account: string }
+  | { kind: 'holding'; accountId: string; account: string; security: string; before: number | null; after: number | null };
+
+/** A logged sync, history load or balance-history collection (GET /api/connections/:id/activity). */
+export interface SyncRunSummary {
+  id: string;
+  action: 'sync' | 'history' | 'balance_history' | 'relink' | 'disconnect' | 'account';
+  trigger: 'link' | 'webhook' | 'nightly' | 'manual' | 'refresh';
+  startedAt: number;
+  finishedAt: number;
+  /** 'skipped': looked, but had nothing to do (`note` says why). */
+  outcome: 'ok' | 'error' | 'skipped';
+  errorCode: string | null;
+  errorMessage: string | null;
+  note: string | null;
+  plaidCalls: { endpoint: string; requestId: string | null; error?: string }[];
+  counts: Record<string, number>;
+  changes: SyncChange[];
+  truncated: boolean;
+}
+
 export type AccountType = 'depository' | 'credit' | 'loan' | 'investment' | 'property' | 'other';
 
 export interface AccountSummary {
@@ -142,6 +166,8 @@ export interface TargetResponse {
     bandPct: number;
     excludedAccountIds: string[];
     excludedCategories: Category[];
+    /** Send back when saving; a save is refused if someone saved since. */
+    version: number;
   } | null;
 }
 

@@ -80,7 +80,8 @@ const { id: brokerage } = await call('/api/accounts', 'POST', {
   currency: 'USD',
   ownerUserId: null,
 });
-await call(`/api/accounts/${brokerage}/holdings`, 'PUT', { holdings });
+// A new account: its holdings are at version 0.
+await call(`/api/accounts/${brokerage}/holdings`, 'PUT', { holdings, version: 0 });
 const priceSeries = holdings.map((holding, index) =>
   holding.ticker === 'VMFXX' ? dates.map(() => 1) : walk(holding.price, holding.ticker === 'VBTLX' ? 0.004 : 0.018, 0.0004, 31 + index),
 );

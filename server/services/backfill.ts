@@ -3,60 +3,133 @@
  *  - investment accounts: rebuilt from investment transactions + daily closes
  *    (see backfillCore.ts);
  *  - bank and credit accounts: Plaid Asset Report `historical_balances`
- *    (up to 731 days), requested once and collected via webhook or the daily job.
- * Backfilled rows never overwrite synced, imported or manual rows.
+ *    (up to 731 days), requested here and collected later (./assetReports).
+ * Backfilled rows never overwrite synced, imported or manual rows, so a load
+ * that fails part-way is safe to re-run: the rows are written in chunks, and
+ * the outcome (status + log row) atomically at the end.
  */
-import { eq, gte, isNotNull } from 'drizzle-orm';
+import { eq, gte, inArray, sql } from 'drizzle-orm';
+import type { BatchItem } from 'drizzle-orm/batch';
 import { addDays, marketDate } from '../../shared/dates';
-import { toMinor } from '../../shared/money';
 import { PlaidApiError } from '../adapters/plaid';
-import { chunkRows, runBatch } from '../db/batch';
+import { chunkRows, runAtomic, runBatch } from '../db/batch';
 import { accountDaily, accounts, connections, holdingDaily, holdings, investmentTransactions, securities } from '../db/schema';
 import type { Tenant } from '../db/tenant';
 import type { Deps } from '../ports';
 import { reconstructHistory } from './backfillCore';
-import { decryptToken, encryptToken, loadTokenKeys, tokenAad } from './crypto';
+import { SyncRun, type SyncTrigger } from './activity';
+import { encryptToken, loadTokenKeys, tokenAad } from './crypto';
 import { closeLookup, ensureCloses, ensureFx } from './pricing';
-import { accessTokenFor, getConnection, HISTORY_DAYS, type ConnectionRow } from './sync';
+import { connectionLease, Lease, LeaseLostError } from './lease';
+import { accessTokenFor, getConnection, HISTORY_DAYS, underConnectionLease, type ConnectionRow } from './sync';
 import { isCashSecurity, priceOn } from './valuation';
 
-async function setBackfillStatus(tenant: Tenant, connectionId: string, status: ConnectionRow['backfillStatus']) {
-  await tenant.db
+function backfillStatusStatement(tenant: Tenant, connectionId: string, status: ConnectionRow['backfillStatus']) {
+  return tenant.db
     .update(connections)
     .set({ backfillStatus: status })
     .where(tenant.scope(connections, eq(connections.id, connectionId)));
 }
 
 /**
- * Start (or run) the backfill appropriate for a connection. `webhookUrl` is
- * where Plaid should report a finished asset report (derived from the request
- * origin, so no hostname is configured anywhere).
+ * Load (or reload) a connection's history now, under its lease. If the
+ * connection is busy, mark the load as due and leave a note: the holder runs
+ * it before releasing. `webhookUrl` is where Plaid should report a finished
+ * asset report (from the request origin, so no hostname is configured).
  */
 export async function backfillConnection(
   deps: Deps,
   tenant: Tenant,
   connectionId: string,
   webhookUrl: string | null,
+  trigger: SyncTrigger,
+): Promise<void> {
+  const connection = await getConnection(tenant, connectionId);
+  if (!connection || connection.status === 'removed') return;
+  const key = connectionLease(connection.id);
+  let lease = await Lease.acquire(deps, tenant, key);
+  if (!lease) {
+    // Due: a load that never ran is "pending"; a reload is marked stale.
+    await (connection.kind === 'investments' && connection.backfillStatus === 'done'
+      ? tenant.db.update(connections).set({ historyStaleAt: deps.now().getTime() }).where(tenant.scope(connections, eq(connections.id, connection.id)))
+      : backfillStatusStatement(tenant, connection.id, 'pending'));
+    await Lease.leaveNote(deps, tenant, key);
+    // The holder may have released just before the note: then run it ourselves.
+    lease = await Lease.acquire(deps, tenant, key);
+    if (!lease) {
+      await new SyncRun(deps, tenant, connection.id, 'history', trigger).skipped('The connection was busy; the history load runs when that finishes.');
+      return;
+    }
+  }
+  await underConnectionLease(deps, tenant, connection.id, trigger, lease, { reportJustRequested: connection.kind === 'banking' }, () =>
+    runHistoryLoad(deps, tenant, connection.id, trigger, lease, webhookUrl),
+  );
+}
+
+/**
+ * The history load itself; the caller holds the connection's lease (renewed
+ * before every write). Investment history is rebuilt from transactions and
+ * daily closes; for banks an asset report is requested (collected later).
+ * Rows are written in chunks (insert-or-ignore, so a load that dies part-way
+ * is safe to re-run), and the outcome with its log row atomically at the end.
+ * Failures are logged, not thrown, except losing the lease.
+ */
+export async function runHistoryLoad(
+  deps: Deps,
+  tenant: Tenant,
+  connectionId: string,
+  trigger: SyncTrigger,
+  lease: Lease,
+  webhookUrl: string | null,
 ): Promise<void> {
   const connection = await getConnection(tenant, connectionId);
   if (!connection) return;
+  const startedAt = deps.now().getTime();
   const today = marketDate(deps.now());
-  await setBackfillStatus(tenant, connection.id, 'running');
+  const run = new SyncRun(deps, tenant, connection.id, 'history', trigger);
   try {
+    await lease.renew();
+    await backfillStatusStatement(tenant, connection.id, 'running');
     await ensureFx(deps, addDays(today, -HISTORY_DAYS), today);
+    let outcome: BatchItem<'sqlite'>[];
     if (connection.kind === 'investments') {
       const accountRows = await tenant.db
         .select({ id: accounts.id })
         .from(accounts)
         .where(tenant.scope(accounts, eq(accounts.connectionId, connection.id), eq(accounts.isHidden, false)));
-      for (const account of accountRows) await backfillInvestmentAccount(deps, tenant, account.id);
-      await setBackfillStatus(tenant, connection.id, 'done');
+      const accountIds = accountRows.map((row) => row.id);
+      if (connection.historyStaleAt !== null && connection.backfillStatus === 'done' && accountIds.length > 0) {
+        // Rebuild: drop the previous estimate (only backfilled rows; synced,
+        // imported and manual ones stay) and reconstruct with every transaction.
+        run.note = 'Rebuilt because a transaction dated before the previous history arrived later.';
+        await lease.renew();
+        await runAtomic(tenant.db, [
+          tenant.db.delete(accountDaily).where(tenant.scope(accountDaily, inArray(accountDaily.accountId, accountIds), eq(accountDaily.source, 'backfill'))),
+          tenant.db.delete(holdingDaily).where(tenant.scope(holdingDaily, inArray(holdingDaily.accountId, accountIds), eq(holdingDaily.source, 'backfill'))),
+        ]);
+      }
+      for (const accountId of accountIds) run.count('days', await backfillInvestmentAccount(deps, tenant, accountId, lease));
+      outcome = [
+        tenant.db
+          .update(connections)
+          .set({
+            backfillStatus: 'done',
+            historyAsOf: today,
+            // A late transaction that arrived during this load needs another.
+            historyStaleAt: sql`case when ${connections.historyStaleAt} < ${startedAt} then null else ${connections.historyStaleAt} end`,
+          })
+          .where(tenant.scope(connections, eq(connections.id, connection.id))),
+      ];
     } else {
-      await requestBalanceHistory(deps, tenant, connection, webhookUrl);
+      outcome = await requestBalanceHistory(deps, tenant, connection, webhookUrl, run);
     }
+    await lease.renew();
+    await runAtomic(tenant.db, [...outcome, run.statement()]);
   } catch (error) {
-    console.error('Backfill failed', error instanceof Error ? error.message : error);
-    await setBackfillStatus(tenant, connection.id, 'failed');
+    console.error('History load failed', error instanceof Error ? error.message : error);
+    await run.failed(error);
+    if (error instanceof LeaseLostError) throw error;
+    await backfillStatusStatement(tenant, connection.id, 'failed');
   }
 }
 
@@ -64,7 +137,7 @@ export async function backfillConnection(
 /* Investment accounts                                                 */
 /* ------------------------------------------------------------------ */
 
-export async function backfillInvestmentAccount(deps: Deps, tenant: Tenant, accountId: string): Promise<number> {
+export async function backfillInvestmentAccount(deps: Deps, tenant: Tenant, accountId: string, lease?: Lease): Promise<number> {
   const [account] = await tenant.db
     .select()
     .from(accounts)
@@ -151,6 +224,7 @@ export async function backfillInvestmentAccount(deps: Deps, tenant: Tenant, acco
   }));
 
   // Today's row comes from the regular snapshot.
+  await lease?.renew();
   await runBatch(tenant.db, [
     ...chunkRows(holdingDaily, holdingRows).map((chunk) => tenant.db.insert(holdingDaily).values(chunk).onConflictDoNothing()),
     ...chunkRows(accountDaily, accountRows).map((chunk) => tenant.db.insert(accountDaily).values(chunk).onConflictDoNothing()),
@@ -162,102 +236,35 @@ export async function backfillInvestmentAccount(deps: Deps, tenant: Tenant, acco
 /* Bank & credit accounts (Plaid Assets)                               */
 /* ------------------------------------------------------------------ */
 
+/** Ask Plaid for an asset report; returns the statements recording the request. */
 async function requestBalanceHistory(
   deps: Deps,
   tenant: Tenant,
   connection: ConnectionRow,
   webhookUrl: string | null,
-): Promise<void> {
-  if (!deps.plaid) return;
+  run: SyncRun,
+): Promise<BatchItem<'sqlite'>[]> {
+  if (!deps.plaid) return [];
   const keys = await loadTokenKeys(deps.config.tokenEncKey);
   const accessToken = await accessTokenFor(deps, connection);
   try {
-    const report = await deps.plaid.createAssetReport(accessToken, 731, webhookUrl);
-    await tenant.db
-      .update(connections)
-      .set({
-        assetReportTokenEnc: await encryptToken(keys, report.token, tokenAad(tenant.householdId, connection.id)),
-        assetReportId: report.id,
-      })
-      .where(tenant.scope(connections, eq(connections.id, connection.id)));
+    const report = await run.plaid().createAssetReport(accessToken, 731, webhookUrl);
+    run.count('assetReportsRequested', 1);
+    return [
+      tenant.db
+        .update(connections)
+        .set({
+          assetReportTokenEnc: await encryptToken(keys, report.token, tokenAad(tenant.householdId, connection.id)),
+          assetReportId: report.id,
+        })
+        .where(tenant.scope(connections, eq(connections.id, connection.id))),
+    ];
   } catch (error) {
     // Institutions without Assets support: history comes from CSV import instead.
     if (error instanceof PlaidApiError) {
-      console.warn('Asset report unavailable', error.code);
-      await setBackfillStatus(tenant, connection.id, 'skipped');
-      return;
+      run.note = `The institution doesn't provide balance history (${error.code}); import a CSV instead.`;
+      return [backfillStatusStatement(tenant, connection.id, 'skipped')];
     }
     throw error;
   }
-}
-
-/**
- * Collect pending asset reports. Called on the ASSETS webhook and by the
- * daily job (in case a webhook was missed). Returns true when the report was
- * ready and has been processed.
- */
-export async function collectBalanceHistory(deps: Deps, tenant: Tenant, connectionId: string): Promise<boolean> {
-  const connection = await getConnection(tenant, connectionId);
-  if (!connection?.assetReportTokenEnc || !deps.plaid) return false;
-  const keys = await loadTokenKeys(deps.config.tokenEncKey);
-  const reportToken = await decryptToken(keys, connection.assetReportTokenEnc, tokenAad(tenant.householdId, connection.id));
-
-  let report;
-  try {
-    report = await deps.plaid.getAssetReport(reportToken);
-  } catch (error) {
-    if (error instanceof PlaidApiError && error.code === 'PRODUCT_NOT_READY') return false;
-    await tenant.db
-      .update(connections)
-      .set({ assetReportTokenEnc: null, assetReportId: null, backfillStatus: 'failed' })
-      .where(tenant.scope(connections, eq(connections.id, connection.id)));
-    throw error;
-  }
-
-  const accountRows = await tenant.db
-    .select({ id: accounts.id, externalId: accounts.externalId, type: accounts.type, currency: accounts.currency })
-    .from(accounts)
-    .where(tenant.scope(accounts, eq(accounts.connectionId, connection.id), eq(accounts.isHidden, false)));
-  const byExternal = new Map(accountRows.map((row) => [row.externalId, row]));
-
-  const rows: (typeof accountDaily.$inferInsert)[] = [];
-  for (const item of report.items) {
-    for (const reportAccount of item.accounts) {
-      const account = byExternal.get(reportAccount.account_id);
-      if (!account) continue;
-      const liability = account.type === 'credit' || account.type === 'loan';
-      for (const balance of reportAccount.historical_balances ?? []) {
-        const minor = toMinor(balance.current);
-        rows.push({
-          householdId: tenant.householdId,
-          accountId: account.id,
-          date: balance.date,
-          balance: liability ? -Math.abs(minor) : minor,
-          currency: balance.iso_currency_code ?? account.currency,
-          source: 'backfill',
-        });
-      }
-    }
-  }
-  await runBatch(tenant.db, chunkRows(accountDaily, rows).map((chunk) => tenant.db.insert(accountDaily).values(chunk).onConflictDoNothing()));
-
-  try {
-    await deps.plaid.removeAssetReport(reportToken);
-  } catch {
-    // The report expires on its own.
-  }
-  await tenant.db
-    .update(connections)
-    .set({ assetReportTokenEnc: null, assetReportId: null, backfillStatus: 'done' })
-    .where(tenant.scope(connections, eq(connections.id, connection.id)));
-  return true;
-}
-
-/** Connections in a household with an asset report still outstanding. */
-export async function pendingReports(tenant: Tenant): Promise<string[]> {
-  const rows = await tenant.db
-    .select({ id: connections.id })
-    .from(connections)
-    .where(tenant.scope(connections, isNotNull(connections.assetReportTokenEnc)));
-  return rows.map((row) => row.id);
 }

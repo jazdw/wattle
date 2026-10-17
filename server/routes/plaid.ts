@@ -2,7 +2,8 @@
  * Plaid Link and webhooks. Linking requires a signed-in user; the webhook is
  * called by Plaid (no cookie) and is authenticated by its signed JWT instead.
  */
-import { and, eq } from 'drizzle-orm';
+import { and, eq, ne } from 'drizzle-orm';
+import type { BatchItem } from 'drizzle-orm/batch';
 import { Hono } from 'hono';
 import { exchangeSchema, linkTokenSchema } from '../../shared/schemas';
 import { requireAuth } from '../auth/routes';
@@ -11,10 +12,12 @@ import { Tenant } from '../db/tenant';
 import type { AppEnv } from '../env';
 import { HttpError, notFound, readBody } from '../lib/http';
 import type { Deps } from '../ports';
-import { backfillConnection, collectBalanceHistory } from '../services/backfill';
+import { runAtomic } from '../db/batch';
+import { SyncRun } from '../services/activity';
+import { backfillConnection } from '../services/backfill';
 import { verifyPlaidWebhook } from '../services/plaidWebhook';
 import { snapshotHousehold } from '../services/snapshots';
-import { accessTokenFor, getConnection, linkConnection, syncConnection } from '../services/sync';
+import { accessTokenFor, getConnection, linkConnection, statusStatement, syncConnection } from '../services/sync';
 import { marketDate } from '../../shared/dates';
 
 export const plaidRoutes = new Hono<AppEnv>();
@@ -54,14 +57,15 @@ plaidRoutes.post('/exchange', requireAuth, async (c) => {
   requirePlaid(deps);
   const body = await readBody(c, exchangeSchema);
   const tenant = c.get('tenant');
-  const connection = await linkConnection(deps, tenant, c.get('user').id, body.publicToken, body.kind);
-  const result = await syncConnection(deps, tenant, connection.id);
+  const { connection, lease } = await linkConnection(deps, tenant, c.get('user').id, body.publicToken, body.kind);
+  // The history load runs after responding (it can take a while).
+  const result = await syncConnection(deps, tenant, connection.id, 'link', { lease, history: false });
 
   // History and today's snapshot can take a while; finish after responding.
   const hook = webhookUrl(c.req.url);
   deps.background(
     (async () => {
-      await backfillConnection(deps, tenant, connection.id, hook);
+      await backfillConnection(deps, tenant, connection.id, hook, 'link');
       await snapshotHousehold(deps, tenant, marketDate(deps.now()));
     })().catch((error) => console.error('Post-link work failed', error)),
   );
@@ -78,6 +82,8 @@ interface PlaidWebhook {
   item_id?: string;
   asset_report_id?: string;
   error?: { error_code?: string } | null;
+  /** PENDING_EXPIRATION: when the login's consent ends. */
+  consent_expiration_time?: string | null;
 }
 
 plaidRoutes.post('/webhook', async (c) => {
@@ -101,24 +107,38 @@ plaidRoutes.post('/webhook', async (c) => {
   if (!connection) return c.json({ ok: true });
   const tenant = new Tenant(deps.db, connection.householdId);
 
-  const setStatus = (status: 'ok' | 'login_required' | 'pending_expiration' | 'error', errorCode: string | null) =>
-    tenant.db
-      .update(connections)
-      .set({ status, errorCode })
-      .where(tenant.scope(connections, eq(connections.id, connection.id)));
+  const eventName = `${event.webhook_type}:${event.webhook_code}`;
+  const observedAt = deps.now().getTime();
+  /**
+   * Record what Plaid reported, logged in the same batch. These don't take
+   * the connection's lease: a status is only written if it's newer than the
+   * last observation (statusStatement), so a sync running now can't overwrite
+   * it with an older "OK", and consent warnings have their own column.
+   */
+  const record = async (change: BatchItem<'sqlite'>) => {
+    const run = new SyncRun(deps, tenant, connection.id, 'sync', 'webhook');
+    run.note = `Plaid reported ${eventName}${event.error?.error_code ? ` (${event.error.error_code})` : ''}.`;
+    await runAtomic(tenant.db, [change, run.statement()]);
+  };
+  const setStatus = (status: 'login_required' | 'error', errorCode: string | null) =>
+    record(statusStatement(tenant, connection.id, { status, errorCode }, observedAt));
 
   const sync = () =>
     deps.background(
       (async () => {
-        await syncConnection(deps, tenant, connection.id);
+        await syncConnection(deps, tenant, connection.id, 'webhook');
         await snapshotHousehold(deps, tenant, marketDate(deps.now()));
       })().catch((error) => console.error('Webhook sync failed', error)),
     );
 
-  switch (`${event.webhook_type}:${event.webhook_code}`) {
+  switch (eventName) {
     case 'HOLDINGS:DEFAULT_UPDATE':
     case 'INVESTMENTS_TRANSACTIONS:DEFAULT_UPDATE':
     case 'ITEM:LOGIN_REPAIRED':
+    // The sync collects the report (or records Plaid's failure to build it)
+    // under the connection's lease.
+    case 'ASSETS:PRODUCT_READY':
+    case 'ASSETS:ERROR':
       sync();
       break;
     case 'ITEM:ERROR':
@@ -128,25 +148,20 @@ plaidRoutes.post('/webhook', async (c) => {
       );
       break;
     case 'ITEM:PENDING_EXPIRATION':
-    case 'ITEM:PENDING_DISCONNECT':
-      await setStatus('pending_expiration', event.webhook_code ?? null);
+    case 'ITEM:PENDING_DISCONNECT': {
+      // A warning that lasts until you re-link, not a status a sync clears.
+      const consentExpiresAt = event.consent_expiration_time ? Date.parse(event.consent_expiration_time) : null;
+      await record(
+        tenant.db
+          .update(connections)
+          .set({ consentWarningAt: observedAt, ...(consentExpiresAt ? { consentExpiresAt } : {}) })
+          .where(tenant.scope(connections, eq(connections.id, connection.id), ne(connections.status, 'removed'))),
+      );
       break;
+    }
     case 'ITEM:USER_PERMISSION_REVOKED':
     case 'ITEM:USER_ACCOUNT_REVOKED':
       await setStatus('error', event.webhook_code ?? null);
-      break;
-    case 'ASSETS:PRODUCT_READY':
-      deps.background(
-        collectBalanceHistory(deps, tenant, connection.id).catch((error) =>
-          console.error('Balance history failed', error),
-        ),
-      );
-      break;
-    case 'ASSETS:ERROR':
-      await tenant.db
-        .update(connections)
-        .set({ assetReportTokenEnc: null, assetReportId: null, backfillStatus: 'failed' })
-        .where(tenant.scope(connections, eq(connections.id, connection.id)));
       break;
     default:
       break;

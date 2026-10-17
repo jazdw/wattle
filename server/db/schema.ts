@@ -22,6 +22,7 @@ import {
   uniqueIndex,
 } from 'drizzle-orm/sqlite-core';
 import type { Classification } from '../../shared/taxonomy';
+import type { SyncChange } from '../../shared/types';
 
 /* ------------------------------------------------------------------ */
 /* Tenancy & auth                                                      */
@@ -111,13 +112,27 @@ export const connections = sqliteTable(
       .notNull()
       .default('ok'),
     errorCode: text('error_code'),
+    /**
+     * When the status was last observed (a sync's Plaid fetch, or a webhook).
+     * A status is only written if it's newer than this: newest information wins.
+     */
+    statusObservedAt: integer('status_observed_at'),
     consentExpiresAt: integer('consent_expires_at'),
+    /** Plaid warned the login's consent is ending (PENDING_EXPIRATION / PENDING_DISCONNECT); cleared by re-linking. */
+    consentWarningAt: integer('consent_warning_at'),
     lastSyncedAt: integer('last_synced_at'),
     /** Last day covered by stored investment transactions. */
     txnSyncedThrough: text('txn_synced_through'),
     backfillStatus: text('backfill_status', { enum: ['pending', 'running', 'done', 'failed', 'skipped'] })
       .notNull()
       .default('pending'),
+    /** The day the investment history was rebuilt as of (later days come from daily snapshots). */
+    historyAsOf: text('history_as_of'),
+    /**
+     * A transaction dated before historyAsOf arrived after the history was
+     * built: rebuild it. Cleared only by a rebuild that started after this.
+     */
+    historyStaleAt: integer('history_stale_at'),
     /** Encrypted Plaid asset_report_token while a balance-history report is pending. */
     assetReportTokenEnc: text('asset_report_token_enc'),
     /** Plaid asset_report_id of the pending report (matches the ASSETS webhook; not secret). */
@@ -141,7 +156,10 @@ export const accounts = sqliteTable(
     connectionId: text('connection_id').references(() => connections.id, { onDelete: 'set null' }),
     /** Aggregator account id (Plaid account_id). */
     externalId: text('external_id'),
+    /** Shown name. For linked accounts it follows plaidName until you rename the account. */
     name: text('name').notNull(),
+    /** The institution's name for a linked account, as of the last sync. */
+    plaidName: text('plaid_name'),
     officialName: text('official_name'),
     institutionName: text('institution_name'),
     /** Last ≤4 characters of the account number, as Plaid's `mask`. Never more. */
@@ -165,6 +183,8 @@ export const accounts = sqliteTable(
      */
     missingSince: integer('missing_since'),
     sort: integer('sort').notNull().default(0),
+    /** Bumped on each save of a manual account's holdings, so a stale editor can't overwrite a newer save. */
+    holdingsVersion: integer('holdings_version').notNull().default(0),
     createdAt: integer('created_at').notNull(),
   },
   (table) => [
@@ -345,6 +365,8 @@ export const targets = sqliteTable(
     /** Account ids and categories left out of the allocation (e.g. property, emergency fund). */
     excludedAccountIds: text('excluded_account_ids', { mode: 'json' }).notNull().$type<string[]>().default(sql`'[]'`),
     excludedCategories: text('excluded_categories', { mode: 'json' }).notNull().$type<string[]>().default(sql`'[]'`),
+    /** Bumped on each save, so a stale editor can't overwrite a newer save. */
+    version: integer('version').notNull().default(0),
     updatedAt: integer('updated_at').notNull(),
   },
   (table) => [index('targets_household').on(table.householdId)],
@@ -376,6 +398,128 @@ export const fxDaily = sqliteTable(
   },
   (table) => [primaryKey({ columns: [table.base, table.quote, table.date] })],
 );
+
+/* ------------------------------------------------------------------ */
+/* Activity logs                                                       */
+/* ------------------------------------------------------------------ */
+
+export const SYNC_ACTIONS = ['sync', 'history', 'balance_history', 'relink', 'disconnect', 'account'] as const;
+export const SYNC_TRIGGERS = ['link', 'webhook', 'nightly', 'manual', 'refresh'] as const;
+
+/**
+ * Every sync, history load and balance-history collection for a connection:
+ * when, why, which Plaid requests (by request_id), what it stored and what
+ * changed. Household data, kept two years.
+ */
+export const syncRuns = sqliteTable(
+  'sync_runs',
+  {
+    id: text('id').primaryKey(),
+    householdId: text('household_id')
+      .notNull()
+      .references(() => households.id, { onDelete: 'cascade' }),
+    connectionId: text('connection_id')
+      .notNull()
+      .references(() => connections.id, { onDelete: 'cascade' }),
+    action: text('action', { enum: SYNC_ACTIONS }).notNull(),
+    trigger: text('trigger', { enum: SYNC_TRIGGERS }).notNull(),
+    startedAt: integer('started_at').notNull(),
+    finishedAt: integer('finished_at').notNull(),
+    /** 'skipped': looked, but had nothing to do (see `note`). */
+    outcome: text('outcome', { enum: ['ok', 'error', 'skipped'] }).notNull(),
+    errorCode: text('error_code'),
+    errorMessage: text('error_message'),
+    /** Why a run was skipped, e.g. another sync was running. */
+    note: text('note'),
+    /** Plaid calls: [{ endpoint, requestId, error? }]. */
+    plaidCalls: text('plaid_calls', { mode: 'json' }).$type<{ endpoint: string; requestId: string | null; error?: string }[]>().notNull(),
+    /** What was stored, e.g. { accounts: 3, holdings: 12, transactions: 40 }. */
+    counts: text('counts', { mode: 'json' }).$type<Record<string, number>>().notNull(),
+    changes: text('changes', { mode: 'json' }).$type<SyncChange[]>().notNull(),
+    /** More changes than were kept. */
+    truncated: integer('truncated', { mode: 'boolean' }).notNull().default(false),
+  },
+  (table) => [index('sync_runs_connection_started').on(table.householdId, table.connectionId, table.startedAt)],
+);
+
+/** One price-provider call, as recorded in price_runs. */
+export interface PriceCall {
+  provider: string;
+  endpoint: string;
+  tickers: string[];
+  from?: string;
+  to?: string;
+  /** Closes (or rates) returned. */
+  returned: number;
+  error?: string;
+}
+
+/** A stored close replaced with a different value. */
+export interface PriceChange {
+  ticker: string;
+  date: string;
+  before: number;
+  beforeSource: string;
+  after: number;
+  afterSource: string;
+}
+
+/**
+ * Each time prices or FX rates were fetched from a provider: the calls, how
+ * much was stored, and any stored value that changed. Public market data, not
+ * household data — no household column, and not shown in household views
+ * (the tickers would reveal what households hold). Kept two years.
+ */
+export const priceRuns = sqliteTable(
+  'price_runs',
+  {
+    id: text('id').primaryKey(),
+    kind: text('kind', { enum: ['latest', 'history', 'fx'] }).notNull(),
+    startedAt: integer('started_at').notNull(),
+    finishedAt: integer('finished_at').notNull(),
+    /** 'skipped': everything was already stored, so nothing was fetched. */
+    outcome: text('outcome', { enum: ['ok', 'error', 'skipped'] }).notNull().default('ok'),
+    error: text('error'),
+    note: text('note'),
+    calls: text('calls', { mode: 'json' }).$type<PriceCall[]>().notNull(),
+    saved: integer('saved').notNull(),
+    changes: text('changes', { mode: 'json' }).$type<PriceChange[]>().notNull(),
+  },
+  (table) => [index('price_runs_started').on(table.startedAt)],
+);
+
+/** Each nightly job run: households processed and errors. Not household data. */
+export const jobRuns = sqliteTable(
+  'job_runs',
+  {
+    id: text('id').primaryKey(),
+    job: text('job', { enum: ['daily'] }).notNull(),
+    date: text('date').notNull(),
+    startedAt: integer('started_at').notNull(),
+    finishedAt: integer('finished_at').notNull(),
+    households: integer('households').notNull(),
+    errors: text('errors', { mode: 'json' }).$type<string[]>().notNull(),
+  },
+  (table) => [index('job_runs_started').on(table.startedAt)],
+);
+
+/**
+ * Leases (see services/lease.ts): at most one holder at a time per key, e.g.
+ * `connection:<id>` or `snapshot:<household id>`. A note asks the holder to
+ * run again before releasing.
+ */
+export const leases = sqliteTable('leases', {
+  key: text('key').primaryKey(),
+  householdId: text('household_id')
+    .notNull()
+    .references(() => households.id, { onDelete: 'cascade' }),
+  /** Random token of the current holder; null when free. */
+  holder: text('holder'),
+  /** The holder must renew before then, or the lease is free for others. */
+  until: integer('until'),
+  /** When someone asked the holder to run again (cleared by a run that started after it). */
+  noteAt: integer('note_at'),
+});
 
 /** Small TTL cache (quotes, Plaid webhook keys). Not for household data. */
 export const kvCache = sqliteTable('kv_cache', {

@@ -15,6 +15,34 @@
       "when": 1791553417259,
       "tag": "0001_account_missing_since",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "6",
+      "when": 1792251368552,
+      "tag": "0002_activity_logs",
+      "breakpoints": true
+    },
+    {
+      "idx": 3,
+      "version": "6",
+      "when": 1792253302569,
+      "tag": "0003_sync_lease",
+      "breakpoints": true
+    },
+    {
+      "idx": 4,
+      "version": "6",
+      "when": 1792254362549,
+      "tag": "0004_leases",
+      "breakpoints": true
+    },
+    {
+      "idx": 5,
+      "version": "6",
+      "when": 1792254363061,
+      "tag": "0005_connection_status_history",
+      "breakpoints": true
     }
   ]
 }

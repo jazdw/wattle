@@ -66,6 +66,8 @@ export const manualHoldingsSchema = z.object({
       }),
     )
     .max(200),
+  /** The version the editor loaded; a save is refused if it changed since. */
+  version: z.number().int().min(0),
 });
 
 export const securityPatchSchema = z.object({
@@ -78,6 +80,8 @@ export const targetSchema = z.object({
   bandPct: z.number().min(0).max(50),
   excludedAccountIds: z.array(z.string()).max(200),
   excludedCategories: z.array(category),
+  /** The version the editor loaded (absent for a first target); refused if it changed since. */
+  version: z.number().int().min(0).optional(),
 });
 
 export const householdPatchSchema = z.object({
