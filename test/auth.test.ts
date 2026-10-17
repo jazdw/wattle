@@ -4,17 +4,33 @@ import * as schema from '../server/db/schema';
 import type { Deps } from '../server/ports';
 import { client, createHousehold, createTestDeps } from './helpers';
 
-/** Stub Google's token + userinfo endpoints. */
-function stubGoogle(profile: Record<string, unknown>, options: { tokenOk?: boolean; profileOk?: boolean } = {}) {
-  const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
-    const url = String(input);
+const encode = (value: unknown) => Buffer.from(JSON.stringify(value)).toString('base64url');
+
+/** The nonce Google would echo: taken from the sign-in URL Wattle built. */
+let currentNonce = '';
+/** Token requests Wattle made (to check PKCE). */
+let tokenRequests: URLSearchParams[] = [];
+
+/**
+ * Stub Google's token endpoint. It answers with an ID token carrying
+ * `claims`, issued for client "gid" and the current sign-in's nonce
+ * (overridable per test).
+ */
+function stubGoogle(claims: Record<string, unknown>, options: { tokenOk?: boolean } = {}) {
+  tokenRequests = [];
+  const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+    const url = input instanceof Request ? input.url : String(input);
     if (url.startsWith('https://oauth2.googleapis.com/token')) {
-      return options.tokenOk === false
-        ? new Response('{}', { status: 400 })
-        : Response.json({ access_token: 'google-access' });
-    }
-    if (url.startsWith('https://openidconnect.googleapis.com/v1/userinfo')) {
-      return options.profileOk === false ? new Response('', { status: 500 }) : Response.json(profile);
+      const body = input instanceof Request ? await input.text() : String(init?.body ?? '');
+      tokenRequests.push(new URLSearchParams(body));
+      if (options.tokenOk === false) return Response.json({ error: 'invalid_grant' }, { status: 400 });
+      const now = Math.floor(Date.now() / 1000);
+      const idToken = [
+        encode({ alg: 'RS256', typ: 'JWT', kid: 'test' }),
+        encode({ iss: 'https://accounts.google.com', aud: 'gid', iat: now, exp: now + 3600, nonce: currentNonce, ...claims }),
+        'c2lnbmF0dXJl', // not checked: the token comes straight from Google over TLS
+      ].join('.');
+      return Response.json({ access_token: 'google-access', token_type: 'Bearer', expires_in: 3600, id_token: idToken });
     }
     throw new Error(`unexpected fetch ${url}`);
   });
@@ -34,8 +50,9 @@ async function signInWithGoogle(deps: Deps) {
   const start = await api('/api/auth/google');
   const location = new URL(start.headers.get('location')!);
   const state = location.searchParams.get('state')!;
-  const stateCookie = start.headers.get('set-cookie')!.split(';')[0];
-  const callback = await api(`/api/auth/google/callback?code=abc&state=${state}`, { headers: { cookie: stateCookie } });
+  currentNonce = location.searchParams.get('nonce')!;
+  const pendingCookie = start.headers.get('set-cookie')!.split(';')[0];
+  const callback = await api(`/api/auth/google/callback?code=abc&state=${state}`, { headers: { cookie: pendingCookie } });
   return { start, location, callback };
 }
 
@@ -51,8 +68,11 @@ describe('Google sign-in', () => {
     expect(response.status).toBe(302);
     expect(url.origin).toBe('https://accounts.google.com');
     expect(url.searchParams.get('redirect_uri')).toBe('http://localhost/api/auth/google/callback');
-    expect(url.searchParams.get('state')).toHaveLength(32);
-    expect(response.headers.get('set-cookie')).toMatch(/wt_oauth_state=.*HttpOnly/i);
+    expect(url.searchParams.get('state')).toBeTruthy();
+    expect(url.searchParams.get('nonce')).toBeTruthy();
+    expect(url.searchParams.get('code_challenge_method')).toBe('S256');
+    expect(url.searchParams.get('code_challenge')).toMatch(/^[\w-]{43}$/);
+    expect(response.headers.get('set-cookie')).toMatch(/wt_oauth=.*HttpOnly/i);
   });
 
   it('reports a missing configuration', async () => {
@@ -63,10 +83,37 @@ describe('Google sign-in', () => {
 
   it('rejects a callback whose state does not match', async () => {
     const deps = await configured();
-    const response = await client(deps)('/api/auth/google/callback?code=abc&state=forged', {
-      headers: { cookie: 'wt_oauth_state=real' },
-    });
+    const start = await client(deps)('/api/auth/google');
+    const pendingCookie = start.headers.get('set-cookie')!.split(';')[0];
+    const response = await client(deps)('/api/auth/google/callback?code=abc&state=forged', { headers: { cookie: pendingCookie } });
     expect(response.headers.get('location')).toBe('/login?auth=invalid_state');
+    const noCookie = await client(deps)('/api/auth/google/callback?code=abc&state=forged');
+    expect(noCookie.headers.get('location')).toBe('/login?auth=invalid_state');
+  });
+
+  it('sends the PKCE verifier with the code exchange', async () => {
+    const deps = await configured({ allowedEmails: ['me@example.com'] });
+    stubGoogle({ sub: 's-me', email: 'me@example.com', email_verified: true });
+    const { location, callback } = await signInWithGoogle(deps);
+    expect(callback.headers.get('location')).toBe('/');
+    const [request] = tokenRequests;
+    expect(request.get('code')).toBe('abc');
+    expect(request.get('redirect_uri')).toBe('http://localhost/api/auth/google/callback');
+    // The verifier hashes to the challenge sent to Google at the start.
+    const verifier = request.get('code_verifier')!;
+    const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(verifier));
+    expect(Buffer.from(digest).toString('base64url')).toBe(location.searchParams.get('code_challenge'));
+  });
+
+  it('rejects ID tokens for another app or another sign-in', async () => {
+    const deps = await configured({ allowedEmails: ['me@example.com'] });
+    stubGoogle({ sub: 's-me', email: 'me@example.com', email_verified: true, aud: 'someone-elses-client' });
+    expect((await signInWithGoogle(deps)).callback.headers.get('location')).toBe('/login?auth=token_error');
+    stubGoogle({ sub: 's-me', email: 'me@example.com', email_verified: true, nonce: 'replayed' });
+    expect((await signInWithGoogle(deps)).callback.headers.get('location')).toBe('/login?auth=token_error');
+    stubGoogle({ sub: 's-me', email: 'me@example.com', email_verified: true, iss: 'https://evil.example' });
+    expect((await signInWithGoogle(deps)).callback.headers.get('location')).toBe('/login?auth=token_error');
+    expect(await deps.db.select().from(schema.users)).toHaveLength(0);
   });
 
   it('refuses emails that are not allowed', async () => {
@@ -84,9 +131,6 @@ describe('Google sign-in', () => {
 
     stubGoogle({}, { tokenOk: false });
     expect((await signInWithGoogle(deps)).callback.headers.get('location')).toBe('/login?auth=token_error');
-
-    stubGoogle({}, { profileOk: false });
-    expect((await signInWithGoogle(deps)).callback.headers.get('location')).toBe('/login?auth=profile_error');
   });
 
   it('creates the first household for the first allowed user, and the partner joins it', async () => {

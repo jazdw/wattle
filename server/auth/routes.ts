@@ -11,11 +11,12 @@ import type { AuthUser } from '../../shared/types';
 import { allowedEmails, householdMembers, households, sessions, users } from '../db/schema';
 import { Tenant } from '../db/tenant';
 import type { AppEnv } from '../env';
-import { randomToken, sha256Hex } from '../lib/encoding';
+import { finishSignIn, startSignIn, type PendingSignIn } from './google';
+import { base64ToBytes, bytesToBase64Url, randomToken, sha256Hex } from '../lib/encoding';
 import type { Db, Deps } from '../ports';
 
 export const SESSION_COOKIE = 'wt_session';
-const OAUTH_STATE_COOKIE = 'wt_oauth_state';
+const OAUTH_COOKIE = 'wt_oauth';
 const SESSION_TTL_SECONDS = 60 * 60 * 24 * 30; // 30 days
 
 function isSecureRequest(url: string): boolean {
@@ -215,85 +216,56 @@ export const requireAuth: MiddlewareHandler<AppEnv> = async (c, next) => {
 
 export const authRoutes = new Hono<AppEnv>();
 
-authRoutes.get('/google', (c) => {
+authRoutes.get('/google', async (c) => {
   const { googleClientId } = c.env.deps.config;
   if (!googleClientId) {
     console.error('Google OAuth is not configured (GOOGLE_CLIENT_ID missing).');
     return c.redirect('/login?auth=config_error');
   }
-
-  const state = randomToken(16);
-  setCookie(c, OAUTH_STATE_COOKIE, state, {
+  const { url, pending } = await startSignIn(googleClientId, c.req.url);
+  setCookie(c, OAUTH_COOKIE, bytesToBase64Url(new TextEncoder().encode(JSON.stringify(pending))), {
     httpOnly: true,
     sameSite: 'Lax',
     secure: isSecureRequest(c.req.url),
-    path: '/',
+    path: '/api/auth',
     maxAge: 600,
   });
-
-  const params = new URLSearchParams({
-    client_id: googleClientId,
-    redirect_uri: `${new URL(c.req.url).origin}/api/auth/google/callback`,
-    response_type: 'code',
-    scope: 'openid email profile',
-    access_type: 'online',
-    prompt: 'select_account',
-    state,
-  });
-  return c.redirect(`https://accounts.google.com/o/oauth2/v2/auth?${params.toString()}`);
+  return c.redirect(url.href);
 });
+
+function readPending(value: string | undefined): PendingSignIn | null {
+  if (!value) return null;
+  try {
+    const pending = JSON.parse(new TextDecoder().decode(base64ToBytes(value))) as Partial<PendingSignIn>;
+    return pending.state && pending.verifier && pending.nonce ? (pending as PendingSignIn) : null;
+  } catch {
+    return null;
+  }
+}
 
 authRoutes.get('/google/callback', async (c) => {
   const { googleClientId, googleClientSecret } = c.env.deps.config;
-  const url = new URL(c.req.url);
-  const code = url.searchParams.get('code');
-  const state = url.searchParams.get('state');
-  const expectedState = getCookie(c, OAUTH_STATE_COOKIE);
-  deleteCookie(c, OAUTH_STATE_COOKIE, { path: '/' });
+  const pending = readPending(getCookie(c, OAUTH_COOKIE));
+  deleteCookie(c, OAUTH_COOKIE, { path: '/api/auth' });
 
   if (!googleClientId || !googleClientSecret) return c.redirect('/login?auth=config_error');
-  if (!code || !state || !expectedState || state !== expectedState) {
-    return c.redirect('/login?auth=invalid_state');
+  const state = new URL(c.req.url).searchParams.get('state');
+  if (!pending || !state || state !== pending.state) return c.redirect('/login?auth=invalid_state');
+
+  let profile;
+  try {
+    profile = await finishSignIn(googleClientId, googleClientSecret, c.req.url, pending);
+  } catch (error) {
+    console.warn('Google sign-in failed', error instanceof Error ? error.message : error);
+    return c.redirect('/login?auth=token_error');
   }
 
   try {
-    const tokenResponse = await fetch('https://oauth2.googleapis.com/token', {
-      method: 'POST',
-      headers: { 'content-type': 'application/x-www-form-urlencoded' },
-      body: new URLSearchParams({
-        code,
-        client_id: googleClientId,
-        client_secret: googleClientSecret,
-        redirect_uri: `${url.origin}/api/auth/google/callback`,
-        grant_type: 'authorization_code',
-      }),
-    });
-    if (!tokenResponse.ok) return c.redirect('/login?auth=token_error');
-    const tokens = (await tokenResponse.json()) as { access_token?: string };
-    if (!tokens.access_token) return c.redirect('/login?auth=token_error');
-
-    const profileResponse = await fetch('https://openidconnect.googleapis.com/v1/userinfo', {
-      headers: { authorization: `Bearer ${tokens.access_token}` },
-    });
-    if (!profileResponse.ok) return c.redirect('/login?auth=profile_error');
-    const profile = (await profileResponse.json()) as {
-      sub?: string;
-      email?: string;
-      email_verified?: boolean;
-      name?: string;
-      picture?: string;
-    };
-
-    if (!profile.sub || !profile.email) return c.redirect('/login?auth=profile_error');
-    if (profile.email_verified !== true) return c.redirect('/login?auth=email_unverified');
+    if (!profile.emailVerified) return c.redirect('/login?auth=email_unverified');
     const allowance = await findAllowance(c.env.deps, profile.email);
     if (!allowance) return c.redirect('/login?auth=not_allowed');
 
-    await signIn(
-      c,
-      { sub: profile.sub, email: profile.email, name: profile.name, picture: profile.picture },
-      allowance,
-    );
+    await signIn(c, { sub: profile.sub, email: profile.email, name: profile.name, picture: profile.picture }, allowance);
     return c.redirect('/');
   } catch (error) {
     if (error instanceof AmbiguousHouseholdError) return c.redirect('/login?auth=not_allowed');

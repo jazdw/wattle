@@ -31,3 +31,9 @@ PLAID_ENV="sandbox"
 # Market data (free tiers): https://www.tiingo.com, https://finnhub.io
 TIINGO_API_KEY=""
 FINNHUB_API_KEY=""
+
+# Optional: behind Cloudflare Access, require its token on every API request.
+# Team domain from Zero Trust → Settings; AUD tag from the Access application.
+# Leave empty locally (requests don't come through Access).
+ACCESS_TEAM_DOMAIN=""
+ACCESS_AUD=""
