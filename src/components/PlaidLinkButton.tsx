@@ -1,7 +1,7 @@
 import { useMutation, useQueryClient } from '@tanstack/react-query';
-import { useCallback, useEffect, useState } from 'react';
-import { usePlaidLink } from 'react-plaid-link';
+import { useEffect, useRef, useState } from 'react';
 import { api } from '../api';
+import { loadPlaid, openPlaidLink } from '../lib/plaidLink';
 import { Button } from './ui/button';
 
 interface Props {
@@ -17,7 +17,14 @@ interface Props {
 /** Fetches a link token on click, then opens Plaid Link. */
 export function PlaidLinkButton({ kind, connectionId, label, variant = 'default', size = 'default', onError }: Props) {
   const queryClient = useQueryClient();
-  const [token, setToken] = useState<string | null>(null);
+  const [open, setOpen] = useState(false);
+  const close = useRef<(() => void) | null>(null);
+
+  // Load Plaid's script while the button is on screen, so Link opens quickly.
+  useEffect(() => {
+    loadPlaid().catch(() => {}); // reported on click
+    return () => close.current?.();
+  }, []);
 
   const exchange = useMutation({
     mutationFn: (publicToken: string) =>
@@ -26,35 +33,43 @@ export function PlaidLinkButton({ kind, connectionId, label, variant = 'default'
     onError: (error) => onError?.(error.message),
   });
 
-  const onSuccess = useCallback(
-    (publicToken: string | null) => {
-      setToken(null);
-      if (!publicToken) return;
-      if (connectionId) {
-        // Update mode keeps the same access token; just resync.
-        void api(`/api/connections/${connectionId}/sync`, { method: 'POST' }).finally(() => void queryClient.invalidateQueries());
-      } else {
-        exchange.mutate(publicToken);
-      }
-    },
-    [connectionId, exchange, queryClient],
-  );
-
-  const { open, ready } = usePlaidLink({ token, onSuccess, onExit: () => setToken(null) });
-
-  useEffect(() => {
-    if (token && ready) open();
-  }, [token, ready, open]);
+  const onSuccess = (publicToken: string) => {
+    if (connectionId) {
+      // Update mode keeps the same access token; just resync.
+      void api(`/api/connections/${connectionId}/sync`, { method: 'POST' }).finally(() => void queryClient.invalidateQueries());
+    } else {
+      exchange.mutate(publicToken);
+    }
+  };
 
   const start = useMutation({
-    mutationFn: () =>
-      api<{ linkToken: string }>('/api/plaid/link-token', { method: 'POST', body: JSON.stringify({ kind, connectionId }) }),
-    onSuccess: (result) => setToken(result.linkToken),
-    onError: (error) => onError?.(error.message),
+    mutationFn: async () => {
+      const { linkToken } = await api<{ linkToken: string }>('/api/plaid/link-token', {
+        method: 'POST',
+        body: JSON.stringify({ kind, connectionId }),
+      });
+      setOpen(true);
+      close.current = await openPlaidLink(linkToken, {
+        onSuccess: (publicToken) => {
+          close.current = null;
+          setOpen(false);
+          onSuccess(publicToken);
+        },
+        onExit: (message) => {
+          close.current = null;
+          setOpen(false);
+          if (message) onError?.(message);
+        },
+      });
+    },
+    onError: (error) => {
+      setOpen(false);
+      onError?.(error.message);
+    },
   });
 
   return (
-    <Button variant={variant} size={size} onClick={() => start.mutate()} disabled={start.isPending || exchange.isPending}>
+    <Button variant={variant} size={size} onClick={() => start.mutate()} disabled={start.isPending || open || exchange.isPending}>
       {exchange.isPending ? 'Importing…' : label}
     </Button>
   );

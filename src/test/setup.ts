@@ -1,7 +1,7 @@
 import '@testing-library/jest-dom/vitest';
 import { cleanup } from '@testing-library/react';
-import { afterAll, afterEach, beforeAll, vi } from 'vitest';
-import { plaidLink } from './plaid';
+import { afterAll, afterEach, beforeAll } from 'vitest';
+import { resetPlaid } from './plaid';
 import { requests, server } from './server';
 
 // jsdom lacks the layout APIs Recharts and Radix use.
@@ -24,17 +24,8 @@ Blob.prototype.text ??= function text(this: Blob) {
 Element.prototype.hasPointerCapture ??= () => false;
 Element.prototype.releasePointerCapture ??= () => {};
 
-// Plaid Link loads a third-party script; tests drive this double instead.
-vi.mock('react-plaid-link', async () => {
-  const { plaidLink } = await import('./plaid');
-  return {
-    usePlaidLink: (config: { token: string | null; onSuccess: (publicToken: string | null) => void }) => {
-      plaidLink.token = config.token;
-      plaidLink.onSuccess = config.onSuccess;
-      return { open: plaidLink.open, ready: plaidLink.ready || config.token !== null };
-    },
-  };
-});
+// Plaid Link's script isn't loaded in tests; a fake window.Plaid stands in.
+resetPlaid();
 
 beforeAll(() => {
   server.listen({ onUnhandledRequest: 'error' });
@@ -49,10 +40,7 @@ afterEach(() => {
   server.resetHandlers();
   requests.length = 0;
   localStorage.clear();
-  plaidLink.open.mockReset();
-  plaidLink.ready = false;
-  plaidLink.token = null;
-  plaidLink.onSuccess = null;
+  resetPlaid();
 });
 
 afterAll(() => server.close());
