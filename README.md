@@ -106,19 +106,28 @@ The redirect URI is built from the request's origin, so no hostname is configure
 - Both are optional. Without them, holdings are valued at the institution's prices and no live quotes are shown.
 
 ### Deploy
-1. `npm run db:create`, then put the database id into `wrangler.jsonc`.
-2. Set secrets: `npx wrangler secret put <NAME>` for `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`, `TOKEN_ENC_KEY`, `PLAID_CLIENT_ID`, `PLAID_SECRET`, `TIINGO_API_KEY`, `FINNHUB_API_KEY`, `ADMIN_TOKEN`. Set `PLAID_ENV` (var) to `production` when ready.
-3. Allow your Google accounts: `npm run allow -- add you@gmail.com partner@gmail.com`.
-4. Deploy with either:
-   - **GitHub Actions** (`.github/workflows/deploy.yml`): every push to `main` typechecks, lints and tests. Once the `CLOUDFLARE_API_TOKEN`, `CLOUDFLARE_ACCOUNT_ID` and `CUSTOM_DOMAIN` repository secrets are set, it also applies D1 migrations and runs `wrangler deploy --domain $CUSTOM_DOMAIN`. Until then the deploy steps are skipped.
-   - **By hand:** `npm run db:migrate:remote && npm run deploy -- --domain wattle.example.com`.
+Nothing in the repo is specific to one deployment. Everything that is lives in your Cloudflare account or your GitHub repository secrets.
+
+1. **Database:** `npm run db:create`. Note the id it prints; don't edit `wrangler.jsonc` (it keeps a placeholder).
+2. **Worker secrets:** these persist across deploys. For each `<NAME>`, run `npx wrangler secret put <NAME>`:
+   - `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`
+   - `TOKEN_ENC_KEY` (generate with `openssl rand -base64 32`)
+   - `PLAID_CLIENT_ID`, `PLAID_SECRET`, `PLAID_ENV` (`sandbox` or `production`)
+   - `TIINGO_API_KEY`, `FINNHUB_API_KEY`
+   - `ALLOWED_EMAILS` (optional)
+3. **Who can sign in:** `npm run allow -- add you@gmail.com partner@gmail.com`.
+4. **GitHub Actions** (`.github/workflows/deploy.yml`): every push to `main` typechecks, lints and tests. Once these repository secrets are set, it also builds with `D1_DATABASE_ID` (the Vite build puts it into the generated deploy config), applies D1 migrations and runs `wrangler deploy --domain $CUSTOM_DOMAIN`. Until then the deploy steps are skipped.
+   - `CLOUDFLARE_API_TOKEN`
+   - `CLOUDFLARE_ACCOUNT_ID`
+   - `CUSTOM_DOMAIN`
+   - `D1_DATABASE_ID`
+
+The nightly job runs from the Cron Trigger. Locally, `npm run daily` triggers it on the dev server.
 
 **Workers plan:** use Workers Paid ($5/month). The free plan allows 10 ms of CPU and 50 outbound requests per invocation, and Wattle Wealth goes past that. Measured on Node, including SQLite's share:
 - a routine sync takes about 20 ms
 - a 2-year history chart by category takes about 80 ms
 - a 2-year backfill takes about 250 ms per account
-
-Re-run the daily job by hand: `curl -X POST -H "Authorization: Bearer $ADMIN_TOKEN" https://<domain>/api/admin/run-daily`.
 
 ### Cloudflare Access (Zero Trust), recommended
 A second lock in front of the app. Cloudflare's edge only lets your Google accounts reach the domain at all. Wattle Wealth's own Google sign-in still runs behind it (it decides which household member you are). It's free for up to 50 users. Requests from the daily cron never pass through Access, so it's unaffected.

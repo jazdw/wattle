@@ -1,16 +1,15 @@
 /**
- * Cloudflare Worker configuration for Wattle.
- *
- * `database_id` is the production D1 database (not a secret). Create it with
- * `npm run db:create` and paste the id below.
- *
- * Secrets are NOT stored here. Set them with `npx wrangler secret put <NAME>`:
- *   GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET
- *   TOKEN_ENC_KEY          (base64 32 bytes: `openssl rand -base64 32`)
- *   PLAID_CLIENT_ID, PLAID_SECRET
- *   TIINGO_API_KEY, FINNHUB_API_KEY
- *
- * Who can sign in is managed in the `allowed_emails` D1 table (see README).
+ * Cloudflare Worker configuration for Wattle Wealth. Nothing in this file is
+ * specific to one deployment:
+ *  - database_id is a placeholder. The build substitutes the real id when
+ *    D1_DATABASE_ID is set (see vite.config.ts); the deploy job sets it from
+ *    a repository secret. Local development doesn't need one.
+ *  - The domain comes from the CUSTOM_DOMAIN repository secret (--domain).
+ *  - Settings and secrets are set on the Worker, so deploys never reset them:
+ *      npx wrangler secret put <NAME>
+ *    GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET, TOKEN_ENC_KEY, PLAID_CLIENT_ID,
+ *    PLAID_SECRET, PLAID_ENV, TIINGO_API_KEY, FINNHUB_API_KEY, and optionally
+ *    ALLOWED_EMAILS (otherwise use the allowed_emails table: npm run allow).
  */
 {
   "$schema": "node_modules/wrangler/config-schema.json",
@@ -34,7 +33,7 @@
     {
       "binding": "DB",
       "database_name": "wattle",
-      "database_id": "00000000-0000-0000-0000-000000000000",
+      "database_id": "00000000-0000-0000-0000-000000000000", // set at deploy time
       "migrations_dir": "migrations"
     }
   ],
@@ -42,10 +41,6 @@
   // summer, 21:00 in winter), once end-of-day prices are published.
   "triggers": {
     "crons": ["0 2 * * *"]
-  },
-  "vars": {
-    "ALLOWED_EMAILS": "",
-    "PLAID_ENV": "sandbox"
   },
   "observability": {
     "enabled": true
