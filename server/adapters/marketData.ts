@@ -1,11 +1,13 @@
 /**
  * Market-data adapters:
- *  - Tiingo: end-of-day closes, including mutual fund NAVs (free tier is
- *    personal use only — fine for Wattle).
+ *  - Tiingo: end-of-day closes, including mutual fund NAVs, and latest
+ *    stock/ETF closes in bulk via its IEX endpoint (free tier is personal use
+ *    only — fine for Wattle).
  *  - Finnhub: live quotes for US stocks and ETFs.
  *  - Frankfurter: daily ECB FX rates, no key.
  * Each implements a port from server/ports.ts so providers can be swapped.
  */
+import { newYorkClock } from '../../shared/dates';
 import type { Currency } from '../../shared/money';
 import type { DailyClose, FxProvider, PriceProvider, Quote, QuoteProvider } from '../ports';
 
@@ -25,8 +27,39 @@ export function createTiingo(apiKey: string): PriceProvider {
         .filter((row) => typeof row.close === 'number')
         .map((row): DailyClose => ({ date: row.date.slice(0, 10), close: row.close }));
     },
+
+    // One request for many stocks/ETFs: Tiingo's IEX endpoint returns the
+    // last price (tngoLast) with its timestamp. A price stamped after the
+    // 16:00 New York close is that day's closing price. Mutual funds aren't
+    // on IEX; callers fetch those one at a time with dailyCloses.
+    async latestCloses(tickers) {
+      const closes = new Map<string, DailyClose>();
+      for (let index = 0; index < tickers.length; index += BULK_TICKERS) {
+        const chunk = tickers.slice(index, index + BULK_TICKERS).map((ticker) => ticker.toUpperCase());
+        const params = new URLSearchParams({ tickers: chunk.join(',').toLowerCase() });
+        const response = await fetch(`https://api.tiingo.com/iex/?${params}`, {
+          headers: { 'content-type': 'application/json', authorization: `Token ${apiKey}` },
+        });
+        if (!response.ok) throw new Error(`Tiingo IEX: HTTP ${response.status}`);
+        const rows = (await response.json()) as { ticker?: string; timestamp?: string; tngoLast?: number | null }[];
+        // Filter to what was asked for, in case the whole market comes back.
+        const wanted = new Set(chunk);
+        for (const row of rows) {
+          const ticker = row.ticker?.toUpperCase();
+          if (!ticker || !wanted.has(ticker) || typeof row.tngoLast !== 'number' || !row.timestamp) continue;
+          const clock = newYorkClock(new Date(row.timestamp));
+          if (clock.minutes >= MARKET_CLOSE_MINUTES) closes.set(ticker, { date: clock.date, close: row.tngoLast });
+        }
+      }
+      return closes;
+    },
   };
 }
+
+/** Tickers per bulk request (keeps the URL short). */
+const BULK_TICKERS = 100;
+/** 16:00 in minutes past midnight, New York. */
+const MARKET_CLOSE_MINUTES = 16 * 60;
 
 export function createFinnhub(apiKey: string): QuoteProvider {
   return {

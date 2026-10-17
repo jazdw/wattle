@@ -5,12 +5,12 @@
  * imported values for the day are never overwritten.
  */
 import { eq, inArray, sql } from 'drizzle-orm';
-import { addDays, type IsoDate } from '../../shared/dates';
+import type { IsoDate } from '../../shared/dates';
 import { chunkRows, runBatch } from '../db/batch';
 import { accountDaily, accounts, holdingDaily, holdings, securities } from '../db/schema';
 import type { Tenant } from '../db/tenant';
 import type { Deps } from '../ports';
-import { closeLookup, ensureCloses } from './pricing';
+import { closeLookup, ensureRecentCloses } from './pricing';
 import { priceOn } from './valuation';
 
 export async function snapshotHousehold(deps: Deps, tenant: Tenant, date: IsoDate): Promise<{ accounts: number; holdings: number }> {
@@ -37,7 +37,7 @@ export async function snapshotHousehold(deps: Deps, tenant: Tenant, date: IsoDat
     .where(tenant.scope(holdings));
 
   const publicTickers = holdingRows.filter((row) => row.isPublic && row.ticker).map((row) => row.ticker!);
-  await ensureCloses(deps, publicTickers, addDays(date, -7), date);
+  await ensureRecentCloses(deps, publicTickers, date);
   const closes = await closeLookup(deps, publicTickers, date, date);
 
   const visible = new Set(accountRows.map((account) => account.id));

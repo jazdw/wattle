@@ -14,12 +14,12 @@ import {
 import type { HistoryGroup, QuotesResponse, SecurityRow, TargetResponse } from '../../shared/types';
 import { normalizeWeights, type Category } from '../../shared/taxonomy';
 import { requireAuth } from '../auth/routes';
-import { chunkRows, runBatch } from '../db/batch';
+import { chunkRows, inChunks, runBatch } from '../db/batch';
 import { accountDaily, accounts, holdingDaily, holdings, households, pricesDaily, securities, targets } from '../db/schema';
 import type { Tenant } from '../db/tenant';
 import type { AppEnv } from '../env';
 import { HttpError, notFound, readBody, requestCurrency } from '../lib/http';
-import { cacheGet, cacheSet } from '../services/cache';
+import { cacheGetMany, cacheSetMany } from '../services/cache';
 import { loadHistory, RANGES, type Range } from '../services/history';
 import { activeTarget, loadPortfolio } from '../services/portfolio';
 import { snapshotHousehold } from '../services/snapshots';
@@ -175,41 +175,38 @@ portfolioRoutes.get('/quotes', async (c) => {
     .where(tenant.scope(securities, eq(securities.isPublic, true)));
 
   const response: QuotesResponse = { quotes: [], closes: [] };
-  const closeTickers: string[] = [];
-  for (const row of rows) {
-    if (!row.ticker) continue;
-    if (!deps.quotes || !LIVE_TYPES.has(row.type ?? '')) {
-      closeTickers.push(row.ticker);
-      continue;
-    }
-    const key = `quote:${row.ticker}`;
-    let quote = await cacheGet<QuotesResponse['quotes'][number]>(deps, key);
-    if (!quote) {
+  const tickers = rows.flatMap((row) => (row.ticker ? [{ ticker: row.ticker, live: Boolean(deps.quotes) && LIVE_TYPES.has(row.type ?? '') }] : []));
+  const closeTickers = tickers.filter((row) => !row.live).map((row) => row.ticker);
+
+  // Live quotes: cached ones in one query; Finnhub (one request per ticker,
+  // it has no bulk quote) only for the stale ones; the new ones cached in one batch.
+  const live = tickers.filter((row) => row.live).map((row) => row.ticker);
+  const cached = await cacheGetMany<QuotesResponse['quotes'][number]>(deps, live.map((ticker) => `quote:${ticker}`));
+  const fresh: [string, QuotesResponse['quotes'][number]][] = [];
+  for (const ticker of live) {
+    let quote = cached.get(`quote:${ticker}`) ?? null;
+    if (!quote && deps.quotes) {
       try {
-        quote = await deps.quotes.quote(row.ticker);
+        quote = await deps.quotes.quote(ticker);
       } catch (error) {
-        console.warn('Quote failed', row.ticker, error instanceof Error ? error.message : error);
+        console.warn('Quote failed', ticker, error instanceof Error ? error.message : error);
       }
-      if (quote) await cacheSet(deps, key, quote, QUOTE_TTL_SECONDS);
+      if (quote) fresh.push([`quote:${ticker}`, quote]);
     }
     if (quote) response.quotes.push(quote);
-    else closeTickers.push(row.ticker);
+    else closeTickers.push(ticker);
   }
+  await cacheSetMany(deps, fresh, QUOTE_TTL_SECONDS);
 
-  if (closeTickers.length > 0) {
-    // Latest close per ticker (mutual funds strike NAV once a day).
+  // Latest close per ticker (mutual funds strike NAV once a day). SQLite
+  // returns the row that holds max(date) for the bare `close` column.
+  for (const chunk of inChunks(closeTickers)) {
     const latest = await deps.db
-      .select({ ticker: pricesDaily.ticker, date: sql<string>`max(${pricesDaily.date})` })
+      .select({ ticker: pricesDaily.ticker, date: sql<string>`max(${pricesDaily.date})`, close: pricesDaily.close })
       .from(pricesDaily)
-      .where(inArray(pricesDaily.ticker, closeTickers))
+      .where(inArray(pricesDaily.ticker, chunk))
       .groupBy(pricesDaily.ticker);
-    for (const { ticker, date } of latest) {
-      const [row] = await deps.db
-        .select({ close: pricesDaily.close })
-        .from(pricesDaily)
-        .where(and(eq(pricesDaily.ticker, ticker), eq(pricesDaily.date, date)));
-      if (row) response.closes.push({ ticker, close: row.close, date });
-    }
+    for (const row of latest) response.closes.push(row);
   }
   return c.json(response);
 });
