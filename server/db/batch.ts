@@ -22,8 +22,21 @@ export function chunkRows<T extends object>(table: SQLiteTable, rows: T[]): T[][
 }
 
 /**
- * Run statements in transactional batches (D1 and libsql both support
- * `db.batch`, which BaseSQLiteDatabase doesn't declare).
+ * Run statements as ONE batch: a transaction on D1 and libsql, so either every
+ * statement applies or none does. D1 documents no limit on statements per
+ * batch, only per statement (100 parameters, 100 KB) and 30 s per batch.
+ */
+export async function runAtomic(db: Db, statements: BatchItem<'sqlite'>[]): Promise<void> {
+  if (statements.length === 0) return;
+  const batcher = db as unknown as { batch(items: BatchItem<'sqlite'>[]): Promise<unknown> };
+  await batcher.batch(statements);
+}
+
+/**
+ * Run statements in batches of up to 50 (D1 and libsql both support
+ * `db.batch`, which BaseSQLiteDatabase doesn't declare). Each batch is a
+ * transaction, but together they're not: use this only for idempotent bulk
+ * writes such as history backfills, and runAtomic for anything else.
  */
 export async function runBatch(db: Db, statements: BatchItem<'sqlite'>[]): Promise<void> {
   const batcher = db as unknown as { batch(items: BatchItem<'sqlite'>[]): Promise<unknown> };

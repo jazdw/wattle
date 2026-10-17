@@ -13,6 +13,7 @@ import type { DailyClose, FxProvider, PriceProvider, Quote, QuoteProvider } from
 
 export function createTiingo(apiKey: string): PriceProvider {
   return {
+    name: 'tiingo',
     async dailyCloses(ticker, start, end) {
       const params = new URLSearchParams({ startDate: start, endDate: end });
       // Keys go in headers, never URLs: URLs end up in request logs and traces.
@@ -86,6 +87,7 @@ export function createFinnhub(apiKey: string): QuoteProvider {
 
 export function createFrankfurter(): FxProvider {
   return {
+    name: 'frankfurter',
     async rates(base: Currency, quote: Currency, start, end) {
       const params = new URLSearchParams({ base, symbols: quote });
       const range = start === end ? start : `${start}..${end}`;

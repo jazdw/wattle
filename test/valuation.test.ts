@@ -37,6 +37,7 @@ describe('daily closes', () => {
   it('survives provider failures', async () => {
     const deps = await createTestDeps({
       prices: {
+        name: 'failing',
         dailyCloses: async () => {
           throw new Error('HTTP 500');
         },
@@ -135,7 +136,7 @@ describe('snapshots', () => {
     const id = await create({ name: 'Manual brokerage', type: 'investment' });
     await api(`/api/accounts/${id}/holdings`, {
       method: 'PUT',
-      json: { holdings: [{ ticker: 'VTI', quantity: 2 }, { ticker: 'PLANFUND', name: 'Plan Trust 2055', quantity: 10, price: 30 }] },
+      json: { holdings: [{ ticker: 'VTI', quantity: 2 }, { ticker: 'PLANFUND', name: 'Plan Trust 2055', quantity: 10, price: 30 }], version: 0 },
     });
     await snapshotHousehold(deps, tenant, TODAY);
     const rows = await deps.db.select().from(schema.holdingDaily).where(eq(schema.holdingDaily.date, TODAY));
@@ -144,7 +145,7 @@ describe('snapshots', () => {
     expect(account.balance).toBe(700_00); // manual accounts with holdings take their balance from them
 
     // Holdings that can't be priced are reported.
-    const unpriced = await api(`/api/accounts/${id}/holdings`, { method: 'PUT', json: { holdings: [{ ticker: 'NOPE', quantity: 1 }] } });
+    const unpriced = await api(`/api/accounts/${id}/holdings`, { method: 'PUT', json: { holdings: [{ ticker: 'NOPE', quantity: 1 }], version: 1 } });
     expect(unpriced.body.unpriced).toBe(1);
   });
 
@@ -219,7 +220,7 @@ describe('history', () => {
     const prices = fakePrices({ VFFVX: closes('2026-09-25', 20, 50) });
     const { deps, api, tenant, create } = await household({ prices });
     const id = await create({ name: 'IRA', type: 'investment' });
-    await api(`/api/accounts/${id}/holdings`, { method: 'PUT', json: { holdings: [{ ticker: 'VFFVX', quantity: 100 }] } });
+    await api(`/api/accounts/${id}/holdings`, { method: 'PUT', json: { holdings: [{ ticker: 'VFFVX', quantity: 100 }], version: 0 } });
     await snapshotHousehold(deps, tenant, TODAY);
     const byCategory = (await api('/api/history?range=1M&group=category')).body;
     const latest = Object.fromEntries(byCategory.series.map((series: { key: string; values: number[] }) => [series.key, series.values.at(-1)]));

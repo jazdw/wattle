@@ -81,6 +81,46 @@ describe('Accounts page', () => {
     expect(button).toBeEnabled();
   });
 
+  it("shows a connection's activity log", async () => {
+    server.use(
+      http.get('*/api/connections/c-chase/activity', () =>
+        HttpResponse.json({
+          runs: [
+            {
+              id: 'r3', action: 'sync', trigger: 'webhook', startedAt: Date.now(), finishedAt: Date.now(), outcome: 'skipped',
+              errorCode: null, errorMessage: null, note: 'Another sync was running; it will sync again when it finishes.', truncated: false,
+              plaidCalls: [], counts: {}, changes: [],
+            },
+            {
+              id: 'r2', action: 'sync', trigger: 'nightly', startedAt: Date.now(), finishedAt: Date.now(), outcome: 'error',
+              errorCode: 'ITEM_LOGIN_REQUIRED', errorMessage: 'Plaid ITEM_LOGIN_REQUIRED: sign in again', note: null, truncated: false,
+              plaidCalls: [{ endpoint: '/accounts/get', requestId: 'req-failed', error: 'ITEM_LOGIN_REQUIRED' }], counts: {}, changes: [],
+            },
+            {
+              id: 'r1', action: 'sync', trigger: 'manual', startedAt: Date.now() - 60_000, finishedAt: Date.now() - 59_000, outcome: 'ok',
+              errorCode: null, errorMessage: null, note: null, truncated: false,
+              plaidCalls: [{ endpoint: '/accounts/get', requestId: 'req-abc123' }],
+              counts: { accounts: 2 },
+              changes: [{ kind: 'balance', accountId: 'a1', account: 'Sapphire', before: -10_000, after: -12_550, currency: 'USD' }],
+            },
+          ],
+        }),
+      ),
+    );
+    const { user } = renderPage(<Accounts />);
+    await screen.findByText('Sapphire');
+    await user.click(within(card('Chase')).getByRole('button', { name: /Activity/ }));
+    const dialog = await screen.findByRole('dialog', { name: 'Activity: Chase' });
+    // The failed run's badge, and the failed Plaid request.
+    expect(within(dialog).getAllByText('ITEM_LOGIN_REQUIRED')).toHaveLength(2);
+    expect(within(dialog).getByText(/req-failed/)).toBeInTheDocument();
+    expect(within(dialog).getByText(/Stored: 2 accounts/)).toBeInTheDocument();
+    expect(within(dialog).getByText('Sapphire: balance -$100.00 → -$125.50')).toBeInTheDocument();
+    expect(within(dialog).getByText(/req-abc123/)).toBeInTheDocument();
+    expect(within(dialog).getByText('Nothing to do')).toBeInTheDocument();
+    expect(within(dialog).getByText(/it will sync again when it finishes/)).toBeInTheDocument();
+  });
+
   it('shows Plaid errors', async () => {
     server.use(http.post('*/api/plaid/link-token', () => HttpResponse.json({ error: 'Plaid is not configured on the server.' }, { status: 503 })));
     const { user } = renderPage(<Accounts />);

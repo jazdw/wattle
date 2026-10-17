@@ -14,7 +14,8 @@ import {
 import type { HistoryGroup, QuotesResponse, SecurityRow, TargetResponse } from '../../shared/types';
 import { normalizeWeights, type Category } from '../../shared/taxonomy';
 import { requireAuth } from '../auth/routes';
-import { chunkRows, inChunks, runBatch } from '../db/batch';
+import type { BatchItem } from 'drizzle-orm/batch';
+import { chunkRows, inChunks, runAtomic } from '../db/batch';
 import { accountDaily, accounts, holdingDaily, holdings, households, pricesDaily, securities, targets } from '../db/schema';
 import type { Tenant } from '../db/tenant';
 import type { AppEnv } from '../env';
@@ -22,8 +23,10 @@ import { HttpError, notFound, readBody, requestCurrency } from '../lib/http';
 import { cacheGetMany, cacheSetMany } from '../services/cache';
 import { loadHistory, RANGES, type Range } from '../services/history';
 import { activeTarget, loadPortfolio } from '../services/portfolio';
+import { stableId } from '../services/ids';
+import { Lease, targetsLease } from '../services/lease';
 import { snapshotHousehold } from '../services/snapshots';
-import { activeConnections, syncConnection } from '../services/sync';
+import { activeConnections, MANUAL_SYNC_INTERVAL_MS, syncConnection } from '../services/sync';
 
 export const portfolioRoutes = new Hono<AppEnv>();
 portfolioRoutes.use('*', requireAuth);
@@ -58,18 +61,17 @@ portfolioRoutes.get('/history', async (c) => {
 portfolioRoutes.post('/refresh', async (c) => {
   const deps = c.env.deps;
   const tenant = c.get('tenant');
-  const now = deps.now().getTime();
-  const results = [];
+  let synced = 0;
   for (const connection of await activeConnections(tenant)) {
-    if (connection.lastSyncedAt && now - connection.lastSyncedAt < 2 * 60 * 1000) continue;
     try {
-      results.push(await syncConnection(deps, tenant, connection.id));
+      const result = await syncConnection(deps, tenant, connection.id, 'refresh', { minIntervalMs: MANUAL_SYNC_INTERVAL_MS });
+      if (!result.skipped) synced += 1;
     } catch (error) {
       console.error('Refresh sync failed', error instanceof Error ? error.message : error);
     }
   }
   await snapshotHousehold(deps, tenant, marketDate(deps.now()));
-  return c.json({ synced: results.length });
+  return c.json({ synced });
 });
 
 /* ------------------------------------------------------------------ */
@@ -128,6 +130,7 @@ portfolioRoutes.get('/targets', async (c) => {
           bandPct: target.bandPct,
           excludedAccountIds: target.excludedAccountIds,
           excludedCategories: target.excludedCategories as Category[],
+          version: target.version,
         }
       : null,
   };
@@ -148,11 +151,29 @@ portfolioRoutes.put('/targets', async (c) => {
     excludedCategories: body.excludedCategories,
     updatedAt: deps.now().getTime(),
   };
-  const existing = await activeTarget(tenant);
-  if (existing) {
-    await tenant.db.update(targets).set(values).where(tenant.scope(targets, eq(targets.id, existing.id)));
-  } else {
-    await tenant.db.insert(targets).values({ id: crypto.randomUUID(), householdId: tenant.householdId, isActive: true, ...values });
+  // One save at a time; refused if someone saved since this editor loaded.
+  const lease = await Lease.acquireOrBusy(deps, tenant, targetsLease(tenant.householdId), 'Someone else is saving the target. Try again in a moment.');
+  try {
+    const existing = await activeTarget(tenant);
+    if ((existing?.version ?? undefined) !== body.version) {
+      throw new HttpError(409, 'The target was changed by someone else. Reload to see their changes.');
+    }
+    await lease.renew();
+    if (existing) {
+      await tenant.db
+        .update(targets)
+        .set({ ...values, version: existing.version + 1 })
+        .where(tenant.scope(targets, eq(targets.id, existing.id), eq(targets.version, existing.version)));
+    } else {
+      // A derived id: two first saves create one target, not two.
+      const id = await stableId(`target:${tenant.householdId}`);
+      await tenant.db
+        .insert(targets)
+        .values({ id, householdId: tenant.householdId, isActive: true, ...values })
+        .onConflictDoNothing();
+    }
+  } finally {
+    await lease.forceRelease();
   }
   return c.json({ ok: true });
 });
@@ -237,7 +258,8 @@ portfolioRoutes.post('/imports/balances', async (c) => {
     currency: account.currency,
     source: 'import' as const,
   }));
-  await runBatch(
+  // The whole file or none of it.
+  await runAtomic(
     tenant.db,
     chunkRows(accountDaily, rows).map((chunk) =>
       tenant.db
@@ -268,21 +290,28 @@ portfolioRoutes.post('/imports/holdings', async (c) => {
     .where(tenant.scope(securities));
   const byTicker = new Map(securityRows.map((row) => [row.ticker?.toUpperCase(), row.id]));
   const missing = [...new Set(body.rows.map((row) => row.ticker.toUpperCase()))].filter((ticker) => !byTicker.has(ticker));
+  const statements: BatchItem<'sqlite'>[] = [];
   for (const ticker of missing) {
     const suggestion = suggestClassification({ ticker, name: null, type: null, currency: account.currency });
-    const id = crypto.randomUUID();
-    await tenant.db.insert(securities).values({
-      id,
-      householdId: tenant.householdId,
-      ticker,
-      name: ticker,
-      currency: account.currency,
-      isPublic: true,
-      classification: suggestion.classification,
-      classificationSource: suggestion.source,
-      needsReview: suggestion.needsReview,
-      createdAt: deps.now().getTime(),
-    });
+    // Same derived id as manual holdings use, so concurrent saves share one row.
+    const id = await stableId(`security:manual:${tenant.householdId}:${ticker}`);
+    statements.push(
+      tenant.db
+        .insert(securities)
+        .values({
+          id,
+          householdId: tenant.householdId,
+          ticker,
+          name: ticker,
+          currency: account.currency,
+          isPublic: true,
+          classification: suggestion.classification,
+          classificationSource: suggestion.source,
+          needsReview: suggestion.needsReview,
+          createdAt: deps.now().getTime(),
+        })
+        .onConflictDoNothing(),
+    );
     byTicker.set(ticker, id);
   }
 
@@ -298,9 +327,10 @@ portfolioRoutes.post('/imports/holdings', async (c) => {
     source: 'import' as const,
     estimated: row.price === undefined,
   }));
-  await runBatch(
-    tenant.db,
-    chunkRows(holdingDaily, holdingRows).map((chunk) =>
+  // New securities and the whole file together, or none of it.
+  await runAtomic(tenant.db, [
+    ...statements,
+    ...chunkRows(holdingDaily, holdingRows).map((chunk) =>
       tenant.db
         .insert(holdingDaily)
         .values(chunk)
@@ -316,7 +346,7 @@ portfolioRoutes.post('/imports/holdings', async (c) => {
           setWhere: body.overwrite ? sql`1 = 1` : sql`${holdingDaily.source} in ('backfill', 'import')`,
         }),
     ),
-  );
+  ]);
   return c.json({ imported: holdingRows.length, newSecurities: missing.length });
 });
 

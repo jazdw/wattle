@@ -58,6 +58,7 @@ describe('Allocation page', () => {
     expect(body.weights.us_stock).toBeCloseTo(0.45);
     expect(body.weights.intl_bond).toBeCloseTo(0.05);
     expect(body.excludedCategories).toEqual(['real_estate', 'cash']);
+    expect((body as { version?: number }).version).toBe(3); // what the editor loaded
     expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
   });
 

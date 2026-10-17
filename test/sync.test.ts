@@ -3,7 +3,9 @@ import { describe, expect, it } from 'vitest';
 import * as schema from '../server/db/schema';
 import { Tenant } from '../server/db/tenant';
 import type { Deps } from '../server/ports';
-import { backfillConnection, collectBalanceHistory } from '../server/services/backfill';
+import { collectPendingReport } from '../server/services/assetReports';
+import { connectionLease, Lease } from '../server/services/lease';
+import { backfillConnection } from '../server/services/backfill';
 import { account, closes, fakePlaid, fakePrices, holding, security } from './fakes';
 import { client, createHousehold, createTestDeps, flush, TODAY } from './helpers';
 
@@ -264,9 +266,11 @@ describe('history backfill', () => {
     expect(connection.assetReportId).toBe('ar-1');
     expect(connection.assetReportTokenEnc).not.toContain('assets-sandbox');
 
-    expect(await collectBalanceHistory(deps, tenant, connection.id)).toBe(false); // not ready yet
+    const lease = (await Lease.acquire(deps, tenant, connectionLease(connection.id)))!;
+    expect(await collectPendingReport(deps, tenant, connection, 'manual', lease)).toBe(false); // not ready yet
     plaid.state.assetReportReady = true;
-    expect(await collectBalanceHistory(deps, tenant, connection.id)).toBe(true);
+    expect(await collectPendingReport(deps, tenant, connection, 'manual', lease)).toBe(true);
+    await lease.forceRelease();
 
     const rows = await deps.db.select().from(schema.accountDaily).where(eq(schema.accountDaily.source, 'backfill'));
     expect(rows.map((row) => row.balance).sort((a, b) => a - b)).toEqual([-300_00, 900_00, 950_00]);
@@ -324,7 +328,7 @@ describe('history backfill', () => {
       .onConflictDoUpdate({ target: [schema.accountDaily.accountId, schema.accountDaily.date], set: { balance: 1, source: 'import' } });
     expect((await api(`/api/connections/${connection.id}/backfill`, { method: 'POST' })).status).toBe(200);
     await flush(deps);
-    await backfillConnection(deps, tenant, connection.id, null);
+    await backfillConnection(deps, tenant, connection.id, null, 'manual');
     const [row] = await deps.db
       .select()
       .from(schema.accountDaily)

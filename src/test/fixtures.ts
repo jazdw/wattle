@@ -160,6 +160,7 @@ export const TARGET: TargetResponse = {
     bandPct: 5,
     excludedAccountIds: [],
     excludedCategories: ['real_estate'],
+    version: 3,
   },
 };
 

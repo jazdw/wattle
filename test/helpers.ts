@@ -42,6 +42,7 @@ export async function createTestDeps(overrides: Partial<Deps> = {}): Promise<Dep
     quotes: null,
     fx: null,
     now: () => new Date('2026-10-09T02:00:00Z'),
+    sleep: async () => {},
     background: (work) => {
       pending.push(work);
     },

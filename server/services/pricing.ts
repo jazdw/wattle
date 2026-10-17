@@ -6,8 +6,9 @@
 import { and, desc, eq, gte, inArray, lte, max, min, sql } from 'drizzle-orm';
 import { addDays, lastTradingDay, type IsoDate } from '../../shared/dates';
 import type { Currency, FxRates } from '../../shared/money';
-import { chunkRows, inChunks, runBatch } from '../db/batch';
-import { fxDaily, pricesDaily } from '../db/schema';
+import type { BatchItem } from 'drizzle-orm/batch';
+import { chunkRows, inChunks, runAtomic } from '../db/batch';
+import { fxDaily, priceRuns, pricesDaily, type PriceCall, type PriceChange } from '../db/schema';
 import type { DailyClose, Deps } from '../ports';
 import { cacheGet, cacheGetMany, cacheSet, cacheSetMany } from './cache';
 
@@ -44,21 +45,124 @@ async function knownUnknowns(deps: Deps, tickers: string[]): Promise<Set<string>
   return new Set(tickers.filter((ticker) => found.has(unknownKey(ticker))));
 }
 
-/** Store closes; a later source (Tiingo) replaces an earlier one (Plaid) for the same day. */
+/**
+ * One price_runs entry: the provider calls made, then the stored values and
+ * the log row written together in one atomic batch (finish). A run that
+ * fetched nothing logs why (skipped); one whose batch fails logs the failure.
+ */
+class PriceRun {
+  readonly calls: PriceCall[] = [];
+  readonly changes: PriceChange[] = [];
+  saved = 0;
+  private readonly deps: Deps;
+  private readonly kind: 'latest' | 'history' | 'fx';
+  private readonly startedAt: number;
+
+  constructor(deps: Deps, kind: 'latest' | 'history' | 'fx') {
+    this.deps = deps;
+    this.kind = kind;
+    this.startedAt = deps.now().getTime();
+  }
+
+  /** Call a provider, recording the call; failures are recorded and rethrown. */
+  async call<T>(call: Omit<PriceCall, 'returned' | 'error'>, work: () => Promise<T>, returned: (result: T) => number): Promise<T> {
+    try {
+      const result = await work();
+      this.calls.push({ ...call, returned: returned(result) });
+      return result;
+    } catch (error) {
+      this.calls.push({ ...call, returned: 0, error: (error instanceof Error ? error.message : String(error)).slice(0, 200) });
+      throw error;
+    }
+  }
+
+  private row(outcome: 'ok' | 'error' | 'skipped', extra: { error?: string; note?: string } = {}) {
+    return this.deps.db.insert(priceRuns).values({
+      id: crypto.randomUUID(),
+      kind: this.kind,
+      outcome,
+      error: extra.error ?? null,
+      note: extra.note ?? null,
+      startedAt: this.startedAt,
+      finishedAt: this.deps.now().getTime(),
+      calls: this.calls,
+      saved: this.saved,
+      changes: this.changes.slice(0, 500),
+    });
+  }
+
+  /** Nothing needed fetching. */
+  async skipped(note: string): Promise<void> {
+    await this.row('skipped', { note });
+  }
+
+  /**
+   * Write `statements` (the fetched values) and the log row atomically. If
+   * that fails, log the failure on its own (best effort) and rethrow.
+   */
+  async finish(statements: BatchItem<'sqlite'>[]): Promise<void> {
+    try {
+      await runAtomic(this.deps.db, [...statements, this.row('ok')]);
+    } catch (error) {
+      try {
+        this.saved = 0;
+        await this.row('error', { error: (error instanceof Error ? error.message : String(error)).slice(0, 500) });
+      } catch (logError) {
+        console.error('Could not write the price log', logError instanceof Error ? logError.message : logError);
+      }
+      throw error;
+    }
+  }
+}
+
+/** Stored closes for these rows' tickers and dates, to log which values change. */
+async function storedCloses(deps: Deps, rows: PriceRow[]) {
+  const stored = new Map<string, { close: number; source: string }>();
+  const dates = rows.map((row) => row.date).sort();
+  for (const chunk of inChunks(normalise(rows.map((row) => row.ticker)))) {
+    const found = await deps.db
+      .select({ ticker: pricesDaily.ticker, date: pricesDaily.date, close: pricesDaily.close, source: pricesDaily.source })
+      .from(pricesDaily)
+      .where(and(inArray(pricesDaily.ticker, chunk), gte(pricesDaily.date, dates[0]), lte(pricesDaily.date, dates[dates.length - 1])));
+    for (const row of found) stored.set(`${row.ticker}|${row.date}`, { close: row.close, source: row.source });
+  }
+  return stored;
+}
+
+/**
+ * Statements storing closes. With `replace`, a later source (Tiingo) replaces
+ * an earlier one (Plaid) for the same day; without, existing closes are kept.
+ */
+export function closeStatements(deps: Deps, rows: PriceRow[], options: { replace: boolean }): BatchItem<'sqlite'>[] {
+  return chunkRows(pricesDaily, rows).map((chunk) => {
+    const insert = deps.db.insert(pricesDaily).values(chunk);
+    return options.replace
+      ? insert.onConflictDoUpdate({
+          target: [pricesDaily.ticker, pricesDaily.date],
+          set: { close: sql`excluded.close`, source: sql`excluded.source` },
+        })
+      : insert.onConflictDoNothing();
+  });
+}
+
+/** Store closes now (manual entry, tests); see closeStatements. */
 export async function saveCloses(deps: Deps, rows: PriceRow[], options: { replace: boolean }): Promise<void> {
-  if (rows.length === 0) return;
-  await runBatch(
-    deps.db,
-    chunkRows(pricesDaily, rows).map((chunk) => {
-      const insert = deps.db.insert(pricesDaily).values(chunk);
-      return options.replace
-        ? insert.onConflictDoUpdate({
-            target: [pricesDaily.ticker, pricesDaily.date],
-            set: { close: sql`excluded.close`, source: sql`excluded.source` },
-          })
-        : insert.onConflictDoNothing();
-    }),
-  );
+  await runAtomic(deps.db, closeStatements(deps, rows, options));
+}
+
+/** Store fetched closes as part of a price run, logging values that change. */
+async function saveFetchedCloses(deps: Deps, run: PriceRun, rows: PriceRow[]): Promise<void> {
+  if (rows.length > 0) {
+    const stored = await storedCloses(deps, rows);
+    for (const row of rows) {
+      const before = stored.get(`${row.ticker}|${row.date}`);
+      if (before && Math.abs(before.close - row.close) > 1e-9) {
+        run.changes.push({ ticker: row.ticker, date: row.date, before: before.close, beforeSource: before.source, after: row.close, afterSource: row.source });
+      }
+    }
+    run.saved = rows.length;
+  }
+  await run.finish(closeStatements(deps, rows, { replace: true }));
 }
 
 /**
@@ -74,13 +178,18 @@ export async function ensureRecentCloses(deps: Deps, tickers: string[], date: Is
   const have = await coverage(deps, unique);
   const unknown = await knownUnknowns(deps, unique);
   const stale = unique.filter((ticker) => !unknown.has(ticker) && !((have.get(ticker)?.last ?? '') >= expected));
-  if (stale.length === 0) return;
+  const run = new PriceRun(deps, 'latest');
+  if (stale.length === 0) {
+    await run.skipped(`All ${unique.length} tickers already have a close for ${expected} (or are unknown to the provider).`);
+    return;
+  }
 
+  const prices = deps.prices;
   const rows: PriceRow[] = [];
   let bulk = new Map<string, DailyClose>();
-  if (deps.prices.latestCloses) {
+  if (prices.latestCloses) {
     try {
-      bulk = await deps.prices.latestCloses(stale);
+      bulk = await run.call({ provider: prices.name, endpoint: 'latest', tickers: stale }, () => prices.latestCloses!(stale), (result) => result.size);
     } catch (error) {
       console.warn('Bulk price fetch failed', error instanceof Error ? error.message : error);
     }
@@ -97,8 +206,9 @@ export async function ensureRecentCloses(deps: Deps, tickers: string[], date: Is
     // fills it in.
     if (last && last >= lastTradingDay(addDays(expected, -1)) && !fromBulk) continue;
     let closes: DailyClose[];
+    const from = last ? addDays(last, 1) : addDays(date, -7);
     try {
-      closes = await deps.prices.dailyCloses(ticker, last ? addDays(last, 1) : addDays(date, -7), date);
+      closes = await run.call({ provider: prices.name, endpoint: 'daily', tickers: [ticker], from, to: date }, () => prices.dailyCloses(ticker, from, date), (result) => result.length);
     } catch (error) {
       console.warn('Price fetch failed', ticker, error instanceof Error ? error.message : error);
       continue;
@@ -106,7 +216,7 @@ export async function ensureRecentCloses(deps: Deps, tickers: string[], date: Is
     if (closes.length === 0 && !last && !fromBulk) newlyUnknown.push(ticker);
     for (const close of closes) rows.push({ ticker, date: close.date, close: close.close, currency: 'USD', source: 'tiingo' });
   }
-  await saveCloses(deps, rows, { replace: true });
+  await saveFetchedCloses(deps, run, rows);
   await cacheSetMany(deps, newlyUnknown.map((ticker) => [unknownKey(ticker), true]), UNKNOWN_TTL_SECONDS);
 }
 
@@ -120,6 +230,8 @@ export async function ensureCloses(deps: Deps, tickers: string[], start: IsoDate
   const unique = normalise(tickers);
   const have = await coverage(deps, unique);
   const unknown = await knownUnknowns(deps, unique);
+  const prices = deps.prices;
+  const run = new PriceRun(deps, 'history');
   const rows: PriceRow[] = [];
   const newlyUnknown: string[] = [];
 
@@ -139,7 +251,7 @@ export async function ensureCloses(deps: Deps, tickers: string[], start: IsoDate
       if (from > to) continue;
       let closes: DailyClose[];
       try {
-        closes = await deps.prices.dailyCloses(ticker, from, to);
+        closes = await run.call({ provider: prices.name, endpoint: 'daily', tickers: [ticker], from, to }, () => prices.dailyCloses(ticker, from, to), (result) => result.length);
       } catch (error) {
         console.warn('Price fetch failed', ticker, error instanceof Error ? error.message : error);
         continue;
@@ -151,7 +263,11 @@ export async function ensureCloses(deps: Deps, tickers: string[], start: IsoDate
       for (const close of closes) rows.push({ ticker, date: close.date, close: close.close, currency: 'USD', source: 'tiingo' });
     }
   }
-  await saveCloses(deps, rows, { replace: true });
+  if (run.calls.length === 0) {
+    await run.skipped(`All ${unique.length} tickers already cover ${start} to ${end} (or are unknown to the provider).`);
+    return;
+  }
+  await saveFetchedCloses(deps, run, rows);
   await cacheSetMany(deps, newlyUnknown.map((ticker) => [unknownKey(ticker), true]), UNKNOWN_TTL_SECONDS);
 }
 
@@ -203,6 +319,8 @@ const FX_PAIR: [Currency, Currency] = ['USD', 'AUD'];
 
 export async function ensureFx(deps: Deps, start: IsoDate, end: IsoDate): Promise<void> {
   if (!deps.fx) return;
+  const fx = deps.fx;
+  const run = new PriceRun(deps, 'fx');
   const [base, quote] = FX_PAIR;
   const [have] = await deps.db
     .select({ first: min(fxDaily.date), last: max(fxDaily.date) })
@@ -214,19 +332,23 @@ export async function ensureFx(deps: Deps, start: IsoDate, end: IsoDate): Promis
     if (have.first > addDays(start, 4)) ranges.push([start, addDays(have.first, -1)]);
     if (have.last < end) ranges.push([addDays(have.last, 1), end]);
   }
+  const rows: (typeof fxDaily.$inferInsert)[] = [];
   for (const [from, to] of ranges) {
     if (from > to) continue;
     try {
-      const rates = await deps.fx.rates(base, quote, from, to);
-      const rows = rates.filter((rate) => rate.rate > 0).map((rate) => ({ base, quote, date: rate.date, rate: rate.rate }));
-      await runBatch(
-        deps.db,
-        chunkRows(fxDaily, rows).map((chunk) => deps.db.insert(fxDaily).values(chunk).onConflictDoNothing()),
-      );
+      const rates = await run.call({ provider: fx.name, endpoint: 'rates', tickers: [`${base}/${quote}`], from, to }, () => fx.rates(base, quote, from, to), (result) => result.length);
+      rows.push(...rates.filter((rate) => rate.rate > 0).map((rate) => ({ base, quote, date: rate.date, rate: rate.rate })));
     } catch (error) {
       console.warn('FX fetch failed', error instanceof Error ? error.message : error);
     }
   }
+  if (run.calls.length === 0) {
+    await run.skipped(`${base}/${quote} rates already cover ${start} to ${end}.`);
+    return;
+  }
+  // Rates are never overwritten (insert-or-ignore), so none "change".
+  run.saved = rows.length;
+  await run.finish(chunkRows(fxDaily, rows).map((chunk) => deps.db.insert(fxDaily).values(chunk).onConflictDoNothing()));
 }
 
 export type FxLookup = (date: IsoDate) => FxRates;

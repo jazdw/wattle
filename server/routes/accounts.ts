@@ -12,7 +12,8 @@ import {
 } from '../../shared/schemas';
 import type { AccountsResponse, AccountSummary, ConnectionsResponse } from '../../shared/types';
 import { requireAuth } from '../auth/routes';
-import { chunkRows, runBatch } from '../db/batch';
+import type { BatchItem } from 'drizzle-orm/batch';
+import { chunkRows, runAtomic } from '../db/batch';
 import {
   accountDaily,
   accounts,
@@ -27,11 +28,14 @@ import type { Tenant } from '../db/tenant';
 import type { AppEnv } from '../env';
 import { HttpError, notFound, readBody, requestCurrency } from '../lib/http';
 import type { Deps } from '../ports';
-import { backfillConnection, collectBalanceHistory } from '../services/backfill';
+import { connectionActivity, SyncRun } from '../services/activity';
+import { backfillConnection } from '../services/backfill';
 import { toCurrency } from '../services/portfolio';
 import { closeLookup, ensureRecentCloses, fxLookup } from '../services/pricing';
 import { snapshotHousehold } from '../services/snapshots';
-import { getConnection, purgeAccountData, removeConnection, syncConnection } from '../services/sync';
+import { accountLease, connectionLease, Lease, snapshotLease } from '../services/lease';
+import { stableId } from '../services/ids';
+import { getConnection, MANUAL_SYNC_INTERVAL_MS, purgeStatements, removeConnection, syncConnection, underConnectionLease } from '../services/sync';
 
 const LIABILITY_TYPES = new Set(['credit', 'loan']);
 
@@ -50,6 +54,11 @@ async function householdCurrency(tenant: Tenant): Promise<string> {
 export const connectionRoutes = new Hono<AppEnv>();
 connectionRoutes.use('*', requireAuth);
 
+/** Plaid warned the consent is ending, or it ends within a week. */
+function consentEnding(row: { consentWarningAt: number | null; consentExpiresAt: number | null }, now: number): boolean {
+  return row.consentWarningAt !== null || (row.consentExpiresAt !== null && row.consentExpiresAt - now < 7 * 24 * 3600 * 1000);
+}
+
 connectionRoutes.get('/', async (c) => {
   const tenant = c.get('tenant');
   const rows = await tenant.db
@@ -64,7 +73,9 @@ connectionRoutes.get('/', async (c) => {
         id: row.id,
         institutionName: row.institutionName,
         kind: row.kind,
-        status: row.status,
+        // A consent warning shows while the login otherwise works; a login
+        // problem takes precedence.
+        status: row.status === 'ok' && consentEnding(row, c.env.deps.now().getTime()) ? 'pending_expiration' : row.status,
         errorCode: row.errorCode,
         ownerUserId: row.ownerUserId,
         lastSyncedAt: row.lastSyncedAt,
@@ -78,27 +89,26 @@ connectionRoutes.get('/', async (c) => {
   return c.json(response);
 });
 
-/** Minimum gap between manual syncs of one connection. */
-const SYNC_COOLDOWN_MS = 2 * 60 * 1000;
-
+/**
+ * Sync now. Within the cooldown it skips the Plaid sync but still collects a
+ * ready bank-history report (whose webhook was missed, or can't reach local dev).
+ */
 connectionRoutes.post('/:id/sync', async (c) => {
   const deps = c.env.deps;
   const tenant = c.get('tenant');
   const connection = await getConnection(tenant, c.req.param('id'));
   if (!connection) notFound('Connection not found.');
-  // Bank history the ASSETS webhook should have delivered (missed, or
-  // unreachable in local dev). One Plaid call, only while a report is pending.
-  if (connection.assetReportTokenEnc) {
-    await collectBalanceHistory(deps, tenant, connection.id).catch((error: unknown) =>
-      console.warn('Asset report collection failed', error instanceof Error ? error.message : error),
-    );
-  }
-  if (connection.lastSyncedAt && deps.now().getTime() - connection.lastSyncedAt < SYNC_COOLDOWN_MS) {
-    return c.json({ status: connection.status, skipped: true });
-  }
-  const result = await syncConnection(deps, tenant, connection.id);
+  const result = await syncConnection(deps, tenant, connection.id, 'manual', { minIntervalMs: MANUAL_SYNC_INTERVAL_MS });
   await snapshotHousehold(deps, tenant, marketDate(deps.now()));
   return c.json(result);
+});
+
+/** The connection's sync log, newest first. */
+connectionRoutes.get('/:id/activity', async (c) => {
+  const tenant = c.get('tenant');
+  const connection = await getConnection(tenant, c.req.param('id'));
+  if (!connection) notFound('Connection not found.');
+  return c.json({ runs: await connectionActivity(tenant, connection.id) });
 });
 
 connectionRoutes.post('/:id/backfill', async (c) => {
@@ -108,7 +118,7 @@ connectionRoutes.post('/:id/backfill', async (c) => {
   if (!connection) notFound('Connection not found.');
   const url = new URL(c.req.url);
   const hook = url.protocol === 'https:' ? `${url.origin}/api/plaid/webhook` : null;
-  deps.background(backfillConnection(deps, tenant, connection.id, hook));
+  deps.background(backfillConnection(deps, tenant, connection.id, hook, 'manual'));
   return c.json({ ok: true });
 });
 
@@ -203,7 +213,9 @@ accountRoutes.post('/', async (c) => {
   const now = deps.now().getTime();
   const id = crypto.randomUUID();
   const balance = body.balance === undefined ? null : signedBalance(body.type, body.balance);
-  await tenant.db.insert(accounts).values({
+  // The account and its opening balance together, or neither.
+  const statements: BatchItem<'sqlite'>[] = [];
+  statements.push(tenant.db.insert(accounts).values({
     id,
     householdId: tenant.householdId,
     source: 'manual',
@@ -216,21 +228,31 @@ accountRoutes.post('/', async (c) => {
     balance,
     balanceAsOf: balance === null ? null : now,
     createdAt: now,
-  });
+  }));
   if (balance !== null) {
-    await tenant.db.insert(accountDaily).values({
-      householdId: tenant.householdId,
-      accountId: id,
-      date: body.date ?? marketDate(deps.now()),
-      balance,
-      currency: body.currency,
-      source: 'manual',
-    });
+    statements.push(
+      tenant.db.insert(accountDaily).values({
+        householdId: tenant.householdId,
+        accountId: id,
+        date: body.date ?? marketDate(deps.now()),
+        balance,
+        currency: body.currency,
+        source: 'manual',
+      }),
+    );
   }
+  await runAtomic(tenant.db, statements);
   return c.json({ id }, 201);
 });
 
+/**
+ * Edit an account. Renaming, owner and category are single updates. Hiding or
+ * un-hiding changes what syncs store and what the snapshot counts, so it holds
+ * the connection's lease (linked accounts) and the snapshot's, taken in that
+ * order everywhere; it answers 409 if a sync doesn't finish soon.
+ */
 accountRoutes.patch('/:id', async (c) => {
+  const deps = c.env.deps;
   const tenant = c.get('tenant');
   const account = await getAccount(tenant, c.req.param('id'));
   if (!account) notFound('Account not found.');
@@ -250,16 +272,49 @@ accountRoutes.patch('/:id', async (c) => {
       update.balanceAsOf = null;
     }
   }
+  const statements: BatchItem<'sqlite'>[] = [];
   if (Object.keys(update).length > 0) {
-    await tenant.db.update(accounts).set(update).where(tenant.scope(accounts, eq(accounts.id, account.id)));
+    statements.push(tenant.db.update(accounts).set(update).where(tenant.scope(accounts, eq(accounts.id, account.id))));
   }
   if (body.isHidden) {
-    await purgeAccountData(tenant, account.id);
+    statements.push(...purgeStatements(tenant, account.id));
     if (body.purge) {
-      await tenant.db.delete(accountDaily).where(tenant.scope(accountDaily, eq(accountDaily.accountId, account.id)));
-      await tenant.db.delete(holdingDaily).where(tenant.scope(holdingDaily, eq(holdingDaily.accountId, account.id)));
+      statements.push(
+        tenant.db.delete(accountDaily).where(tenant.scope(accountDaily, eq(accountDaily.accountId, account.id))),
+        tenant.db.delete(holdingDaily).where(tenant.scope(holdingDaily, eq(holdingDaily.accountId, account.id))),
+      );
     }
   }
+  const changesVisibility = body.isHidden !== undefined && body.isHidden !== account.isHidden;
+  if (!changesVisibility) {
+    await runAtomic(tenant.db, statements);
+    return c.json({ ok: true });
+  }
+
+  const connectionId = account.connectionId;
+  const connection = connectionId ? await Lease.acquireOrBusy(deps, tenant, connectionLease(connectionId)) : null;
+  let snapshot: Lease;
+  try {
+    snapshot = await Lease.acquireOrBusy(deps, tenant, snapshotLease(tenant.householdId), 'The household snapshot is being updated. Try again in a moment.');
+  } catch (error) {
+    await connection?.forceRelease();
+    throw error;
+  }
+  try {
+    const write = async () => {
+      const run = connectionId ? new SyncRun(deps, tenant, connectionId, 'account', 'manual') : null;
+      if (run) run.note = `${body.isHidden ? 'Hid' : 'Un-hid'} “${account.name}”${body.isHidden && body.purge ? ' and deleted its stored history' : ''}.`;
+      await connection?.renew();
+      await snapshot.renew();
+      await runAtomic(tenant.db, [...statements, ...(run ? [run.statement()] : [])]);
+    };
+    if (connection && connectionId) await underConnectionLease(deps, tenant, connectionId, 'manual', connection, { history: false }, write);
+    else await write();
+  } finally {
+    await snapshot.forceRelease();
+  }
+  // Totals changed; this also runs any snapshot that was asked for meanwhile.
+  await snapshotHousehold(deps, tenant, marketDate(deps.now()));
   return c.json({ ok: true });
 });
 
@@ -270,7 +325,14 @@ accountRoutes.delete('/:id', async (c) => {
   if (account.source !== 'manual') {
     throw new HttpError(409, 'Linked accounts are hidden, not deleted. Remove the connection to delete them.');
   }
-  await tenant.db.delete(accounts).where(tenant.scope(accounts, eq(accounts.id, account.id)));
+  // Not while a holdings save or balance entry for it is mid-way.
+  const lease = await Lease.acquireOrBusy(c.env.deps, tenant, accountLease(account.id), 'Someone else is updating this account. Try again in a moment.');
+  try {
+    await lease.renew();
+    await tenant.db.delete(accounts).where(tenant.scope(accounts, eq(accounts.id, account.id)));
+  } finally {
+    await lease.forceRelease();
+  }
   return c.json({ ok: true });
 });
 
@@ -284,46 +346,40 @@ accountRoutes.post('/:id/balances', async (c) => {
   const body = await readBody(c, balanceEntrySchema);
   const balance = signedBalance(account.type, body.balance);
 
-  await tenant.db
-    .insert(accountDaily)
-    .values({
-      householdId: tenant.householdId,
-      accountId: account.id,
-      date: body.date,
-      balance,
-      currency: account.currency,
-      source: 'manual',
-    })
-    .onConflictDoUpdate({
-      target: [accountDaily.accountId, accountDaily.date],
-      set: { balance, source: 'manual', estimated: false },
-    });
-
-  // The account's current balance is its most recent entry.
-  const [latest] = await tenant.db
-    .select({ date: accountDaily.date, balance: accountDaily.balance })
-    .from(accountDaily)
-    .where(tenant.scope(accountDaily, eq(accountDaily.accountId, account.id), eq(accountDaily.source, 'manual')))
-    .orderBy(desc(accountDaily.date))
-    .limit(1);
-  if (latest?.date === body.date) {
-    await tenant.db
-      .update(accounts)
-      .set({ balance, balanceAsOf: deps.now().getTime() })
-      .where(tenant.scope(accounts, eq(accounts.id, account.id)));
-    // Carried-forward snapshot copies after this date are stale now.
-    await tenant.db
-      .delete(accountDaily)
-      .where(
-        tenant.scope(
-          accountDaily,
-          eq(accountDaily.accountId, account.id),
-          eq(accountDaily.source, 'sync'),
-          sql`${accountDaily.date} > ${body.date}`,
-        ),
+  // One change to the account at a time (two entries at once could otherwise
+  // leave the older one as the current balance), written atomically.
+  const lease = await Lease.acquireOrBusy(deps, tenant, accountLease(account.id), 'Someone else is updating this account. Try again in a moment.');
+  let isLatest = false;
+  try {
+    // The account's current balance is its most recent entry.
+    const [latest] = await tenant.db
+      .select({ date: accountDaily.date })
+      .from(accountDaily)
+      .where(tenant.scope(accountDaily, eq(accountDaily.accountId, account.id), eq(accountDaily.source, 'manual')))
+      .orderBy(desc(accountDaily.date))
+      .limit(1);
+    isLatest = !latest || body.date >= latest.date;
+    const statements: BatchItem<'sqlite'>[] = [
+      tenant.db
+        .insert(accountDaily)
+        .values({ householdId: tenant.householdId, accountId: account.id, date: body.date, balance, currency: account.currency, source: 'manual' })
+        .onConflictDoUpdate({ target: [accountDaily.accountId, accountDaily.date], set: { balance, source: 'manual', estimated: false } }),
+    ];
+    if (isLatest) {
+      statements.push(
+        tenant.db.update(accounts).set({ balance, balanceAsOf: deps.now().getTime() }).where(tenant.scope(accounts, eq(accounts.id, account.id))),
+        // Carried-forward snapshot copies after this date are stale now.
+        tenant.db
+          .delete(accountDaily)
+          .where(tenant.scope(accountDaily, eq(accountDaily.accountId, account.id), eq(accountDaily.source, 'sync'), sql`${accountDaily.date} > ${body.date}`)),
       );
-    await snapshotHousehold(deps, tenant, marketDate(deps.now()));
+    }
+    await lease.renew();
+    await runAtomic(tenant.db, statements);
+  } finally {
+    await lease.forceRelease();
   }
+  if (isLatest) await snapshotHousehold(deps, tenant, marketDate(deps.now()));
   return c.json({ ok: true });
 });
 
@@ -357,10 +413,16 @@ accountRoutes.get('/:id/holdings', async (c) => {
     .innerJoin(securities, and(eq(securities.id, holdings.securityId), eq(securities.householdId, holdings.householdId)))
     .where(tenant.scope(holdings, eq(holdings.accountId, account.id)))
     .orderBy(desc(holdings.value));
-  return c.json({ holdings: rows });
+  // The editor sends this back, so a save can't silently overwrite a newer one.
+  return c.json({ holdings: rows, version: account.holdingsVersion });
 });
 
-/** Replace a manual account's holdings (ticker + quantity, optional unit price). */
+/**
+ * Replace a manual account's holdings (ticker + quantity, optional unit price).
+ * One save at a time per account (its lease); `version` must match what the
+ * editor loaded, else 409 (someone saved in between). Securities, holdings and
+ * the new version are written in one atomic batch.
+ */
 accountRoutes.put('/:id/holdings', async (c) => {
   const deps = c.env.deps;
   const tenant = c.get('tenant');
@@ -370,71 +432,112 @@ accountRoutes.put('/:id/holdings', async (c) => {
   const body = await readBody(c, manualHoldingsSchema);
   const today = marketDate(deps.now());
 
+  // Prices first (their own logged, atomic writes), outside the lease.
   const tickers = body.holdings.filter((holding) => holding.price === undefined).map((holding) => holding.ticker.toUpperCase());
   await ensureRecentCloses(deps, tickers, today);
   const closes = await closeLookup(deps, tickers, today, today);
 
-  const rows: (typeof holdings.$inferInsert)[] = [];
-  for (const entry of body.holdings) {
-    const securityId = await upsertManualSecurity(deps, tenant, entry, account.currency, closes(entry.ticker, today));
-    const price = entry.price ?? closes(entry.ticker, today) ?? 0;
-    rows.push({
-      householdId: tenant.householdId,
-      accountId: account.id,
-      securityId,
-      quantity: entry.quantity,
-      price,
-      priceAsOf: today,
-      value: Math.round(entry.quantity * price * 100),
-      currency: account.currency,
-      updatedAt: deps.now().getTime(),
-    });
+  const lease = await Lease.acquireOrBusy(deps, tenant, accountLease(account.id), 'Someone else is saving these holdings. Try again in a moment.');
+  let unpriced = 0;
+  try {
+    const [current] = await tenant.db
+      .select({ holdingsVersion: accounts.holdingsVersion })
+      .from(accounts)
+      .where(tenant.scope(accounts, eq(accounts.id, account.id)));
+    if (!current) notFound('Account not found.');
+    if (body.version !== current.holdingsVersion) {
+      throw new HttpError(409, 'These holdings were changed by someone else. Reload to see their changes.');
+    }
+
+    const statements: BatchItem<'sqlite'>[] = [];
+    const rows: (typeof holdings.$inferInsert)[] = [];
+    for (const entry of body.holdings) {
+      const securityId = await planManualSecurity(deps, tenant, entry, account.currency, closes(entry.ticker, today), statements);
+      const price = entry.price ?? closes(entry.ticker, today) ?? 0;
+      if (price === 0) unpriced += 1;
+      rows.push({
+        householdId: tenant.householdId,
+        accountId: account.id,
+        securityId,
+        quantity: entry.quantity,
+        price,
+        priceAsOf: today,
+        value: Math.round(entry.quantity * price * 100),
+        currency: account.currency,
+        updatedAt: deps.now().getTime(),
+      });
+    }
+    statements.push(
+      tenant.db.delete(holdings).where(tenant.scope(holdings, eq(holdings.accountId, account.id))),
+      ...chunkRows(holdings, rows).map((chunk) => tenant.db.insert(holdings).values(chunk)),
+      tenant.db
+        .update(accounts)
+        .set({ holdingsVersion: current.holdingsVersion + 1 })
+        .where(tenant.scope(accounts, eq(accounts.id, account.id))),
+    );
+    await lease.renew();
+    await runAtomic(tenant.db, statements);
+  } finally {
+    await lease.forceRelease();
   }
-  await runBatch(tenant.db, [
-    tenant.db.delete(holdings).where(tenant.scope(holdings, eq(holdings.accountId, account.id))),
-    ...chunkRows(holdings, rows).map((chunk) => tenant.db.insert(holdings).values(chunk)),
-  ]);
   await snapshotHousehold(deps, tenant, today);
-  return c.json({ ok: true, unpriced: rows.filter((row) => row.price === 0).length });
+  return c.json({ ok: true, unpriced });
 });
 
-async function upsertManualSecurity(
+/**
+ * Plan the security for a manually entered ticker; returns its id. Reuses the
+ * household's security for that ticker (so its classification is shared), but
+ * never changes one that belongs to a Plaid connection: the next sync would
+ * overwrite it. A new one gets an id derived from the ticker, so two saves
+ * at once create one row.
+ */
+async function planManualSecurity(
   deps: Deps,
   tenant: Tenant,
   entry: { ticker: string; name?: string; price?: number },
   currency: string,
   close: number | null,
+  statements: BatchItem<'sqlite'>[],
 ): Promise<string> {
   const ticker = entry.ticker.toUpperCase();
-  const [existing] = await tenant.db
-    .select({ id: securities.id })
+  const candidates = await tenant.db
+    .select({ id: securities.id, externalId: securities.externalId })
     .from(securities)
-    .where(tenant.scope(securities, eq(securities.ticker, ticker)))
-    .limit(1);
+    .where(tenant.scope(securities, eq(securities.ticker, ticker)));
+  const manual = candidates.find((row) => row.externalId === null);
+  const linked = candidates.find((row) => row.externalId !== null);
   const isPublic = entry.price === undefined && close !== null;
-  const priceFields =
-    entry.price !== undefined ? { lastPrice: entry.price, lastPriceDate: marketDate(deps.now()) } : {};
-  if (existing) {
-    await tenant.db
-      .update(securities)
-      .set({ ...(entry.name ? { name: entry.name } : {}), ...priceFields, ...(isPublic ? { isPublic } : {}) })
-      .where(tenant.scope(securities, eq(securities.id, existing.id)));
-    return existing.id;
+  const priceFields = entry.price !== undefined ? { lastPrice: entry.price, lastPriceDate: marketDate(deps.now()) } : {};
+  if (manual) {
+    statements.push(
+      tenant.db
+        .update(securities)
+        .set({ ...(entry.name ? { name: entry.name } : {}), ...priceFields, ...(isPublic ? { isPublic } : {}) })
+        .where(tenant.scope(securities, eq(securities.id, manual.id))),
+    );
+    return manual.id;
   }
+  // A public fund also held through Plaid: share its row (and classification).
+  if (linked && entry.price === undefined) return linked.id;
   const suggestion = suggestClassification({ ticker, name: entry.name ?? null, type: null, currency });
-  const id = crypto.randomUUID();
-  await tenant.db.insert(securities).values({
-    id,
-    householdId: tenant.householdId,
-    ticker,
-    name: entry.name ?? ticker,
-    currency,
-    isPublic,
-    classification: suggestion.classification,
-    classificationSource: suggestion.source,
-    needsReview: suggestion.needsReview,
-    ...priceFields,
-    createdAt: deps.now().getTime(),
-  });
+  const id = await stableId(`security:manual:${tenant.householdId}:${ticker}`);
+  statements.push(
+    tenant.db
+      .insert(securities)
+      .values({
+        id,
+        householdId: tenant.householdId,
+        ticker,
+        name: entry.name ?? ticker,
+        currency,
+        isPublic,
+        classification: suggestion.classification,
+        classificationSource: suggestion.source,
+        needsReview: suggestion.needsReview,
+        ...priceFields,
+        createdAt: deps.now().getTime(),
+      })
+      .onConflictDoNothing(),
+  );
   return id;
 }

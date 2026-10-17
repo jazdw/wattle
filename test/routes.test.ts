@@ -77,8 +77,14 @@ describe('portfolio', () => {
     expect(portfolio.allCategories).toMatchObject({ real_estate: 500000_00, cash: 20000_00 });
     void house;
 
-    // Updating replaces the active target.
-    await api('/api/targets', { method: 'PUT', json: { weights: { us_stock: 1 }, bandPct: 3, excludedAccountIds: [], excludedCategories: [] } });
+    // Updating replaces the active target, given the version the editor loaded.
+    const update = { weights: { us_stock: 1 }, bandPct: 3, excludedAccountIds: [], excludedCategories: [] };
+    expect((await api('/api/targets', { method: 'PUT', json: { ...update, version: target.version } })).status).toBe(200);
+    expect((await api('/api/targets')).body.target.bandPct).toBe(3);
+    // A save from an editor opened before that one is refused, not applied.
+    const stale = await api('/api/targets', { method: 'PUT', json: { ...update, bandPct: 9, version: target.version } });
+    expect(stale.status).toBe(409);
+    expect(stale.body.error).toMatch(/changed by someone else/);
     expect((await api('/api/targets')).body.target.bandPct).toBe(3);
     expect((await api('/api/targets', { method: 'PUT', json: { weights: {}, bandPct: 3, excludedAccountIds: [], excludedCategories: [] } })).status).toBe(400);
   });
@@ -96,7 +102,7 @@ describe('securities', () => {
   it('lets the household override a classification', async () => {
     const { deps, api, create } = await household();
     const id = await create({ name: 'IRA', type: 'investment' });
-    await api(`/api/accounts/${id}/holdings`, { method: 'PUT', json: { holdings: [{ ticker: 'MYSTERY', quantity: 1, price: 10 }] } });
+    await api(`/api/accounts/${id}/holdings`, { method: 'PUT', json: { holdings: [{ ticker: 'MYSTERY', quantity: 1, price: 10 }], version: 0 } });
     const [sec] = (await api('/api/securities')).body.securities;
     expect(sec.needsReview).toBe(true);
 

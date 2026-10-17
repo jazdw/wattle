@@ -28,14 +28,25 @@ export class PlaidApiError extends Error {
   readonly code: string;
   readonly type: string;
   readonly status: number;
+  /** Plaid's id for the failed request (what Plaid support asks for). */
+  readonly requestId: string | null;
 
-  constructor(status: number, type: string, code: string, message: string) {
+  constructor(status: number, type: string, code: string, message: string, requestId: string | null = null) {
     super(`Plaid ${code}: ${message}`);
     this.name = 'PlaidApiError';
     this.status = status;
     this.type = type;
     this.code = code;
+    this.requestId = requestId;
   }
+}
+
+/** One Plaid API call, as recorded in the sync log. */
+export interface PlaidCall {
+  endpoint: string;
+  requestId: string | null;
+  /** Plaid's error code when the call failed. */
+  error?: string;
 }
 
 export type LinkKind = 'investments' | 'banking';
@@ -65,6 +76,8 @@ export interface InvestmentsTransactionsPage {
 
 export interface PlaidApi {
   readonly env: PlaidEnvironment;
+  /** The same client, also appending every call it makes to `log`. */
+  scoped(log: PlaidCall[]): PlaidApi;
   createLinkToken(options: LinkTokenOptions): Promise<string>;
   exchangePublicToken(publicToken: string): Promise<{ accessToken: string; itemId: string }>;
   getItem(accessToken: string): Promise<Item>;
@@ -96,7 +109,7 @@ const PRODUCTS: Record<LinkKind, { products: string[]; optional?: string[] }> = 
   banking: { products: ['assets'] },
 };
 
-export function createPlaidClient(config: PlaidConfig): PlaidApi {
+export function createPlaidClient(config: PlaidConfig, log?: PlaidCall[]): PlaidApi {
   const baseUrl = `https://${config.env}.plaid.com`;
 
   async function call<T>(path: string, body: Record<string, unknown>): Promise<T> {
@@ -106,19 +119,25 @@ export function createPlaidClient(config: PlaidConfig): PlaidApi {
       body: JSON.stringify({ client_id: config.clientId, secret: config.secret, ...body }),
     });
     const json = (await response.json().catch(() => ({}))) as Record<string, unknown>;
+    const requestId = typeof json.request_id === 'string' ? json.request_id : null;
     if (!response.ok) {
+      const code = String(json.error_code ?? 'UNKNOWN');
+      log?.push({ endpoint: path, requestId, error: code });
       throw new PlaidApiError(
         response.status,
         String(json.error_type ?? 'API_ERROR'),
-        String(json.error_code ?? 'UNKNOWN'),
+        code,
         String(json.error_message ?? response.statusText),
+        requestId,
       );
     }
+    log?.push({ endpoint: path, requestId });
     return json as T;
   }
 
   return {
     env: config.env,
+    scoped: (callLog) => createPlaidClient(config, callLog),
 
     async createLinkToken(options) {
       const body: Record<string, unknown> = {

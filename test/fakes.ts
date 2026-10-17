@@ -19,6 +19,8 @@ export interface PlaidState {
   historicalBalances: Record<string, { date: string; current: number }[]>;
   assetReportReady: boolean;
   assetReportFails: boolean;
+  /** Plaid couldn't build the report (after an ASSETS:ERROR webhook). */
+  assetReportGetError: string | null;
   calls: string[];
   removed: string[];
 }
@@ -73,6 +75,7 @@ export function fakePlaid(initial: Partial<PlaidState> = {}): PlaidApi & { state
     historicalBalances: {},
     assetReportReady: true,
     assetReportFails: false,
+    assetReportGetError: null,
     calls: [],
     removed: [],
     ...initial,
@@ -81,9 +84,30 @@ export function fakePlaid(initial: Partial<PlaidState> = {}): PlaidApi & { state
     state.calls.push(name);
     if (state.failWith) throw new PlaidApiError(400, 'ITEM_ERROR', state.failWith, 'fake failure');
   };
-  return {
+  const api: PlaidApi & { state: PlaidState } = {
     state,
     env: 'sandbox',
+    // Records each call with a fake request id, like the real client.
+    scoped: (log) => {
+      let next = 0;
+      return new Proxy(api, {
+        get(target, key, receiver) {
+          const value = Reflect.get(target, key, receiver);
+          if (typeof value !== 'function' || key === 'scoped') return value;
+          return async (...args: unknown[]) => {
+            const requestId = `req-${String(key)}-${++next}`;
+            try {
+              const result = await value.apply(target, args);
+              log.push({ endpoint: String(key), requestId });
+              return result;
+            } catch (error) {
+              log.push({ endpoint: String(key), requestId, error: error instanceof PlaidApiError ? error.code : 'UNKNOWN' });
+              throw error;
+            }
+          };
+        },
+      });
+    },
     createLinkToken: async (options) => {
       state.calls.push(`link:${options.kind}:${options.accessToken ? 'update' : 'new'}`);
       return 'link-sandbox-token';
@@ -117,6 +141,7 @@ export function fakePlaid(initial: Partial<PlaidState> = {}): PlaidApi & { state
     },
     getAssetReport: async () => {
       state.calls.push('asset_report:get');
+      if (state.assetReportGetError) throw new PlaidApiError(400, 'ASSET_REPORT_ERROR', state.assetReportGetError, 'report failed');
       if (!state.assetReportReady) throw new PlaidApiError(400, 'ASSET_REPORT_ERROR', 'PRODUCT_NOT_READY', 'wait');
       return {
         items: [
@@ -137,6 +162,7 @@ export function fakePlaid(initial: Partial<PlaidState> = {}): PlaidApi & { state
     },
     getWebhookVerificationKey: async () => (await webhookKeys()).jwk as never,
   };
+  return api;
 }
 
 /* ------------------------------------------------------------------ */
@@ -153,6 +179,7 @@ export function fakePrices(
 ): PriceProvider & { calls: string[] } {
   const calls: string[] = [];
   const provider: PriceProvider & { calls: string[] } = {
+    name: 'fake-prices',
     calls,
     async dailyCloses(ticker, start, end) {
       calls.push(`${ticker}:${start}:${end}`);
@@ -183,6 +210,7 @@ export function fakeQuotes(quotes: Record<string, Partial<Quote>>): QuoteProvide
 export function fakeFx(rate = 1.5): FxProvider & { calls: string[] } {
   const calls: string[] = [];
   return {
+    name: 'fake-fx',
     calls,
     async rates(_base, _quote, start, end) {
       calls.push(`${start}:${end}`);
