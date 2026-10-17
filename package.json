@@ -36,7 +36,6 @@
     "radix-ui": "^1.7.0",
     "react": "^19.2.8",
     "react-dom": "^19.2.8",
-    "react-plaid-link": "^5.0.0",
     "react-router-dom": "^7.13.0",
     "recharts": "^3.10.1",
     "tailwind-merge": "^3.7.0",

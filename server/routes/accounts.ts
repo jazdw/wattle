@@ -27,7 +27,7 @@ import type { Tenant } from '../db/tenant';
 import type { AppEnv } from '../env';
 import { HttpError, notFound, readBody, requestCurrency } from '../lib/http';
 import type { Deps } from '../ports';
-import { backfillConnection } from '../services/backfill';
+import { backfillConnection, collectBalanceHistory } from '../services/backfill';
 import { toCurrency } from '../services/portfolio';
 import { closeLookup, ensureRecentCloses, fxLookup } from '../services/pricing';
 import { snapshotHousehold } from '../services/snapshots';
@@ -86,6 +86,13 @@ connectionRoutes.post('/:id/sync', async (c) => {
   const tenant = c.get('tenant');
   const connection = await getConnection(tenant, c.req.param('id'));
   if (!connection) notFound('Connection not found.');
+  // Bank history the ASSETS webhook should have delivered (missed, or
+  // unreachable in local dev). One Plaid call, only while a report is pending.
+  if (connection.assetReportTokenEnc) {
+    await collectBalanceHistory(deps, tenant, connection.id).catch((error: unknown) =>
+      console.warn('Asset report collection failed', error instanceof Error ? error.message : error),
+    );
+  }
   if (connection.lastSyncedAt && deps.now().getTime() - connection.lastSyncedAt < SYNC_COOLDOWN_MS) {
     return c.json({ status: connection.status, skipped: true });
   }

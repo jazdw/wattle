@@ -1,4 +1,4 @@
-import { screen, within } from '@testing-library/react';
+import { act, screen, within } from '@testing-library/react';
 import { http, HttpResponse } from 'msw';
 import { describe, expect, it } from 'vitest';
 import { CONNECTIONS } from '../test/fixtures';
@@ -68,6 +68,17 @@ describe('Accounts page', () => {
     // Update mode keeps the same token: it resyncs instead of exchanging.
     await expect.poll(() => sent('POST /api/connections/c-vg/sync').length).toBe(1);
     expect(sent('POST /api/plaid/exchange')).toHaveLength(0);
+  });
+
+  it("disables the button while Link is open and shows Plaid's exit error", async () => {
+    const { user } = renderPage(<Accounts />);
+    const button = await screen.findByRole('button', { name: 'Link investments' });
+    await user.click(button);
+    await expect.poll(() => plaidLink.open.mock.calls.length).toBe(1);
+    expect(button).toBeDisabled();
+    act(() => plaidLink.onExit!({ display_message: 'The institution is unavailable.' }));
+    expect(await screen.findByText('The institution is unavailable.')).toBeInTheDocument();
+    expect(button).toBeEnabled();
   });
 
   it('shows Plaid errors', async () => {

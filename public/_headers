@@ -7,7 +7,7 @@
   Cache-Control: no-cache
 
 # Strict policy for the app shell. Plaid Link is the only third-party code
-# (loaded by react-plaid-link from cdn.plaid.com). Google avatars are images.
+# (loaded from cdn.plaid.com, see src/lib/plaidLink.ts). Google avatars are images.
 /*
   Content-Security-Policy: default-src 'self'; script-src 'self' https://cdn.plaid.com; frame-src https://cdn.plaid.com https://*.plaid.com; connect-src 'self' https://*.plaid.com; img-src 'self' data: https://*.googleusercontent.com; style-src 'self' 'unsafe-inline'; font-src 'self'; object-src 'none'; base-uri 'self'; form-action 'self'; frame-ancestors 'none'
   X-Content-Type-Options: nosniff

@@ -275,6 +275,36 @@ describe('history backfill', () => {
     expect(plaid.state.calls).toContain('asset_report:remove');
   });
 
+  it('Sync collects a ready asset report whose webhook never arrived, even during the cooldown', async () => {
+    const plaid = fakePlaid({
+      accounts: [account('chk', 'depository', 1000)],
+      historicalBalances: { chk: [{ date: '2026-10-01', current: 900 }] },
+      assetReportReady: false,
+    });
+    const deps = await createTestDeps({ plaid });
+    const home = await createHousehold(deps, 'Home', 'me@example.com');
+    const api = client(deps, home.cookie);
+    await api('/api/plaid/exchange', { method: 'POST', json: { publicToken: 'p', kind: 'banking' } });
+    await flush(deps);
+    const [connection] = await deps.db.select().from(schema.connections);
+
+    // Not ready: the report stays pending and nothing else is called.
+    const notReady = await api(`/api/connections/${connection.id}/sync`, { method: 'POST' });
+    expect(notReady.body.skipped).toBe(true);
+    expect((await deps.db.select().from(schema.connections))[0].backfillStatus).not.toBe('done');
+
+    plaid.state.assetReportReady = true;
+    await api(`/api/connections/${connection.id}/sync`, { method: 'POST' });
+    const [after] = await deps.db.select().from(schema.connections);
+    expect(after).toMatchObject({ backfillStatus: 'done', assetReportTokenEnc: null });
+    expect(await deps.db.select().from(schema.accountDaily).where(eq(schema.accountDaily.source, 'backfill'))).toHaveLength(1);
+
+    // Nothing pending any more: Sync doesn't ask Plaid for it again.
+    const calls = plaid.state.calls.filter((call) => call === 'asset_report:get').length;
+    await api(`/api/connections/${connection.id}/sync`, { method: 'POST' });
+    expect(plaid.state.calls.filter((call) => call === 'asset_report:get')).toHaveLength(calls);
+  });
+
   it('skips balance history where the institution does not support Assets', async () => {
     const plaid = fakePlaid({ accounts: [account('chk', 'depository', 1000)], assetReportFails: true });
     const deps = await createTestDeps({ plaid });
