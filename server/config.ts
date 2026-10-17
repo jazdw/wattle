@@ -16,6 +16,10 @@ export interface RawEnv {
   FINNHUB_API_KEY?: string;
   /** 'none' disables FX fetching (offline tests); default Frankfurter. */
   FX_PROVIDER?: string;
+  /** Cloudflare Access team domain (e.g. myteam.cloudflareaccess.com); with ACCESS_AUD enables the token check. */
+  ACCESS_TEAM_DOMAIN?: string;
+  /** Application Audience (AUD) tag of the Access application. */
+  ACCESS_AUD?: string;
 }
 
 function list(value: string | undefined): string[] {
@@ -32,6 +36,8 @@ export function configFromEnv(env: RawEnv): Config {
     googleClientId: env.GOOGLE_CLIENT_ID || undefined,
     googleClientSecret: env.GOOGLE_CLIENT_SECRET || undefined,
     tokenEncKey: env.TOKEN_ENC_KEY || undefined,
+    access:
+      env.ACCESS_TEAM_DOMAIN && env.ACCESS_AUD ? { teamDomain: env.ACCESS_TEAM_DOMAIN, audience: env.ACCESS_AUD } : undefined,
   };
 }
 

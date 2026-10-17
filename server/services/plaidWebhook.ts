@@ -3,18 +3,32 @@
  * the `Plaid-Verification` header; its payload carries the SHA-256 of the raw
  * body and an `iat` timestamp.
  * https://plaid.com/docs/api/webhooks/webhook-verification/
+ *
+ * The JWT is verified with `jose`. Plaid's public keys come from its API
+ * (/webhook_verification_key/get, authenticated with our Plaid credentials),
+ * so they're cached here: in this Worker instance's memory, per key id,
+ * re-checked hourly so a key Plaid retires (`expired_at`) stops being trusted.
  */
-import { base64ToBytes, safeEqual, sha256Hex } from '../lib/encoding';
+import { importJWK, jwtVerify, type JWK } from 'jose';
+import { safeEqual, sha256Hex } from '../lib/encoding';
 import type { PlaidApi } from '../adapters/plaid';
 
-const MAX_AGE_SECONDS = 5 * 60;
-/** Re-check keys hourly so a key Plaid retires stops being trusted. */
+const MAX_AGE = '5 minutes';
 const KEY_TTL_MS = 60 * 60 * 1000;
-type PlaidJwk = JsonWebKey & { expired_at?: number | null };
+type PlaidJwk = JWK & { expired_at?: number | null };
 const keyCache = new Map<string, { key: PlaidJwk; fetchedAt: number }>();
 
-function decodeJson<T>(segment: string): T {
-  return JSON.parse(new TextDecoder().decode(base64ToBytes(segment))) as T;
+async function plaidKey(
+  plaid: Pick<PlaidApi, 'getWebhookVerificationKey'>,
+  kid: string | undefined,
+  now: Date,
+): Promise<PlaidJwk> {
+  if (!kid) throw new Error('Plaid webhook JWT has no key id');
+  const cached = keyCache.get(kid);
+  if (cached && now.getTime() - cached.fetchedAt < KEY_TTL_MS) return cached.key;
+  const key = (await plaid.getWebhookVerificationKey(kid)) as unknown as PlaidJwk;
+  keyCache.set(kid, { key, fetchedAt: now.getTime() });
+  return key;
 }
 
 export async function verifyPlaidWebhook(
@@ -24,48 +38,20 @@ export async function verifyPlaidWebhook(
   now: Date,
 ): Promise<boolean> {
   if (!jwt) return false;
-  const parts = jwt.split('.');
-  if (parts.length !== 3) return false;
-  const [headerSegment, payloadSegment, signatureSegment] = parts;
-
-  let header: { alg?: string; kid?: string };
-  let payload: { iat?: number; request_body_sha256?: string };
   try {
-    header = decodeJson(headerSegment);
-    payload = decodeJson(payloadSegment);
+    const { payload } = await jwtVerify(
+      jwt,
+      async (header) => {
+        const jwk = await plaidKey(plaid, header.kid, now);
+        if (jwk.expired_at) throw new Error('Plaid webhook key has expired');
+        return importJWK({ kty: jwk.kty, crv: jwk.crv, x: jwk.x, y: jwk.y }, 'ES256');
+      },
+      { algorithms: ['ES256'], maxTokenAge: MAX_AGE, currentDate: now },
+    );
+    // The signature covers a hash of the body; check it's the body we got.
+    const expected = payload.request_body_sha256;
+    return typeof expected === 'string' && safeEqual(await sha256Hex(rawBody), expected);
   } catch {
     return false;
   }
-  if (header.alg !== 'ES256' || !header.kid) return false;
-
-  const cached = keyCache.get(header.kid);
-  let jwk = cached && now.getTime() - cached.fetchedAt < KEY_TTL_MS ? cached.key : null;
-  if (!jwk) {
-    try {
-      jwk = (await plaid.getWebhookVerificationKey(header.kid)) as unknown as PlaidJwk;
-    } catch {
-      return false;
-    }
-    keyCache.set(header.kid, { key: jwk, fetchedAt: now.getTime() });
-  }
-  if (jwk.expired_at) return false;
-
-  const key = await crypto.subtle.importKey(
-    'jwk',
-    { kty: jwk.kty, crv: jwk.crv, x: jwk.x, y: jwk.y },
-    { name: 'ECDSA', namedCurve: 'P-256' },
-    false,
-    ['verify'],
-  );
-  const valid = await crypto.subtle.verify(
-    { name: 'ECDSA', hash: 'SHA-256' },
-    key,
-    base64ToBytes(signatureSegment),
-    new TextEncoder().encode(`${headerSegment}.${payloadSegment}`),
-  );
-  if (!valid) return false;
-
-  if (typeof payload.iat !== 'number' || now.getTime() / 1000 - payload.iat > MAX_AGE_SECONDS) return false;
-  if (typeof payload.request_body_sha256 !== 'string') return false;
-  return safeEqual(await sha256Hex(rawBody), payload.request_body_sha256);
 }

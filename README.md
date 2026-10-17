@@ -93,7 +93,7 @@ Create an OAuth client (Web) at <https://console.cloud.google.com/apis/credentia
 - `http://localhost:5173/api/auth/google/callback`
 - `https://<your-domain>/api/auth/google/callback`
 
-The redirect URI is built from the request's origin, so no hostname is configured anywhere.
+The redirect URI is built from the request's origin, so no hostname is configured anywhere. Sign-in uses `openid-client` with PKCE, `state` and `nonce`. Google's endpoints are fixed in `server/auth/google.ts`, so no discovery request is made.
 
 ### Plaid
 1. Get `PLAID_CLIENT_ID` and the sandbox/production secrets from <https://dashboard.plaid.com/developers/keys>.
@@ -145,7 +145,28 @@ A second lock in front of the app. Cloudflare's edge only lets your Google accou
    - A Google account that isn't listed should be blocked by Cloudflare.
    - `curl -i -X POST https://<domain>/api/plaid/webhook` should return Wattle Wealth's `401 {"error":"invalid signature"}`. A redirect to `cloudflareaccess.com` means the bypass isn't applying.
 
-Not built yet: Wattle Wealth could also verify the `Cf-Access-Jwt-Assertion` header Access adds to every request, so it would reject anything that didn't come through Access even if the policy were misconfigured.
+6. **Make the app require Access too** (recommended). Access adds a signed token (`Cf-Access-Jwt-Assertion`) to every request it lets through. With these two Worker secrets set, every API request without a valid token is refused, so a misconfigured or removed policy can't expose the app:
+   - `ACCESS_TEAM_DOMAIN`: e.g. `<team>.cloudflareaccess.com`
+   - `ACCESS_AUD`: the application's **Application Audience (AUD) Tag**, under Access → Applications → your app → Configure → Additional settings
+
+   The signing keys are fetched from `https://<team>.cloudflareaccess.com/cdn-cgi/access/certs` and cached for an hour, or refreshed early when Access rotates them. The Plaid webhook is exempt. Leave both settings unset locally.
+
+### Configuration reference
+| Setting | Where | Purpose |
+|---|---|---|
+| `CLOUDFLARE_API_TOKEN`, `CLOUDFLARE_ACCOUNT_ID` | GitHub secrets | Let the deploy job use your Cloudflare account |
+| `CUSTOM_DOMAIN` | GitHub secret | Domain to deploy to (`wrangler deploy --domain`) |
+| `D1_DATABASE_ID` | GitHub secret | The production database; put into the build's deploy config |
+| `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET` | Worker secrets | Google sign-in |
+| `TOKEN_ENC_KEY` | Worker secret | Encrypts Plaid tokens at rest |
+| `PLAID_CLIENT_ID`, `PLAID_SECRET`, `PLAID_ENV` | Worker secrets | Plaid (`sandbox` or `production`) |
+| `TIINGO_API_KEY`, `FINNHUB_API_KEY` | Worker secrets | Daily closes and history; live quotes |
+| `ALLOWED_EMAILS` | Worker secret (optional) | Extra sign-in allow-list; normally use `npm run allow` |
+| `ACCESS_TEAM_DOMAIN`, `ACCESS_AUD` | Worker secrets (optional) | Require a Cloudflare Access token on API requests |
+| `DEV_LOGIN_EMAILS` | `.dev.vars` only | Local dev sign-in without Google |
+| `FX_PROVIDER=none` | tests only | No live exchange-rate calls |
+
+Locally, every Worker setting goes in `.dev.vars` (see `.dev.vars.example`).
 
 ### Running on Node instead
 
@@ -158,6 +179,7 @@ DATABASE_URL=file:wattle.db PORT=8787 GOOGLE_CLIENT_ID=… TOKEN_ENC_KEY=… npm
 
 ### Investments
 - **Returns excluding contributions.** Today the Growth page includes money added and withdrawn. Wattle Wealth already stores investment transactions, so it can compute time-weighted return (performance alone) and money-weighted return (your actual experience), plus dividends as total return.
+- **Currency effect.** Split growth into what came from the assets themselves and what came from USD/AUD exchange-rate moves. In a mixed USD/AUD household, net worth in one currency can rise or fall just because the other currency moved. For each account in a different currency from the one displayed, compare its value at a fixed starting rate with its value at each day's rate.
 - **Benchmarks.** Compare the portfolio's return with VT, the S&P 500 or a 60/40 mix over the same period.
 - **Risk checks ("X-ray").** Simple rules with pass/warn results. For example:
   - too much in one account or one stock

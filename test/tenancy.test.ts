@@ -53,19 +53,33 @@ describe('tenant isolation', () => {
     expect((await asA(`/api/accounts/${accountId}`)).status).toBe(404); // no GET-by-id route; sanity
   });
 
-  it('refuses cross-origin writes', async () => {
+  it('refuses writes a form on another site could send', async () => {
     const { deps, a } = await setup();
     const { createApp } = await import('../server/app');
-    const response = await createApp().request(
-      'http://localhost/api/accounts',
-      {
-        method: 'POST',
-        headers: { cookie: a.cookie, origin: 'https://evil.example', 'content-type': 'application/json' },
-        body: JSON.stringify({ name: 'x', type: 'other', currency: 'USD' }),
-      },
-      { deps },
-    );
-    expect(response.status).toBe(403);
+    const send = (init: RequestInit) => createApp().request('http://localhost/api/accounts', init, { deps });
+    const body = JSON.stringify({ name: 'x', type: 'other', currency: 'USD' });
+
+    // A cross-site <form> can post text/plain or form-encoded bodies with the cookie attached.
+    for (const contentType of ['text/plain', 'application/x-www-form-urlencoded', 'multipart/form-data']) {
+      const response = await send({ method: 'POST', body, headers: { cookie: a.cookie, origin: 'https://evil.example', 'content-type': contentType } });
+      expect(response.status, contentType).toBe(403);
+    }
+    const marked = await send({ method: 'POST', body, headers: { cookie: a.cookie, 'sec-fetch-site': 'cross-site', 'content-type': 'text/plain' } });
+    expect(marked.status).toBe(403);
+
+    // Same-origin requests (the app itself) go through.
+    const ours = await send({ method: 'POST', body, headers: { cookie: a.cookie, 'sec-fetch-site': 'same-origin', 'content-type': 'text/plain' } });
+    expect(ours.status).toBe(201);
+  });
+
+  it('sends security headers and never caches API responses', async () => {
+    const { asA } = await setup();
+    const response = await asA('/api/accounts');
+    expect(response.headers.get('x-frame-options')).toBe('DENY');
+    expect(response.headers.get('x-content-type-options')).toBe('nosniff');
+    expect(response.headers.get('strict-transport-security')).toBe('max-age=31536000; includeSubDomains');
+    expect(response.headers.get('referrer-policy')).toBe('strict-origin-when-cross-origin');
+    expect(response.headers.get('cache-control')).toBe('no-store');
   });
 });
 
