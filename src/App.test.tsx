@@ -2,6 +2,7 @@ import { screen } from '@testing-library/react';
 import { http, HttpResponse } from 'msw';
 import { describe, expect, it, vi } from 'vitest';
 import App from './App';
+import { CONNECTIONS } from './test/fixtures';
 import { renderPage } from './test/render';
 import { sent, server } from './test/server';
 
@@ -44,6 +45,7 @@ describe('App shell', () => {
     const assign = vi.fn();
     vi.stubGlobal('location', { ...window.location, assign, origin: window.location.origin });
     const { user } = renderPage(<App />, { route: '/' });
+    expect(await screen.findByTitle('Signed in as me@example.com')).toHaveTextContent('Jared W');
     await user.click(await screen.findByRole('button', { name: /Sign out/ }));
     await vi.waitFor(() => expect(assign).toHaveBeenCalledWith('/login'));
     expect(sent('POST /api/auth/logout')).toHaveLength(1);
@@ -52,5 +54,41 @@ describe('App shell', () => {
   it('redirects unknown paths home', async () => {
     renderPage(<App />, { route: '/nowhere' });
     expect(await screen.findByRole('heading', { name: 'Net worth' })).toBeInTheDocument();
+  });
+  it('polls while history loads, backing off, then refreshes the rest of the app', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    try {
+      let polls = 0;
+      let done = false;
+      server.use(
+        http.get('*/api/connections', () => {
+          polls += 1;
+          const backfillStatus = done ? 'done' : 'running';
+          return HttpResponse.json({ ...CONNECTIONS, connections: CONNECTIONS.connections.map((connection) => ({ ...connection, backfillStatus })) });
+        }),
+      );
+      renderPage(<App />, { route: '/accounts' });
+      expect(await screen.findAllByText('Loading history…')).not.toHaveLength(0);
+
+      // Every 5 s at first…
+      await vi.advanceTimersByTimeAsync(5_000);
+      expect(polls).toBe(2);
+      // …but an hour of waiting (a missed webhook) is dozens of requests, not 720.
+      await vi.advanceTimersByTimeAsync(60 * 60_000);
+      expect(polls).toBeLessThan(60);
+
+      done = true;
+      const historyFetches = sent('GET /api/history').length + sent('GET /api/accounts').length;
+      await vi.advanceTimersByTimeAsync(5 * 60_000);
+      await vi.waitFor(() => expect(screen.queryByText('Loading history…')).not.toBeInTheDocument());
+      await vi.waitFor(() => expect(sent('GET /api/history').length + sent('GET /api/accounts').length).toBeGreaterThan(historyFetches));
+
+      // Nothing left loading: no more polling.
+      const settled = polls;
+      await vi.advanceTimersByTimeAsync(30 * 60_000);
+      expect(polls).toBe(settled);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

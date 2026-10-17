@@ -1,11 +1,10 @@
-import { useQuery } from '@tanstack/react-query';
 import { ChartPie, Grid3x3, Landmark, LayoutDashboard, LineChart, List, LogOut, Settings } from 'lucide-react';
 import { Suspense } from 'react';
 import { NavLink, Outlet } from 'react-router-dom';
-import type { ConnectionsResponse } from '../../shared/types';
-import { api } from '../api';
+import { useConnections } from '../hooks/queries';
 import { useAuth } from '../hooks/useAuth';
 import { cn } from '../lib/utils';
+import { Avatar } from './ui/misc';
 import { Segmented } from './ui/segmented';
 
 const NAV = [
@@ -24,10 +23,7 @@ export function Logo({ className }: { className?: string }) {
 
 export function Layout() {
   const { me, currency, setCurrency, logout } = useAuth();
-  const connections = useQuery({
-    queryKey: ['connections'],
-    queryFn: () => api<ConnectionsResponse>('/api/connections'),
-  });
+  const connections = useConnections();
   const broken = connections.data?.connections.filter((connection) => connection.status !== 'ok') ?? [];
 
   return (
@@ -65,11 +61,19 @@ export function Layout() {
             ]}
             onChange={setCurrency}
           />
+          {me && (
+            <div className="hidden min-w-0 items-center gap-2 border-t px-2 pt-3 md:flex" title={`Signed in as ${me.user.email}`}>
+              <Avatar name={me.user.name} picture={me.user.picture} className="size-7 text-xs" />
+              <div className="min-w-0 text-xs">
+                <p className="truncate font-medium">{me.user.name}</p>
+                <p className="truncate text-muted-foreground">{me.user.email}</p>
+              </div>
+            </div>
+          )}
           <button
             type="button"
             onClick={() => void logout()}
             className="flex items-center gap-2 rounded-md px-2.5 py-1.5 text-sm text-muted-foreground hover:bg-muted"
-            title={me ? `Signed in as ${me.user.email}` : undefined}
           >
             <LogOut className="size-4" />
             <span className="hidden md:inline">Sign out</span>

@@ -1,6 +1,15 @@
 import type { ComponentProps, ReactNode } from 'react';
 import { cn } from '@/lib/utils';
 
+/** A member's Google photo, or their initial when there is none. */
+export function Avatar({ name, picture, className }: { name: string; picture: string | null; className?: string }) {
+  return picture ? (
+    <img src={picture} alt="" className={cn('size-8 shrink-0 rounded-full', className)} referrerPolicy="no-referrer" />
+  ) : (
+    <span className={cn('grid size-8 shrink-0 place-items-center rounded-full bg-muted', className)}>{name[0]}</span>
+  );
+}
+
 export function Skeleton({ className, ...props }: ComponentProps<'div'>) {
   return <div className={cn('animate-pulse rounded-md bg-muted', className)} {...props} />;
 }

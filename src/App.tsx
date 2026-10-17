@@ -1,5 +1,6 @@
 import { lazy, Suspense } from 'react';
 import { Navigate, Route, Routes, useLocation } from 'react-router-dom';
+import { HistoryWatcher } from './components/HistoryWatcher';
 import { Layout } from './components/Layout';
 import { Skeleton } from './components/ui/misc';
 import { useAuth } from './hooks/useAuth';
@@ -29,6 +30,7 @@ export default function App() {
       <Route
         element={
           <RequireAuth>
+            <HistoryWatcher />
             <Suspense fallback={<Skeleton className="m-8 h-96" />}>
               <Layout />
             </Suspense>

@@ -1,4 +1,4 @@
-import { keepPreviousData, useQuery } from '@tanstack/react-query';
+import { keepPreviousData, queryOptions, useQuery } from '@tanstack/react-query';
 import type {
   AccountsResponse,
   ConnectionsResponse,
@@ -42,8 +42,11 @@ export function useAccounts() {
   });
 }
 
+/** Plaid connections, shared by useConnections() and HistoryWatcher. */
+export const connectionsQuery = queryOptions({ queryKey: ['connections'], queryFn: () => api<ConnectionsResponse>('/api/connections') });
+
 export function useConnections() {
-  return useQuery({ queryKey: ['connections'], queryFn: () => api<ConnectionsResponse>('/api/connections') });
+  return useQuery(connectionsQuery);
 }
 
 export function useTarget() {

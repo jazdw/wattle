@@ -6,7 +6,7 @@ import { PageHeader } from '../components/Layout';
 import { Button } from '../components/ui/button';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '../components/ui/card';
 import { Field, Input, NativeSelect } from '../components/ui/input';
-import { Alert } from '../components/ui/misc';
+import { Alert, Avatar } from '../components/ui/misc';
 import { useConnections } from '../hooks/queries';
 import { useAuth } from '../hooks/useAuth';
 
@@ -57,11 +57,7 @@ export function Settings() {
             <ul className="divide-y text-sm">
               {me?.household.members.map((member) => (
                 <li key={member.id} className="flex items-center gap-3 py-2">
-                  {member.picture ? (
-                    <img src={member.picture} alt="" className="size-8 rounded-full" referrerPolicy="no-referrer" />
-                  ) : (
-                    <span className="grid size-8 place-items-center rounded-full bg-muted">{member.name[0]}</span>
-                  )}
+                  <Avatar name={member.name} picture={member.picture} />
                   <div>
                     <p className="font-medium">{member.name}</p>
                     <p className="text-xs text-muted-foreground">{member.email}</p>
