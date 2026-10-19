@@ -23,6 +23,8 @@ describe('Holdings page', () => {
     // Header total: day change across live-quoted holdings.
     const todays = screen.getByText("Today's change").closest('div') as HTMLElement;
     expect(within(todays).getByText('+$1,500')).toBeInTheDocument();
+    // …and as a share of the holdings' value at the previous close.
+    expect(within(todays).getByText(/^\([+-]\d+\.\d{2}%\)$/)).toBeInTheDocument();
   });
 
   it('expands a holding into its accounts and filters by name', async () => {
@@ -30,6 +32,14 @@ describe('Holdings page', () => {
     const vti = (await screen.findByText('VTI')).closest('tr') as HTMLElement;
     await user.click(within(vti).getByRole('button', { name: 'Show accounts' }));
     expect(screen.getByText('Roth IRA')).toBeInTheDocument();
+    // Each account: live value and the day's dollar change (VTI +$3 a unit), adding up to the row above.
+    const brokerage = screen.getByText('Vanguard Brokerage').closest('tr') as HTMLElement;
+    expect(within(brokerage).getByText('+$1,200')).toBeInTheDocument();
+    expect(within(brokerage).getByText('$121,200')).toBeInTheDocument();
+    const ira = screen.getByText('Roth IRA').closest('tr') as HTMLElement;
+    expect(within(ira).getByText('+$300')).toBeInTheDocument();
+    expect(within(ira).getByText('$30,300')).toBeInTheDocument();
+    expect(within(ira).queryByText(/%/)).not.toBeInTheDocument();
 
     await user.type(screen.getByPlaceholderText('Filter by ticker or name'), 'stable');
     expect(screen.queryByText('VTI')).not.toBeInTheDocument();
