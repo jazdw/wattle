@@ -1,5 +1,5 @@
 /** Connections, accounts (Plaid and manual), manual balances and holdings. */
-import { and, count, desc, eq, ne, sql } from 'drizzle-orm';
+import { and, count, desc, eq, inArray, isNotNull, ne, sql } from 'drizzle-orm';
 import { Hono } from 'hono';
 import { suggestClassification } from '../../shared/classify';
 import { marketDate } from '../../shared/dates';
@@ -13,7 +13,7 @@ import {
 import type { AccountsResponse, AccountSummary, ConnectionsResponse } from '../../shared/types';
 import { requireAuth } from '../auth/routes';
 import type { BatchItem } from 'drizzle-orm/batch';
-import { chunkRows, runAtomic } from '../db/batch';
+import { chunkRows, inChunks, runAtomic } from '../db/batch';
 import {
   accountDaily,
   accounts,
@@ -27,11 +27,11 @@ import {
 import type { Tenant } from '../db/tenant';
 import type { AppEnv } from '../env';
 import { HttpError, notFound, readBody, requestCurrency } from '../lib/http';
-import type { Deps } from '../ports';
+import type { Deps, SecurityDescription } from '../ports';
 import { connectionActivity, SyncRun } from '../services/activity';
 import { backfillConnection } from '../services/backfill';
 import { toCurrency } from '../services/portfolio';
-import { closeLookup, ensureRecentCloses, fxLookup } from '../services/pricing';
+import { closeLookup, describeTickers, ensureRecentCloses, fxLookup } from '../services/pricing';
 import { snapshotHousehold } from '../services/snapshots';
 import { accountLease, connectionLease, Lease, snapshotLease } from '../services/lease';
 import { stableId } from '../services/ids';
@@ -461,6 +461,9 @@ accountRoutes.put('/:id/holdings', async (c) => {
   const tickers = body.holdings.filter((holding) => holding.price === undefined).map((holding) => holding.ticker.toUpperCase());
   await ensureRecentCloses(deps, tickers, today);
   const closes = await closeLookup(deps, tickers, today, today);
+  // What each new ticker is (stock, ETF, mutual fund): it decides live quotes
+  // and helps classify it. Once per ticker; a type you set is kept.
+  const descriptions = await describeTickers(deps, await untypedTickers(tenant, body.holdings.map((holding) => holding.ticker)));
 
   const lease = await Lease.acquireOrBusy(deps, tenant, accountLease(account.id), 'Someone else is saving these holdings. Try again in a moment.');
   let unpriced = 0;
@@ -477,7 +480,7 @@ accountRoutes.put('/:id/holdings', async (c) => {
     const statements: BatchItem<'sqlite'>[] = [];
     const rows: (typeof holdings.$inferInsert)[] = [];
     for (const entry of body.holdings) {
-      const securityId = await planManualSecurity(deps, tenant, entry, account.currency, closes(entry.ticker, today), statements);
+      const securityId = await planManualSecurity(deps, tenant, entry, account.currency, closes(entry.ticker, today), descriptions.get(entry.ticker.toUpperCase()), statements);
       const price = entry.price ?? closes(entry.ticker, today) ?? 0;
       if (price === 0) unpriced += 1;
       rows.push({
@@ -509,6 +512,20 @@ accountRoutes.put('/:id/holdings', async (c) => {
   return c.json({ ok: true, unpriced });
 });
 
+/** Of these tickers, those with no security of known type in the household (to look up). */
+export async function untypedTickers(tenant: Tenant, tickers: string[]): Promise<string[]> {
+  const wanted = [...new Set(tickers.map((ticker) => ticker.toUpperCase()))];
+  const typed = new Set<string>();
+  for (const chunk of inChunks(wanted)) {
+    const rows = await tenant.db
+      .select({ ticker: securities.ticker })
+      .from(securities)
+      .where(tenant.scope(securities, inArray(securities.ticker, chunk), isNotNull(securities.type)));
+    for (const row of rows) if (row.ticker) typed.add(row.ticker.toUpperCase());
+  }
+  return wanted.filter((ticker) => !typed.has(ticker));
+}
+
 /**
  * Plan the security for a manually entered ticker; returns its id. Reuses the
  * household's security for that ticker (so its classification is shared), but
@@ -522,11 +539,12 @@ async function planManualSecurity(
   entry: { ticker: string; name?: string; price?: number },
   currency: string,
   close: number | null,
+  description: SecurityDescription | undefined,
   statements: BatchItem<'sqlite'>[],
 ): Promise<string> {
   const ticker = entry.ticker.toUpperCase();
   const candidates = await tenant.db
-    .select({ id: securities.id, externalId: securities.externalId })
+    .select({ id: securities.id, externalId: securities.externalId, type: securities.type })
     .from(securities)
     .where(tenant.scope(securities, eq(securities.ticker, ticker)));
   const manual = candidates.find((row) => row.externalId === null);
@@ -537,14 +555,20 @@ async function planManualSecurity(
     statements.push(
       tenant.db
         .update(securities)
-        .set({ ...(entry.name ? { name: entry.name } : {}), ...priceFields, ...(isPublic ? { isPublic } : {}) })
+        .set({
+          ...(entry.name ? { name: entry.name } : {}),
+          ...priceFields,
+          ...(isPublic ? { isPublic } : {}),
+          ...(manual.type === null && description ? { type: description.type } : {}),
+        })
         .where(tenant.scope(securities, eq(securities.id, manual.id))),
     );
     return manual.id;
   }
   // A public fund also held through Plaid: share its row (and classification).
   if (linked && entry.price === undefined) return linked.id;
-  const suggestion = suggestClassification({ ticker, name: entry.name ?? null, type: null, currency });
+  const name = entry.name ?? description?.name ?? ticker;
+  const suggestion = suggestClassification({ ticker, name, type: description?.type ?? null, currency });
   const id = await stableId(`security:manual:${tenant.householdId}:${ticker}`);
   statements.push(
     tenant.db
@@ -553,7 +577,8 @@ async function planManualSecurity(
         id,
         householdId: tenant.householdId,
         ticker,
-        name: entry.name ?? ticker,
+        name,
+        type: description?.type ?? null,
         currency,
         isPublic,
         classification: suggestion.classification,

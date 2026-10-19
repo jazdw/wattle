@@ -2,7 +2,7 @@
 import type { AccountBase, Holding, InvestmentTransaction, Security } from 'plaid';
 import { PlaidApiError, type PlaidApi } from '../server/adapters/plaid';
 import { bytesToBase64Url, sha256Hex } from '../server/lib/encoding';
-import type { DailyClose, FxProvider, PriceProvider, Quote, QuoteProvider } from '../server/ports';
+import type { DailyClose, FxProvider, PriceProvider, Quote, QuoteProvider, SecurityDescription } from '../server/ports';
 
 type Partialish<T> = { [K in keyof T]?: unknown } & Record<string, unknown>;
 
@@ -176,6 +176,7 @@ export function fakePlaid(initial: Partial<PlaidState> = {}): PlaidApi & { state
 export function fakePrices(
   series: Record<string, DailyClose[]>,
   bulk?: Record<string, DailyClose>,
+  descriptions?: Record<string, SecurityDescription>,
 ): PriceProvider & { calls: string[] } {
   const calls: string[] = [];
   const provider: PriceProvider & { calls: string[] } = {
@@ -186,6 +187,12 @@ export function fakePrices(
       return (series[ticker.toUpperCase()] ?? []).filter((row) => row.date >= start && row.date <= end);
     },
   };
+  if (descriptions) {
+    provider.describe = async (ticker) => {
+      calls.push(`describe:${ticker}`);
+      return descriptions[ticker.toUpperCase()] ?? null;
+    };
+  }
   if (bulk) {
     provider.latestCloses = async (tickers) => {
       calls.push(`bulk:${tickers.join(',')}`);

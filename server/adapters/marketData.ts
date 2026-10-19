@@ -10,7 +10,7 @@
  */
 import { newYorkClock } from '../../shared/dates';
 import type { Currency } from '../../shared/money';
-import type { DailyClose, FxProvider, PriceProvider, Quote, QuoteProvider } from '../ports';
+import type { DailyClose, FxProvider, PriceProvider, Quote, QuoteProvider, SecurityDescription } from '../ports';
 
 export function createTiingo(apiKey: string): PriceProvider {
   return {
@@ -28,6 +28,21 @@ export function createTiingo(apiKey: string): PriceProvider {
       return rows
         .filter((row) => typeof row.close === 'number')
         .map((row): DailyClose => ({ date: row.date.slice(0, 10), close: row.close }));
+    },
+
+    // Tiingo's search gives each listing's asset type; the exact ticker,
+    // preferring its US listing (VTI is also a Canadian stock).
+    async describe(ticker) {
+      const params = new URLSearchParams({ query: ticker.toUpperCase(), limit: '10' });
+      const response = await fetch(`https://api.tiingo.com/tiingo/utilities/search?${params}`, {
+        headers: { 'content-type': 'application/json', authorization: `Token ${apiKey}` },
+      });
+      if (!response.ok) throw new Error(`Tiingo search ${ticker}: HTTP ${response.status}`);
+      const rows = (await response.json()) as { ticker?: string; name?: string; assetType?: string; countryCode?: string }[];
+      const matches = rows.filter((row) => row.ticker?.toUpperCase() === ticker.toUpperCase());
+      const match = matches.find((row) => row.countryCode === 'US') ?? matches[0];
+      const type = match ? ASSET_TYPES[match.assetType ?? ''] : undefined;
+      return type ? { type, name: match!.name ?? null } : null;
     },
 
     // One request for many stocks/ETFs: Tiingo's IEX endpoint returns the
@@ -99,6 +114,9 @@ export function createTiingoQuotes(apiKey: string): QuoteProvider {
     },
   };
 }
+
+/** Tiingo's asset types, as Wattle's (Plaid's) security types. */
+const ASSET_TYPES: Record<string, SecurityDescription['type']> = { Stock: 'equity', ETF: 'etf', 'Mutual Fund': 'mutual fund' };
 
 /** Tickers per bulk request (keeps the URL short). */
 const BULK_TICKERS = 100;

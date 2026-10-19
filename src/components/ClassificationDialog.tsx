@@ -7,16 +7,27 @@ import {
   STYLES,
   type Classification,
 } from '../../shared/taxonomy';
+import { SECURITY_TYPES } from '../../shared/schemas';
 import { api } from '../api';
 import { Button } from './ui/button';
 import { Dialog, DialogContent } from './ui/dialog';
-import { Input } from './ui/input';
+import { Field, Input, NativeSelect } from './ui/input';
 import { Alert } from './ui/misc';
 
 interface Props {
-  security: { securityId: string; ticker: string | null; name: string | null; classification: Classification } | null;
+  security: {
+    securityId: string;
+    ticker: string | null;
+    name: string | null;
+    classification: Classification;
+    type?: string | null;
+    /** Entered by hand: its type can be set here (an institution's comes from the institution). */
+    typeEditable?: boolean;
+  } | null;
   onClose: () => void;
 }
+
+const TYPE_LABELS: Record<(typeof SECURITY_TYPES)[number], string> = { equity: 'Stock', etf: 'ETF', 'mutual fund': 'Mutual fund' };
 
 const SIZE_LABELS = { large: 'Large', mid: 'Mid', small: 'Small' };
 const STYLE_LABELS = { value: 'Value', blend: 'Blend', growth: 'Growth' };
@@ -36,11 +47,18 @@ function fromPercentStrings(values: Record<string, string>) {
 /** Edit how a security splits across categories, sizes and styles. */
 export function ClassificationDialog({ security, onClose }: Props) {
   const queryClient = useQueryClient();
-  const [state, setState] = useState<{ id: string; categories: Record<string, string>; sizes: Record<string, string>; styles: Record<string, string> } | null>(null);
+  const [state, setState] = useState<{
+    id: string;
+    type: string;
+    categories: Record<string, string>;
+    sizes: Record<string, string>;
+    styles: Record<string, string>;
+  } | null>(null);
 
   if (security && state?.id !== security.securityId) {
     setState({
       id: security.securityId,
+      type: security.type ?? '',
       categories: toPercentStrings(security.classification.categories, CATEGORIES),
       sizes: toPercentStrings(security.classification.sizes, SIZES),
       styles: toPercentStrings(security.classification.styles, STYLES),
@@ -59,6 +77,7 @@ export function ClassificationDialog({ security, onClose }: Props) {
             ...(Object.keys(sizes).length ? { sizes } : {}),
             ...(Object.keys(styles).length ? { styles } : {}),
           },
+          ...(security!.typeEditable ? { type: state!.type || null } : {}),
         }),
       });
     },
@@ -93,6 +112,18 @@ export function ClassificationDialog({ security, onClose }: Props) {
         description="Percentages; each group is normalised to 100%. Size and style describe the stock portion only."
       >
         <div className="grid gap-4">
+          {security?.typeEditable && (
+            <Field label="Type" hint="Stocks and ETFs get live prices during market hours; mutual funds show their daily NAV.">
+              <NativeSelect value={state?.type ?? ''} onChange={(event) => setState((current) => current && { ...current, type: event.target.value })}>
+                {SECURITY_TYPES.map((type) => (
+                  <option key={type} value={type}>
+                    {TYPE_LABELS[type]}
+                  </option>
+                ))}
+                <option value="">Other / not sure</option>
+              </NativeSelect>
+            </Field>
+          )}
           <div>
             <p className="mb-2 text-sm font-medium">Categories</p>
             {grid('categories', CATEGORIES, CATEGORY_LABELS)}
