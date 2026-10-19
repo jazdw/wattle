@@ -46,12 +46,15 @@ export function Holdings() {
         const scale = nativeMinor ? holding.value / nativeMinor : 1;
         const dayChange = quote ? Math.round(holding.quantity * quote.change * 100 * scale) : null;
         const liveValue = quote ? Math.round(holding.quantity * quote.price * 100 * scale) : holding.value;
-        return { holding, quote, dayChange, liveValue, share: total ? holding.value / total : 0 };
+        return { holding, quote, scale, dayChange, liveValue, share: total ? holding.value / total : 0 };
       });
   }, [portfolio.data, filter, quoteByTicker]);
 
   const dayChange = rows.reduce((sum, row) => sum + (row.dayChange ?? 0), 0);
   const liveTotal = rows.reduce((sum, row) => sum + row.liveValue, 0);
+  // Against the holdings' value at the previous close, as brokerages show it.
+  const previousTotal = liveTotal - dayChange;
+  const dayChangePercent = previousTotal ? dayChange / previousTotal : 0;
   const open = isMarketOpen();
 
   const toggle = (id: string) => {
@@ -84,7 +87,14 @@ export function Holdings() {
                   {open && <Radio className="size-3.5 text-positive" aria-label="Market open" />}
                 </p>
                 <p className={`text-2xl font-semibold ${changeClass(dayChange)}`}>
-                  {quotes.data?.quotes.length ? money(dayChange, currency, { signed: true }) : '—'}
+                  {quotes.data?.quotes.length ? (
+                    <>
+                      {money(dayChange, currency, { signed: true })}{' '}
+                      <span className="text-base font-medium">({formatPercent(dayChangePercent, 2, true)})</span>
+                    </>
+                  ) : (
+                    '—'
+                  )}
                 </p>
                 <p className="text-xs text-muted-foreground">Stocks & ETFs; mutual funds update after the close.</p>
               </CardContent>
@@ -117,7 +127,7 @@ export function Holdings() {
                 </tr>
               </thead>
               <tbody className="divide-y">
-                {rows.map(({ holding, quote, dayChange: change, liveValue, share }) => {
+                {rows.map(({ holding, quote, scale, dayChange: change, liveValue, share }) => {
                   const close = holding.ticker ? closeByTicker.get(holding.ticker) : undefined;
                   const isOpen = expanded.has(holding.securityId);
                   return (
@@ -161,18 +171,27 @@ export function Holdings() {
                         <Td className="text-right text-muted-foreground">{formatPercent(share)}</Td>
                       </tr>
                       {isOpen &&
-                        holding.accounts.map((position) => (
-                          <tr key={position.accountId} className="bg-muted/30 text-xs">
-                            <Td />
-                            <Td colSpan={2} className="text-muted-foreground">
-                              {position.name}
-                            </Td>
-                            <Td className="text-right">{quantity(position.quantity)}</Td>
-                            <Td colSpan={2} />
-                            <Td className="text-right">{money(position.value, currency)}</Td>
-                            <Td />
-                          </tr>
-                        ))}
+                        holding.accounts.map((position) => {
+                          // Live, like the row above, so the accounts add up to it. The
+                          // day's % is the security's, so only the dollar change is shown.
+                          const positionChange = quote ? Math.round(position.quantity * quote.change * 100 * scale) : null;
+                          const positionValue = quote ? Math.round(position.quantity * quote.price * 100 * scale) : position.value;
+                          return (
+                            <tr key={position.accountId} className="bg-muted/30 text-xs">
+                              <Td />
+                              <Td colSpan={2} className="text-muted-foreground">
+                                {position.name}
+                              </Td>
+                              <Td className="text-right">{quantity(position.quantity)}</Td>
+                              <Td />
+                              <Td className={`text-right ${positionChange !== null ? changeClass(positionChange) : ''}`}>
+                                {positionChange !== null ? money(positionChange, currency, { signed: true }) : ''}
+                              </Td>
+                              <Td className="text-right">{money(positionValue, currency)}</Td>
+                              <Td />
+                            </tr>
+                          );
+                        })}
                     </Fragment>
                   );
                 })}

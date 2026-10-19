@@ -498,16 +498,22 @@ async function planAccounts(
   return visible;
 }
 
+/** Securities exchanges list: stocks and ETFs, whatever else Plaid says. */
+const EXCHANGE_TRADED = new Set(['equity', 'etf']);
+
+/**
+ * Priced from public market data (daily closes, live quotes) rather than the
+ * institution's unit price. Plaid signals it with a previous close, but not
+ * every institution (nor its sandbox) sends one, so a stock or ETF with a
+ * ticker counts regardless. A mutual fund without a close stays on the
+ * institution's price: that's how a private 401(k) trust looks. A ticker the
+ * price provider doesn't know still falls back to the institution's price.
+ */
 function isPublicSecurity(security: PlaidSecurity): boolean {
   const ticker = security.ticker_symbol ?? '';
-  return (
-    ticker.length > 0 &&
-    !ticker.startsWith('CUR:') &&
-    security.type !== 'cash' &&
-    security.type !== 'derivative' &&
-    security.close_price !== null &&
-    security.close_price !== undefined
-  );
+  if (ticker.length === 0 || ticker.startsWith('CUR:') || security.type === 'cash' || security.type === 'derivative') return false;
+  const hasClose = security.close_price !== null && security.close_price !== undefined;
+  return hasClose || EXCHANGE_TRADED.has(security.type ?? '');
 }
 
 /** Plan upserts for Plaid securities; returns Plaid security_id → Wattle security id. */
@@ -650,12 +656,19 @@ async function planHoldings(
       ...chunkRows(holdings, rows).map((chunk) => tenant.db.insert(holdings).values(chunk)),
     );
   }
+  // The institution's unit price is the fallback when there's no market
+  // close (private funds, or tickers the price provider doesn't know); a
+  // previous close from Plaid is better, so that one isn't overwritten.
+  const withClose = new Set(
+    plaidSecurities.filter((security) => security.close_price !== null && security.close_price !== undefined).map((security) => securityIds.get(security.security_id)),
+  );
   for (const [securityId, { price, date }] of institutionPrices) {
+    if (withClose.has(securityId)) continue;
     writes.push(
       tenant.db
         .update(securities)
         .set({ lastPrice: price, lastPriceDate: date ?? marketDate(deps.now()) })
-        .where(tenant.scope(securities, eq(securities.id, securityId), eq(securities.isPublic, false))),
+        .where(tenant.scope(securities, eq(securities.id, securityId))),
     );
   }
   run.count('holdings', rows.length);
