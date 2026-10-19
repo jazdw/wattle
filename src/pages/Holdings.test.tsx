@@ -11,7 +11,7 @@ describe('Holdings page', () => {
     renderPage(<Holdings />);
     const vti = (await screen.findByText('VTI')).closest('tr') as HTMLElement;
     expect(within(vti).getByText('303.00')).toBeInTheDocument(); // live quote
-    expect(within(vti).getByText('+$1,500')).toBeInTheDocument(); // 500 units × $3
+    expect(within(vti).getByText('+$1,500.00')).toBeInTheDocument(); // 500 units × $3
     expect(within(vti).getByText('+1.00%')).toBeInTheDocument();
     expect(within(vti).getByText('US stocks')).toBeInTheDocument();
 
@@ -22,7 +22,7 @@ describe('Holdings page', () => {
 
     // Header total: day change across live-quoted holdings.
     const todays = screen.getByText("Today's change").closest('div') as HTMLElement;
-    expect(within(todays).getByText('+$1,500')).toBeInTheDocument();
+    expect(within(todays).getByText('+$1,500.00')).toBeInTheDocument();
     // …and as a share of the holdings' value at the previous close.
     expect(within(todays).getByText(/^\([+-]\d+\.\d{2}%\)$/)).toBeInTheDocument();
   });
@@ -34,11 +34,11 @@ describe('Holdings page', () => {
     expect(screen.getByText('Roth IRA')).toBeInTheDocument();
     // Each account: live value and the day's dollar change (VTI +$3 a unit), adding up to the row above.
     const brokerage = screen.getByText('Vanguard Brokerage').closest('tr') as HTMLElement;
-    expect(within(brokerage).getByText('+$1,200')).toBeInTheDocument();
-    expect(within(brokerage).getByText('$121,200')).toBeInTheDocument();
+    expect(within(brokerage).getByText('+$1,200.00')).toBeInTheDocument();
+    expect(within(brokerage).getByText('$121,200.00')).toBeInTheDocument();
     const ira = screen.getByText('Roth IRA').closest('tr') as HTMLElement;
-    expect(within(ira).getByText('+$300')).toBeInTheDocument();
-    expect(within(ira).getByText('$30,300')).toBeInTheDocument();
+    expect(within(ira).getByText('+$300.00')).toBeInTheDocument();
+    expect(within(ira).getByText('$30,300.00')).toBeInTheDocument();
     expect(within(ira).queryByText(/%/)).not.toBeInTheDocument();
 
     await user.type(screen.getByPlaceholderText('Filter by ticker or name'), 'stable');
