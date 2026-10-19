@@ -34,6 +34,20 @@ describe('provider back-off', () => {
     expect(calls).toBe(2);
   });
 
+  it('reads the back-off marker once per request, not once per call', async () => {
+    const deps = await createTestDeps();
+    const provider = { async quote(ticker: string) { return ticker; } };
+    const wrapped = withBackoff(provider, 'fake', () => deps);
+    const select = deps.db.select.bind(deps.db);
+    let reads = 0;
+    deps.db.select = ((...args: Parameters<typeof select>) => {
+      reads += 1;
+      return select(...args);
+    }) as typeof select;
+    for (let index = 0; index < 25; index += 1) await wrapped.quote(`T${index}`);
+    expect(reads).toBe(1);
+  });
+
   it('ignores other errors', async () => {
     const deps = await createTestDeps();
     let calls = 0;
