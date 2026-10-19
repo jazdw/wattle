@@ -224,3 +224,18 @@ describe('daily job', () => {
     expect((await api('/api/refresh', { method: 'POST' })).body.synced).toBe(0); // rate-limited
   });
 });
+
+describe('possible duplicates', () => {
+  it('flags a later-linked copy from another login, not same-login or different accounts', async () => {
+    const { possibleDuplicates } = await import('../server/routes/accounts');
+    const base = { source: 'plaid', isHidden: false, missingSince: null, type: 'depository', subtype: 'checking', currency: 'USD', balance: 500_00, mask: '1234', plaidName: 'Joint', name: 'Joint' };
+    const found = possibleDuplicates([
+      { ...base, id: 'mine', connectionId: 'c1', createdAt: 1 },
+      { ...base, id: 'partners', connectionId: 'c2', createdAt: 2 },
+      { ...base, id: 'same-login', connectionId: 'c1', createdAt: 3 },
+      { ...base, id: 'other-balance', connectionId: 'c2', createdAt: 4, balance: 1 },
+      { ...base, id: 'hidden', connectionId: 'c3', createdAt: 5, isHidden: true },
+    ]);
+    expect([...found]).toEqual([['partners', 'mine']]);
+  });
+});
