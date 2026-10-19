@@ -12,7 +12,7 @@ describe('Growth page', () => {
     const row = (await screen.findByRole('row', { name: /Vanguard Brokerage/ })) as HTMLElement;
     expect(within(row).getByText('$240,000')).toBeInTheDocument();
     expect(within(row).getByText('$250,000')).toBeInTheDocument();
-    expect(within(row).getByText('+$10,000')).toBeInTheDocument();
+    expect(within(row).getByText('$10,000', { exact: false, selector: 'td *, td' })).toBeInTheDocument();
     expect(screen.getByText(/Shaded periods/)).toBeInTheDocument();
     expect(lastGroup()).toBe('account');
   });

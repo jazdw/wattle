@@ -9,7 +9,7 @@ describe('Net worth page', () => {
   it('shows the total, change, assets and liabilities', async () => {
     renderPage(<NetWorth />);
     expect(await screen.findByText('$1,366,200')).toBeInTheDocument();
-    expect(screen.getByText(/\+\$66,200/)).toBeInTheDocument(); // first → last point of the 1Y history
+    expect(screen.getByText(/^\$66,200 \(/)).toBeInTheDocument(); // first → last point of the 1Y history; no + on a gain
     expect(screen.getByText('$1,368,500')).toBeInTheDocument();
     expect(screen.getByText('-$2,300', { selector: 'p' })).toBeInTheDocument();
     expect(screen.getByText(/reconstructed from transactions/)).toBeInTheDocument();

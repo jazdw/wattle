@@ -111,7 +111,7 @@ export function NetWorth() {
                   )}
                   {change && (
                     <p className={`text-sm ${changeClass(change.amount)}`}>
-                      {money(change.amount, currency, { signed: true })} ({formatPercent(change.percent, 1, true)}){' '}
+                      {money(change.amount, currency)} ({formatPercent(change.percent, 1)}){' '}
                       <span className="text-muted-foreground">{range === 'ALL' ? 'all time' : range === 'YTD' ? 'this year' : `past ${range}`}</span>
                     </p>
                   )}
