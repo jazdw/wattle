@@ -25,6 +25,13 @@ describe('config', () => {
     expect(depsFromEnv({ PLAID_CLIENT_ID: 'c', PLAID_SECRET: 's', PLAID_ENV: 'nonsense' }, {} as Db, () => {}).plaid?.env).toBe('sandbox');
   });
 
+  it('reuses live quotes for 5 minutes unless QUOTE_CACHE_SECONDS says otherwise', () => {
+    expect(configFromEnv({}).quoteCacheSeconds).toBe(300);
+    expect(configFromEnv({ QUOTE_CACHE_SECONDS: '60' }).quoteCacheSeconds).toBe(60);
+    expect(configFromEnv({ QUOTE_CACHE_SECONDS: 'soon' }).quoteCacheSeconds).toBe(300);
+    expect(configFromEnv({ QUOTE_CACHE_SECONDS: '0' }).quoteCacheSeconds).toBe(300);
+  });
+
   it('takes live quotes from Tiingo unless QUOTE_PROVIDER picks Finnhub or none', () => {
     const quotes = (env: Record<string, string>) => depsFromEnv(env, {} as Db, () => {}).quotes;
     expect(quotes({ TIINGO_API_KEY: 't', FINNHUB_API_KEY: 'f' })?.quotes).toBeTypeOf('function'); // Tiingo: bulk

@@ -176,7 +176,10 @@ A second lock in front of the app. Cloudflare's edge only lets your Google accou
 | `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET` | Worker secrets | Google sign-in |
 | `TOKEN_ENC_KEY` | Worker secret | Encrypts Plaid tokens at rest |
 | `PLAID_CLIENT_ID`, `PLAID_SECRET`, `PLAID_ENV` | Worker secrets | Plaid (`sandbox` or `production`) |
-| `TIINGO_API_KEY`, `FINNHUB_API_KEY` | Worker secrets | Daily closes and history; live quotes |
+| `TIINGO_API_KEY` | Worker secret | Daily closes, history and live quotes (one bulk request) |
+| `FINNHUB_API_KEY` | Worker secret (optional) | Live quotes from Finnhub instead, with `QUOTE_PROVIDER=finnhub` |
+| `QUOTE_PROVIDER` | Worker secret (optional) | `tiingo` (default with a Tiingo key), `finnhub` or `none` |
+| `QUOTE_CACHE_SECONDS` | Worker secret (optional) | How long a live quote is reused (default `300`). Tiingo's free plan allows 50 requests an hour; lower it on a paid plan |
 | `ACCESS_TEAM_DOMAIN`, `ACCESS_AUD` | Worker secrets (optional) | Require a Cloudflare Access token on API requests |
 | `DEV_LOGIN_EMAILS` | `.dev.vars` only | Local dev sign-in without Google |
 | `FX_PROVIDER=none` | tests only | No live exchange-rate calls |

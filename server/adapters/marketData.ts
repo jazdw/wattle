@@ -12,6 +12,17 @@ import { newYorkClock } from '../../shared/dates';
 import type { Currency } from '../../shared/money';
 import type { DailyClose, FxProvider, PriceProvider, Quote, QuoteProvider, SecurityDescription } from '../ports';
 
+/** A provider answered with an HTTP error (429 means "too many requests"). */
+export class ProviderHttpError extends Error {
+  readonly status: number;
+
+  constructor(message: string, status: number) {
+    super(`${message}: HTTP ${status}`);
+    this.name = 'ProviderHttpError';
+    this.status = status;
+  }
+}
+
 export function createTiingo(apiKey: string): PriceProvider {
   return {
     name: 'tiingo',
@@ -23,7 +34,7 @@ export function createTiingo(apiKey: string): PriceProvider {
         { headers: { 'content-type': 'application/json', authorization: `Token ${apiKey}` } },
       );
       if (response.status === 404) return [];
-      if (!response.ok) throw new Error(`Tiingo ${ticker}: HTTP ${response.status}`);
+      if (!response.ok) throw new ProviderHttpError(`Tiingo ${ticker}`, response.status);
       const rows = (await response.json()) as { date: string; close: number }[];
       return rows
         .filter((row) => typeof row.close === 'number')
@@ -37,7 +48,7 @@ export function createTiingo(apiKey: string): PriceProvider {
       const response = await fetch(`https://api.tiingo.com/tiingo/utilities/search?${params}`, {
         headers: { 'content-type': 'application/json', authorization: `Token ${apiKey}` },
       });
-      if (!response.ok) throw new Error(`Tiingo search ${ticker}: HTTP ${response.status}`);
+      if (!response.ok) throw new ProviderHttpError(`Tiingo search ${ticker}`, response.status);
       const rows = (await response.json()) as { ticker?: string; name?: string; assetType?: string; countryCode?: string }[];
       const matches = rows.filter((row) => row.ticker?.toUpperCase() === ticker.toUpperCase());
       const match = matches.find((row) => row.countryCode === 'US') ?? matches[0];
@@ -77,7 +88,7 @@ async function tiingoIex(apiKey: string, tickers: string[]): Promise<IexRow[]> {
     const response = await fetch(`https://api.tiingo.com/iex/?${params}`, {
       headers: { 'content-type': 'application/json', authorization: `Token ${apiKey}` },
     });
-    if (!response.ok) throw new Error(`Tiingo IEX: HTTP ${response.status}`);
+    if (!response.ok) throw new ProviderHttpError('Tiingo IEX', response.status);
     const rows = (await response.json()) as { ticker?: string; timestamp?: string; tngoLast?: number | null; prevClose?: number | null }[];
     // Filter to what was asked for, in case the whole market comes back.
     const wanted = new Set(chunk);
@@ -130,7 +141,7 @@ export function createFinnhub(apiKey: string): QuoteProvider {
       const response = await fetch(`https://finnhub.io/api/v1/quote?${params}`, {
         headers: { 'x-finnhub-token': apiKey },
       });
-      if (!response.ok) throw new Error(`Finnhub ${ticker}: HTTP ${response.status}`);
+      if (!response.ok) throw new ProviderHttpError(`Finnhub ${ticker}`, response.status);
       const body = (await response.json()) as { c: number; d: number | null; dp: number | null; pc: number; t: number };
       // Unknown symbols come back as all zeros.
       if (!body.c && !body.pc) return null;
@@ -153,7 +164,7 @@ export function createFrankfurter(): FxProvider {
       const params = new URLSearchParams({ base, symbols: quote });
       const range = start === end ? start : `${start}..${end}`;
       const response = await fetch(`https://api.frankfurter.dev/v1/${range}?${params}`);
-      if (!response.ok) throw new Error(`Frankfurter: HTTP ${response.status}`);
+      if (!response.ok) throw new ProviderHttpError('Frankfurter', response.status);
       const body = (await response.json()) as
         | { date: string; rates: Record<string, number> }
         | { rates: Record<string, Record<string, number>> };
