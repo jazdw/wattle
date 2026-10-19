@@ -234,6 +234,28 @@ describe('market pricing', () => {
   });
 });
 
+describe('cash positions', () => {
+  it('show their ISO currency code and name, whatever the institution calls them', async () => {
+    const plaid = brokerage();
+    plaid.state.securities = [
+      security('s-vti', 'VTI', 'etf', 100),
+      security('s-cash', null, 'cash', 1, 'U S Dollar'), // no ticker: the holding's currency
+      security('s-eur', 'CUR:EUR', 'cash', 1, 'EURO CURRENCY'), // Plaid's currency ticker wins
+    ];
+    plaid.state.holdings = [...plaid.state.holdings, holding('brk', 's-eur', 50, 1)];
+    const { api } = await linked(plaid);
+    const cash = (await api('/api/portfolio')).body.holdings.filter((row: { type: string }) => row.type === 'cash');
+    expect(cash).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ ticker: 'USD', name: 'US Dollar (cash)' }),
+        expect.objectContaining({ ticker: 'EUR', name: 'Euro (cash)' }),
+      ]),
+    );
+    const { currencyName } = await import('../shared/money');
+    expect([currencyName('AUD'), currencyName('JPY'), currencyName('XYZ')]).toEqual(['Australian Dollar', 'Japanese Yen', 'XYZ']);
+  });
+});
+
 describe('disconnecting', () => {
   it('keeps accounts as manual ones by default', async () => {
     const { deps, api, plaid, connection } = await linked();

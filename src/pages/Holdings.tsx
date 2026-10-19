@@ -77,7 +77,7 @@ export function Holdings() {
             <Card>
               <CardContent className="pt-4">
                 <p className="text-sm text-muted-foreground">Holdings value{quotes.data?.quotes.length ? ' (live)' : ''}</p>
-                <p className="text-2xl font-semibold">{money(liveTotal, currency)}</p>
+                <p className="text-2xl font-semibold">{money(liveTotal, currency, { cents: true })}</p>
               </CardContent>
             </Card>
             <Card>
@@ -89,7 +89,7 @@ export function Holdings() {
                 <p className={`text-2xl font-semibold ${changeClass(dayChange)}`}>
                   {quotes.data?.quotes.length ? (
                     <>
-                      {money(dayChange, currency, { signed: true })}{' '}
+                      {money(dayChange, currency, { signed: true, cents: true })}{' '}
                       <span className="text-base font-medium">({formatPercent(dayChangePercent, 2, true)})</span>
                     </>
                   ) : (
@@ -160,14 +160,14 @@ export function Holdings() {
                         <Td className={`text-right ${quote ? changeClass(quote.change) : ''}`}>
                           {quote ? (
                             <>
-                              {money(change, currency, { signed: true })}
+                              {money(change, currency, { signed: true, cents: true })}
                               <p className="text-xs">{formatPercent(quote.changePercent, 2, true)}</p>
                             </>
                           ) : (
                             <span className="text-muted-foreground">—</span>
                           )}
                         </Td>
-                        <Td className="text-right font-medium">{money(liveValue, currency)}</Td>
+                        <Td className="text-right font-medium">{money(liveValue, currency, { cents: true })}</Td>
                         <Td className="text-right text-muted-foreground">{formatPercent(share)}</Td>
                       </tr>
                       {isOpen &&
@@ -185,9 +185,9 @@ export function Holdings() {
                               <Td className="text-right">{quantity(position.quantity)}</Td>
                               <Td />
                               <Td className={`text-right ${positionChange !== null ? changeClass(positionChange) : ''}`}>
-                                {positionChange !== null ? money(positionChange, currency, { signed: true }) : ''}
+                                {positionChange !== null ? money(positionChange, currency, { signed: true, cents: true }) : ''}
                               </Td>
-                              <Td className="text-right">{money(positionValue, currency)}</Td>
+                              <Td className="text-right">{money(positionValue, currency, { cents: true })}</Td>
                               <Td />
                             </tr>
                           );
