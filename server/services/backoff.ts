@@ -12,6 +12,8 @@ import type { Deps } from '../ports';
 import { cacheGet, cacheSet } from './cache';
 
 const BACKOFF_SECONDS = 15 * 60;
+/** How long one wrapper trusts its last read of the marker (a Worker request is far shorter). */
+const CHECK_MS = 30_000;
 
 /** A call skipped because the provider recently said "too many requests". */
 export class ProviderBackoffError extends Error {
@@ -27,8 +29,11 @@ export class ProviderBackoffError extends Error {
  */
 export function withBackoff<T extends object>(provider: T, name: string, deps: () => Deps): T {
   const key = `backoff:${name}`;
-  // Within one request, once we know we're backing off, don't ask the database again.
-  let knownUntil = 0;
+  // The marker is read once per CHECK_MS, not once per call: one request can
+  // make many calls (Finnhub: one per ticker), and on Workers each database
+  // read counts toward the 50 outbound requests an invocation may make.
+  let backingOffUntil = 0;
+  let checkedUntil = 0;
   return new Proxy(provider, {
     get(target, property, receiver) {
       const value = Reflect.get(target, property, receiver);
@@ -36,17 +41,19 @@ export function withBackoff<T extends object>(provider: T, name: string, deps: (
       return async (...args: unknown[]) => {
         const current = deps();
         const now = current.now().getTime();
-        if (knownUntil > now || (await cacheGet<number>(current, key))) {
-          knownUntil = Math.max(knownUntil, now + 60_000);
-          throw new ProviderBackoffError(name);
+        if (now >= checkedUntil) {
+          const until = await cacheGet<number>(current, key);
+          if (until) backingOffUntil = Math.max(backingOffUntil, until);
+          checkedUntil = now + CHECK_MS;
         }
+        if (backingOffUntil > now) throw new ProviderBackoffError(name);
         try {
           return await value.apply(target, args);
         } catch (error) {
           if (error instanceof ProviderHttpError && error.status === 429) {
             console.warn(`${name} said too many requests; backing off for ${BACKOFF_SECONDS / 60} minutes.`);
-            knownUntil = now + BACKOFF_SECONDS * 1000;
-            await cacheSet(current, key, knownUntil, BACKOFF_SECONDS);
+            backingOffUntil = now + BACKOFF_SECONDS * 1000;
+            await cacheSet(current, key, backingOffUntil, BACKOFF_SECONDS);
           }
           throw error;
         }
