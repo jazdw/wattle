@@ -166,13 +166,34 @@ describe('quotes', () => {
     expect(calls).toHaveLength(1);
   });
 
-  it('gives a public ticker typed into a manual account a live quote too', async () => {
-    const quotes = fakeQuotes({ AAPL: { price: 255 } });
-    const prices = fakePrices({ AAPL: closes('2026-10-01', 8, 250) });
-    const { api, create } = await household({ quotes, prices });
+  it('looks up what a ticker typed into a manual account is: stocks get live quotes, funds their last NAV', async () => {
+    const quotes = fakeQuotes({ AAPL: { price: 255 }, VTSAX: { price: 182 } });
+    const prices = fakePrices(
+      { AAPL: closes('2026-10-01', 8, 250), VTSAX: closes('2026-10-01', 8, 180), FZROX: closes('2026-10-01', 8, 20) },
+      undefined,
+      { AAPL: { type: 'equity', name: 'Apple Inc' }, VTSAX: { type: 'mutual fund', name: 'Vanguard Total Stock Market Index Admiral' } },
+    );
+    const { deps, api, create } = await household({ quotes, prices });
     const id = await create({ name: 'Brokerage', type: 'investment' });
-    await api(`/api/accounts/${id}/holdings`, { method: 'PUT', json: { holdings: [{ ticker: 'AAPL', quantity: 2 }], version: 0 } });
-    expect((await api('/api/quotes')).body.quotes).toEqual([expect.objectContaining({ ticker: 'AAPL', price: 255 })]);
+    const holdings = [{ ticker: 'AAPL', quantity: 2 }, { ticker: 'VTSAX', quantity: 1 }, { ticker: 'FZROX', quantity: 1 }];
+    await api(`/api/accounts/${id}/holdings`, { method: 'PUT', json: { holdings, version: 0 } });
+
+    const rows = await deps.db.select({ ticker: schema.securities.ticker, type: schema.securities.type, name: schema.securities.name }).from(schema.securities);
+    expect(rows).toEqual(
+      expect.arrayContaining([
+        { ticker: 'AAPL', type: 'equity', name: 'Apple Inc' },
+        { ticker: 'VTSAX', type: 'mutual fund', name: 'Vanguard Total Stock Market Index Admiral' },
+        { ticker: 'FZROX', type: 'mutual fund', name: 'FZROX' }, // unknown to the provider: five letters ending in X
+      ]),
+    );
+    const body = (await api('/api/quotes')).body;
+    expect(body.quotes.map((quote: { ticker: string }) => quote.ticker)).toEqual(['AAPL']);
+    expect(body.closes.map((close: { ticker: string }) => close.ticker).sort()).toEqual(['FZROX', 'VTSAX']);
+
+    // Saving again doesn't ask again: the types are stored.
+    const asked = prices.calls.filter((call) => call.startsWith('describe:')).length;
+    await api(`/api/accounts/${id}/holdings`, { method: 'PUT', json: { holdings, version: 1 } });
+    expect(prices.calls.filter((call) => call.startsWith('describe:'))).toHaveLength(asked);
   });
 
   it("shows the last close, not a quote from a previous session (a fund's NAV, a weekend)", async () => {
@@ -290,3 +311,27 @@ describe('possible duplicates', () => {
     expect([...found]).toEqual([['partners', 'mine']]);
   });
 });
+
+describe('security type', () => {
+  it('can be set on a security you entered, not on one from an institution', async () => {
+    const plaid = fakePlaid({ accounts: [account('brk', 'investment', 1000)], securities: [security('s-vti', 'VTI', 'etf', 300)], holdings: [holding('brk', 's-vti', 1, 300)] });
+    const { deps, api, create } = await household({ plaid });
+    await api('/api/plaid/exchange', { method: 'POST', json: { publicToken: 'p', kind: 'investments' } });
+    await flush(deps);
+    const id = await create({ name: 'Super', type: 'investment', currency: 'AUD' });
+    await api(`/api/accounts/${id}/holdings`, { method: 'PUT', json: { holdings: [{ ticker: 'REST-BAL', quantity: 10, price: 2 }], version: 0 } });
+
+    const holdings = (await api('/api/portfolio')).body.holdings as { securityId: string; ticker: string; typeEditable: boolean }[];
+    const manual = holdings.find((row) => row.ticker === 'REST-BAL')!;
+    const linked = holdings.find((row) => row.ticker === 'VTI')!;
+    expect([manual.typeEditable, linked.typeEditable]).toEqual([true, false]);
+
+    const classification = { categories: { au_stock: 1 } };
+    expect((await api(`/api/securities/${manual.securityId}`, { method: 'PATCH', json: { classification, type: 'mutual fund' } })).status).toBe(200);
+    const [row] = await deps.db.select({ type: schema.securities.type }).from(schema.securities).where(eq(schema.securities.id, manual.securityId));
+    expect(row.type).toBe('mutual fund');
+    expect((await api(`/api/securities/${linked.securityId}`, { method: 'PATCH', json: { classification, type: 'equity' } })).status).toBe(409);
+    expect((await api(`/api/securities/${linked.securityId}`, { method: 'PATCH', json: { classification } })).status).toBe(200);
+  });
+});
+

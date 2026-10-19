@@ -25,6 +25,7 @@ import { loadHistory, RANGES, type Range } from '../services/history';
 import { activeTarget, loadPortfolio } from '../services/portfolio';
 import { stableId } from '../services/ids';
 import { Lease, targetsLease } from '../services/lease';
+import { describeTickers } from '../services/pricing';
 import { snapshotHousehold } from '../services/snapshots';
 import { activeConnections, MANUAL_SYNC_INTERVAL_MS, syncConnection } from '../services/sync';
 
@@ -106,12 +107,19 @@ portfolioRoutes.patch('/securities/:id', async (c) => {
     ...(body.classification.styles ? { styles: normalizeWeights(body.classification.styles) } : {}),
   };
   if (Object.keys(classification.categories).length === 0) throw new HttpError(400, 'Give at least one category weight.');
-  const result = await tenant.db
+  const [security] = await tenant.db
+    .select({ externalId: securities.externalId })
+    .from(securities)
+    .where(tenant.scope(securities, eq(securities.id, c.req.param('id'))));
+  if (!security) notFound('Security not found.');
+  // An institution's securities get their type from it on every sync.
+  if (body.type !== undefined && security.externalId !== null) {
+    throw new HttpError(409, "This security's type comes from the institution.");
+  }
+  await tenant.db
     .update(securities)
-    .set({ classification, classificationSource: 'user', needsReview: false })
-    .where(tenant.scope(securities, eq(securities.id, c.req.param('id'))))
-    .returning({ id: securities.id });
-  if (result.length === 0) notFound('Security not found.');
+    .set({ classification, classificationSource: 'user', needsReview: false, ...(body.type !== undefined ? { type: body.type } : {}) })
+    .where(tenant.scope(securities, eq(securities.id, c.req.param('id'))));
   return c.json({ ok: true });
 });
 
@@ -184,12 +192,12 @@ portfolioRoutes.put('/targets', async (c) => {
 
 const QUOTE_TTL_SECONDS = 60;
 /**
- * Live quotes for stocks and ETFs, and for public tickers entered by hand
- * (which have no type). Mutual funds strike one NAV a day: they show their
- * last close instead.
+ * Live quotes for stocks and ETFs only (tickers entered by hand get their
+ * type looked up when added). Mutual funds strike one NAV a day, so they,
+ * and anything of unknown type, show their last close instead.
  */
 const LIVE_TYPES = new Set(['equity', 'etf']);
-const wantsLiveQuote = (type: string | null) => type === null || LIVE_TYPES.has(type);
+const wantsLiveQuote = (type: string | null) => type !== null && LIVE_TYPES.has(type);
 
 portfolioRoutes.get('/quotes', async (c) => {
   const deps = c.env.deps;
@@ -309,9 +317,12 @@ portfolioRoutes.post('/imports/holdings', async (c) => {
     .where(tenant.scope(securities));
   const byTicker = new Map(securityRows.map((row) => [row.ticker?.toUpperCase(), row.id]));
   const missing = [...new Set(body.rows.map((row) => row.ticker.toUpperCase()))].filter((ticker) => !byTicker.has(ticker));
+  // What each new ticker is (stock, ETF, mutual fund) and its name, once per ticker.
+  const descriptions = await describeTickers(deps, missing);
   const statements: BatchItem<'sqlite'>[] = [];
   for (const ticker of missing) {
-    const suggestion = suggestClassification({ ticker, name: null, type: null, currency: account.currency });
+    const description = descriptions.get(ticker);
+    const suggestion = suggestClassification({ ticker, name: description?.name ?? null, type: description?.type ?? null, currency: account.currency });
     // Same derived id as manual holdings use, so concurrent saves share one row.
     const id = await stableId(`security:manual:${tenant.householdId}:${ticker}`);
     statements.push(
@@ -321,7 +332,8 @@ portfolioRoutes.post('/imports/holdings', async (c) => {
           id,
           householdId: tenant.householdId,
           ticker,
-          name: ticker,
+          name: description?.name ?? ticker,
+          type: description?.type ?? null,
           currency: account.currency,
           isPublic: true,
           classification: suggestion.classification,
