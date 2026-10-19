@@ -190,7 +190,6 @@ portfolioRoutes.put('/targets', async (c) => {
 /* Live quotes                                                         */
 /* ------------------------------------------------------------------ */
 
-const QUOTE_TTL_SECONDS = 60;
 /**
  * Live quotes for stocks and ETFs only (tickers entered by hand get their
  * type looked up when added). Mutual funds strike one NAV a day, so they,
@@ -244,7 +243,7 @@ portfolioRoutes.get('/quotes', async (c) => {
     if (quote && fromToday(quote)) response.quotes.push(quote);
     else closeTickers.push(ticker);
   }
-  await cacheSetMany(deps, [...fetched].map(([ticker, quote]) => [`quote:${ticker}`, quote]), QUOTE_TTL_SECONDS);
+  await cacheSetMany(deps, [...fetched].map(([ticker, quote]) => [`quote:${ticker}`, quote]), deps.config.quoteCacheSeconds);
 
   // Latest close per ticker (mutual funds strike NAV once a day). SQLite
   // returns the row that holds max(date) for the bare `close` column.
