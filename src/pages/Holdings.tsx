@@ -10,7 +10,7 @@ import { Input } from '../components/ui/input';
 import { EmptyState, Skeleton, Td, Th } from '../components/ui/misc';
 import { isMarketOpen, usePortfolio, useQuotes } from '../hooks/queries';
 import { useAuth } from '../hooks/useAuth';
-import { changeClass, formatPercent, longDate, money, quantity } from '../lib/format';
+import { changeClass, formatPercent, longDate, money, quantity, shortDate } from '../lib/format';
 
 function mainCategory(holding: HoldingRow): string {
   const weights = normalizeWeights(holding.classification.categories);
@@ -89,8 +89,8 @@ export function Holdings() {
                 <p className={`text-2xl font-semibold ${changeClass(dayChange)}`}>
                   {quotes.data?.quotes.length ? (
                     <>
-                      {money(dayChange, currency, { signed: true, cents: true })}{' '}
-                      <span className="text-base font-medium">({formatPercent(dayChangePercent, 2, true)})</span>
+                      {money(dayChange, currency, { cents: true })}{' '}
+                      <span className="text-base font-medium">({formatPercent(dayChangePercent, 2)})</span>
                     </>
                   ) : (
                     '—'
@@ -155,13 +155,19 @@ export function Holdings() {
                         <Td className="text-right">{quantity(holding.quantity)}</Td>
                         <Td className="text-right">
                           {quote ? quote.price.toFixed(2) : close ? close.close.toFixed(2) : holding.price?.toFixed(2) ?? '—'}
-                          {!quote && close && <p className="text-xs text-muted-foreground">{longDate(close.date)}</p>}
+                          {quote && (
+                            // When this quote was last updated (quotes refresh separately, so times differ).
+                            <p className="text-xs text-muted-foreground" title={`Last updated ${new Date(quote.time).toLocaleString()}`}>
+                              {new Date(quote.time).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })}
+                            </p>
+                          )}
+                          {!quote && close && <p className="text-xs text-muted-foreground" title={longDate(close.date)}>{shortDate(close.date)}</p>}
                         </Td>
                         <Td className={`text-right ${quote ? changeClass(quote.change) : ''}`}>
                           {quote ? (
                             <>
-                              {money(change, currency, { signed: true, cents: true })}
-                              <p className="text-xs">{formatPercent(quote.changePercent, 2, true)}</p>
+                              {money(change, currency, { cents: true })}
+                              <p className="text-xs">{formatPercent(quote.changePercent, 2)}</p>
                             </>
                           ) : (
                             <span className="text-muted-foreground">—</span>
@@ -185,7 +191,7 @@ export function Holdings() {
                               <Td className="text-right">{quantity(position.quantity)}</Td>
                               <Td />
                               <Td className={`text-right ${positionChange !== null ? changeClass(positionChange) : ''}`}>
-                                {positionChange !== null ? money(positionChange, currency, { signed: true, cents: true }) : ''}
+                                {positionChange !== null ? money(positionChange, currency, { cents: true }) : ''}
                               </Td>
                               <Td className="text-right">{money(positionValue, currency, { cents: true })}</Td>
                               <Td />

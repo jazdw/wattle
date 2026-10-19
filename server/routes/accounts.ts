@@ -544,7 +544,7 @@ async function planManualSecurity(
 ): Promise<string> {
   const ticker = entry.ticker.toUpperCase();
   const candidates = await tenant.db
-    .select({ id: securities.id, externalId: securities.externalId, type: securities.type })
+    .select({ id: securities.id, externalId: securities.externalId, type: securities.type, name: securities.name })
     .from(securities)
     .where(tenant.scope(securities, eq(securities.ticker, ticker)));
   const manual = candidates.find((row) => row.externalId === null);
@@ -560,6 +560,8 @@ async function planManualSecurity(
           ...priceFields,
           ...(isPublic ? { isPublic } : {}),
           ...(manual.type === null && description ? { type: description.type } : {}),
+          // A name that's still just the ticker gets the looked-up one.
+          ...(!entry.name && manual.name === ticker && description?.name ? { name: description.name } : {}),
         })
         .where(tenant.scope(securities, eq(securities.id, manual.id))),
     );
