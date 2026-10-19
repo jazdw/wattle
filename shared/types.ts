@@ -95,6 +95,11 @@ export interface AccountSummary {
   /** Balance in the requested display currency. */
   displayBalance: number | null;
   holdingCount: number;
+  /**
+   * Another visible linked account (from a different login) that looks like
+   * the same one, e.g. a joint account you've both linked: hide one copy.
+   */
+  possibleDuplicateOf: string | null;
 }
 
 export interface ConnectionsResponse {

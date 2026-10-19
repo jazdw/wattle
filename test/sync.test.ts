@@ -229,6 +229,23 @@ describe('disconnecting', () => {
 });
 
 describe('history backfill', () => {
+  it("carries a linked account's first balance back as an estimate, but not a manual account's", async () => {
+    const plaid = brokerage();
+    // A mortgage at an investment login: no history before today's snapshot.
+    plaid.state.accounts.push(account('mtg', 'loan', 200000));
+    const { api } = await linked(plaid);
+    await api('/api/accounts', { method: 'POST', json: { name: 'House', type: 'property', currency: 'USD', balance: 500000 } });
+
+    const history = (await api('/api/history?range=1M&group=account&currency=USD')).body;
+    const series = (label: string) => history.series.find((row: { label: string }) => row.label === label).values as (number | null)[];
+    const yesterday = history.dates.length - 2;
+    expect(series('mtg')[0]).toBe(-200000_00); // carried back from today
+    expect(series('mtg')[yesterday]).toBe(-200000_00);
+    expect(series('House')[0]).toBeNull(); // manual: starts on its entry date
+    expect(history.estimated[0]).toBe(true);
+    expect(history.estimated.at(-1)).toBe(false); // today is reported
+  });
+
   it('rebuilds investment history from transactions and daily closes', async () => {
     const prices = fakePrices({ VTI: closes('2024-10-01', 740, 50, 0.1) });
     const { deps, byName } = await linked(brokerage(), { prices });

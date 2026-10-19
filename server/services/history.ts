@@ -9,6 +9,7 @@ import { normalizeWeights, CATEGORY_LABELS, type Category, type Classification }
 import { addDays, dateRange, marketDate, type IsoDate } from '../../shared/dates';
 import { convertMinor, type Currency } from '../../shared/money';
 import type { HistoryGroup, HistoryResponse, HistorySeries } from '../../shared/types';
+import { inChunks } from '../db/batch';
 import { accountDaily, accounts, holdingDaily, securities } from '../db/schema';
 import type { Tenant } from '../db/tenant';
 import type { Deps } from '../ports';
@@ -91,14 +92,40 @@ export async function loadHistory(deps: Deps, tenant: Tenant, options: Options):
   const index = new Map(dates.map((date, position) => [date, position]));
 
   // Per account: carried-forward display-currency value for each date.
+  //
+  // A linked account with no history before some date (a loan, which Plaid's
+  // balance history doesn't cover; accounts at an investment login other
+  // than the investment ones) would otherwise appear from nowhere on that day
+  // and make the total lurch. Its first known balance is carried back
+  // instead, and those days are marked estimated (shaded). Manual accounts
+  // aren't: their first entry is a date you chose.
+  // Each account's first stored day overall (the rows above start just
+  // before the range, so they can't tell "no history" from a gap).
+  const firstDays = new Map<string, IsoDate>();
+  for (const chunk of inChunks(accountIds)) {
+    const rows = await tenant.db
+      .select({ accountId: accountDaily.accountId, first: min(accountDaily.date) })
+      .from(accountDaily)
+      .where(tenant.scope(accountDaily, inArray(accountDaily.accountId, chunk)))
+      .groupBy(accountDaily.accountId);
+    for (const row of rows) if (row.first) firstDays.set(row.accountId, row.first);
+  }
   const perAccount = new Map<string, (number | null)[]>();
   for (const account of accountRows) {
     const rows = balanceRows.filter((row) => row.accountId === account.id);
+    const firstDay = firstDays.get(account.id);
+    // Only if its history starts inside the range (then it's in `rows`).
+    const first = account.source === 'plaid' && firstDay ? rows.find((row) => row.date === firstDay) : undefined;
     const values: (number | null)[] = [];
     let cursor = 0;
     let last: (typeof rows)[number] | null = null;
     for (const [position, date] of dates.entries()) {
       while (cursor < rows.length && rows[cursor].date <= date) last = rows[cursor++];
+      if (!last && first && date < first.date) {
+        values.push(convert(first.balance, first.currency, date));
+        estimated[position] = true;
+        continue;
+      }
       values.push(last ? convert(last.balance, last.currency, date) : null);
       if (last?.estimated && last.date === date) estimated[position] = true;
     }

@@ -1,7 +1,7 @@
 import { act, screen, within } from '@testing-library/react';
 import { http, HttpResponse } from 'msw';
 import { describe, expect, it } from 'vitest';
-import { CONNECTIONS } from '../test/fixtures';
+import { account, CONNECTIONS } from '../test/fixtures';
 import { plaidLink } from '../test/plaid';
 import { renderPage } from '../test/render';
 import { sent, server } from '../test/server';
@@ -119,6 +119,24 @@ describe('Accounts page', () => {
     expect(within(dialog).getByText(/req-abc123/)).toBeInTheDocument();
     expect(within(dialog).getByText('Nothing to do')).toBeInTheDocument();
     expect(within(dialog).getByText(/it will sync again when it finishes/)).toBeInTheDocument();
+  });
+
+  it('flags a likely duplicate and hides it in one click', async () => {
+    server.use(
+      http.get('*/api/accounts', () =>
+        HttpResponse.json({
+          accounts: [
+            account({ id: 'j1', source: 'plaid', connectionId: 'c-chase', institutionName: 'Chase', name: 'Joint Checking', mask: '1234', balance: 500_00, displayBalance: 500_00 }),
+            account({ id: 'j2', source: 'plaid', connectionId: 'c-vg', institutionName: 'Chase', name: 'Joint Checking', mask: '1234', balance: 500_00, displayBalance: 500_00, possibleDuplicateOf: 'j1' }),
+          ],
+        }),
+      ),
+    );
+    const { user } = renderPage(<Accounts />);
+    const badge = await screen.findByText('Possible duplicate of Joint Checking at Chase');
+    const row = badge.closest('li') as HTMLElement;
+    await user.click(within(row).getByRole('button', { name: 'Hide this copy' }));
+    await expect.poll(() => sent('PATCH /api/accounts/j2')[0]?.body).toEqual({ isHidden: true });
   });
 
   it('shows Plaid errors', async () => {

@@ -169,6 +169,7 @@ accountRoutes.get('/', async (c) => {
     .where(tenant.scope(holdings))
     .groupBy(holdings.accountId);
   const countBy = new Map(holdingCounts.map((row) => [row.accountId, row.count]));
+  const duplicates = possibleDuplicates(rows);
 
   const response: AccountsResponse = {
     accounts: rows.map(
@@ -194,11 +195,35 @@ accountRoutes.get('/', async (c) => {
             ? null
             : convertMinor(row.balance, toCurrency(row.currency), currency, rates),
         holdingCount: countBy.get(row.id) ?? 0,
+        possibleDuplicateOf: duplicates.get(row.id) ?? null,
       }),
     ),
   };
   return c.json(response);
 });
+
+/**
+ * Linked accounts that look like the same account linked through two logins
+ * (a joint account each of you linked): same type, subtype, currency and
+ * current balance, and the same last four digits (or name, without them).
+ * Maps each later-linked copy to the first one.
+ */
+export function possibleDuplicates(
+  rows: { id: string; source: string; connectionId: string | null; isHidden: boolean; missingSince: number | null; type: string; subtype: string | null; currency: string; balance: number | null; mask: string | null; plaidName: string | null; name: string; createdAt: number }[],
+): Map<string, string> {
+  const first = new Map<string, { id: string; connectionId: string }>();
+  const duplicates = new Map<string, string>();
+  const candidates = rows
+    .filter((row) => row.source === 'plaid' && row.connectionId && !row.isHidden && !row.missingSince && row.balance !== null)
+    .sort((a, b) => a.createdAt - b.createdAt);
+  for (const row of candidates) {
+    const key = [row.type, row.subtype, row.currency, row.balance, row.mask ? `mask:${row.mask}` : `name:${row.plaidName ?? row.name}`].join('|');
+    const seen = first.get(key);
+    if (!seen) first.set(key, { id: row.id, connectionId: row.connectionId! });
+    else if (seen.connectionId !== row.connectionId) duplicates.set(row.id, seen.id);
+  }
+  return duplicates;
+}
 
 function signedBalance(type: string, amount: number): number {
   const minor = toMinor(amount);

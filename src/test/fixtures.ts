@@ -44,6 +44,7 @@ export function account(overrides: Partial<AccountSummary>): AccountSummary {
     missingSince: null,
     displayBalance: 0,
     holdingCount: 0,
+    possibleDuplicateOf: null,
     ...overrides,
   };
 }
