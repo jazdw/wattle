@@ -2,7 +2,7 @@
 import { and, eq, inArray, sql } from 'drizzle-orm';
 import { Hono } from 'hono';
 import { suggestClassification } from '../../shared/classify';
-import { marketDate } from '../../shared/dates';
+import { marketDate, newYorkClock } from '../../shared/dates';
 import { toMinor } from '../../shared/money';
 import {
   householdPatchSchema,
@@ -183,7 +183,13 @@ portfolioRoutes.put('/targets', async (c) => {
 /* ------------------------------------------------------------------ */
 
 const QUOTE_TTL_SECONDS = 60;
+/**
+ * Live quotes for stocks and ETFs, and for public tickers entered by hand
+ * (which have no type). Mutual funds strike one NAV a day: they show their
+ * last close instead.
+ */
 const LIVE_TYPES = new Set(['equity', 'etf']);
+const wantsLiveQuote = (type: string | null) => type === null || LIVE_TYPES.has(type);
 
 portfolioRoutes.get('/quotes', async (c) => {
   const deps = c.env.deps;
@@ -196,28 +202,41 @@ portfolioRoutes.get('/quotes', async (c) => {
     .where(tenant.scope(securities, eq(securities.isPublic, true)));
 
   const response: QuotesResponse = { quotes: [], closes: [] };
-  const tickers = rows.flatMap((row) => (row.ticker ? [{ ticker: row.ticker, live: Boolean(deps.quotes) && LIVE_TYPES.has(row.type ?? '') }] : []));
+  const tickers = rows.flatMap((row) => (row.ticker ? [{ ticker: row.ticker, live: Boolean(deps.quotes) && wantsLiveQuote(row.type) }] : []));
+  // A quote is "live" only if it's from today's session (New York); otherwise
+  // (weekends, holidays, a fund's last NAV) the last close is shown.
+  const today = newYorkClock(deps.now()).date;
+  const fromToday = (quote: QuotesResponse['quotes'][number]) => newYorkClock(new Date(quote.time)).date === today;
   const closeTickers = tickers.filter((row) => !row.live).map((row) => row.ticker);
 
-  // Live quotes: cached ones in one query; Finnhub (one request per ticker,
-  // it has no bulk quote) only for the stale ones; the new ones cached in one batch.
+  // Live quotes: cached ones in one query; the stale ones from the provider
+  // (one request for all with Tiingo; one per ticker with Finnhub, which has
+  // no bulk quote); the new ones cached in one batch.
   const live = tickers.filter((row) => row.live).map((row) => row.ticker);
   const cached = await cacheGetMany<QuotesResponse['quotes'][number]>(deps, live.map((ticker) => `quote:${ticker}`));
-  const fresh: [string, QuotesResponse['quotes'][number]][] = [];
-  for (const ticker of live) {
-    let quote = cached.get(`quote:${ticker}`) ?? null;
-    if (!quote && deps.quotes) {
-      try {
-        quote = await deps.quotes.quote(ticker);
-      } catch (error) {
-        console.warn('Quote failed', ticker, error instanceof Error ? error.message : error);
+  const stale = live.filter((ticker) => !cached.has(`quote:${ticker}`));
+  const fetched = new Map<string, QuotesResponse['quotes'][number]>();
+  if (deps.quotes && stale.length > 0) {
+    const provider = deps.quotes;
+    try {
+      if (provider.quotes) {
+        for (const quote of await provider.quotes(stale)) fetched.set(quote.ticker.toUpperCase(), quote);
+      } else {
+        for (const ticker of stale) {
+          const quote = await provider.quote(ticker);
+          if (quote) fetched.set(ticker.toUpperCase(), quote);
+        }
       }
-      if (quote) fresh.push([`quote:${ticker}`, quote]);
+    } catch (error) {
+      console.warn('Quotes failed', error instanceof Error ? error.message : error);
     }
-    if (quote) response.quotes.push(quote);
+  }
+  for (const ticker of live) {
+    const quote = cached.get(`quote:${ticker}`) ?? fetched.get(ticker.toUpperCase()) ?? null;
+    if (quote && fromToday(quote)) response.quotes.push(quote);
     else closeTickers.push(ticker);
   }
-  await cacheSetMany(deps, fresh, QUOTE_TTL_SECONDS);
+  await cacheSetMany(deps, [...fetched].map(([ticker, quote]) => [`quote:${ticker}`, quote]), QUOTE_TTL_SECONDS);
 
   // Latest close per ticker (mutual funds strike NAV once a day). SQLite
   // returns the row that holds max(date) for the bare `close` column.

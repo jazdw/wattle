@@ -24,4 +24,12 @@ describe('config', () => {
     expect(all.quotes).not.toBeNull();
     expect(depsFromEnv({ PLAID_CLIENT_ID: 'c', PLAID_SECRET: 's', PLAID_ENV: 'nonsense' }, {} as Db, () => {}).plaid?.env).toBe('sandbox');
   });
+
+  it('takes live quotes from Tiingo unless QUOTE_PROVIDER picks Finnhub or none', () => {
+    const quotes = (env: Record<string, string>) => depsFromEnv(env, {} as Db, () => {}).quotes;
+    expect(quotes({ TIINGO_API_KEY: 't', FINNHUB_API_KEY: 'f' })?.quotes).toBeTypeOf('function'); // Tiingo: bulk
+    expect(quotes({ TIINGO_API_KEY: 't', FINNHUB_API_KEY: 'f', QUOTE_PROVIDER: 'finnhub' })?.quotes).toBeUndefined(); // Finnhub
+    expect(quotes({ TIINGO_API_KEY: 't', QUOTE_PROVIDER: 'none' })).toBeNull();
+    expect(quotes({ FINNHUB_API_KEY: 'f' })).toBeNull(); // Finnhub only when chosen
+  });
 });
