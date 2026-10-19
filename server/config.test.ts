@@ -32,11 +32,14 @@ describe('config', () => {
     expect(configFromEnv({ QUOTE_CACHE_SECONDS: '0' }).quoteCacheSeconds).toBe(300);
   });
 
-  it('takes live quotes from Tiingo unless QUOTE_PROVIDER picks Finnhub or none', () => {
+  it('takes live quotes from Finnhub when its key is set, else Tiingo; QUOTE_PROVIDER overrides', () => {
     const quotes = (env: Record<string, string>) => depsFromEnv(env, {} as Db, () => {}).quotes;
-    expect(quotes({ TIINGO_API_KEY: 't', FINNHUB_API_KEY: 'f' })?.quotes).toBeTypeOf('function'); // Tiingo: bulk
-    expect(quotes({ TIINGO_API_KEY: 't', FINNHUB_API_KEY: 'f', QUOTE_PROVIDER: 'finnhub' })?.quotes).toBeUndefined(); // Finnhub
-    expect(quotes({ TIINGO_API_KEY: 't', QUOTE_PROVIDER: 'none' })).toBeNull();
-    expect(quotes({ FINNHUB_API_KEY: 'f' })).toBeNull(); // Finnhub only when chosen
+    // Finnhub has no bulk quote (no `quotes` method); Tiingo does.
+    expect(quotes({ TIINGO_API_KEY: 't', FINNHUB_API_KEY: 'f' })?.quotes).toBeUndefined(); // Finnhub by default
+    expect(quotes({ FINNHUB_API_KEY: 'f' })?.quotes).toBeUndefined();
+    expect(quotes({ TIINGO_API_KEY: 't' })?.quotes).toBeTypeOf('function'); // Tiingo without a Finnhub key
+    expect(quotes({ TIINGO_API_KEY: 't', FINNHUB_API_KEY: 'f', QUOTE_PROVIDER: 'tiingo' })?.quotes).toBeTypeOf('function');
+    expect(quotes({ TIINGO_API_KEY: 't', FINNHUB_API_KEY: 'f', QUOTE_PROVIDER: 'none' })).toBeNull();
+    expect(quotes({ TIINGO_API_KEY: 't', QUOTE_PROVIDER: 'finnhub' })).toBeNull(); // chosen but no key
   });
 });

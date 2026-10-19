@@ -126,17 +126,22 @@ The redirect URI is built from the request's origin, so no hostname is configure
 ### Deploy
 Nothing in the repo is specific to one deployment. Everything that is lives in your Cloudflare account or your GitHub repository settings.
 
+Configuration comes in two kinds:
+- **Secrets** (API keys and the like): set once on the Worker with `npx wrangler secret put <NAME>`. Deploys never touch them.
+- **Plain settings** (`PLAID_ENV`, `QUOTE_PROVIDER`, …): GitHub repository variables, passed to the Worker as variables on every deploy by `scripts/deploy.mjs`. Each deploy replaces them all, so the Worker always has exactly what's set; to change one, `gh variable set NAME --body VALUE` and redeploy.
+
 1. **Log in:** `npx wrangler login`.
-2. **Deploy:** `CUSTOM_DOMAIN=wattle.example.com npm run deploy`. It finds the D1 database named `wattle` (creating it the first time), builds with its id, applies migrations and deploys to the domain. The id is never written to the repo: `wrangler.jsonc` keeps a placeholder.
+2. **Deploy:** `CUSTOM_DOMAIN=wattle.example.com PLAID_ENV=sandbox npm run deploy`. It finds the D1 database named `wattle` (creating it the first time), builds with its id, applies migrations and deploys to the domain with the plain settings in the environment. The id is never written to the repo: `wrangler.jsonc` keeps a placeholder.
 3. **Worker secrets:** these persist across deploys. For each `<NAME>`, run `npx wrangler secret put <NAME>`:
    - `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`
    - `TOKEN_ENC_KEY` (generate with `openssl rand -base64 32`)
-   - `PLAID_CLIENT_ID`, `PLAID_SECRET`, `PLAID_ENV` (`sandbox` or `production`)
+   - `PLAID_CLIENT_ID`, `PLAID_SECRET`
    - `TIINGO_API_KEY`, `FINNHUB_API_KEY`
 4. **Who can sign in:** `npm run allow -- add you@gmail.com partner@gmail.com`.
 5. **GitHub Actions** (`.github/workflows/deploy.yml`): every push to `main` typechecks, lints and tests. Once these are set, it also runs `npm run deploy`. Until then the deploy step is skipped.
    - Secret: `CLOUDFLARE_API_TOKEN` (`gh secret set CLOUDFLARE_API_TOKEN`). The "Edit Cloudflare Workers" template, plus Account → D1 → Edit.
    - Variables: `CLOUDFLARE_ACCOUNT_ID` and `CUSTOM_DOMAIN` (`gh variable set NAME --body VALUE`). Not secret, just kept out of the repo.
+   - Plain settings, as variables too: `PLAID_ENV` and any others from the table below.
 
 The nightly job runs from the Cron Trigger. Locally, `npm run daily` triggers it on the dev server.
 
@@ -161,7 +166,7 @@ A second lock in front of the app. Cloudflare's edge only lets your Google accou
    - A Google account that isn't listed should be blocked by Cloudflare.
    - `curl -i -X POST https://<domain>/api/plaid/webhook` should return Wattle Wealth's `401 {"error":"invalid signature"}`. A redirect to `cloudflareaccess.com` means the bypass isn't applying.
 
-6. **Make the app require Access too** (recommended). Access adds a signed token (`Cf-Access-Jwt-Assertion`) to every request it lets through. With these two Worker secrets set, every API request without a valid token is refused, so a misconfigured or removed policy can't expose the app:
+6. **Make the app require Access too** (recommended). Access adds a signed token (`Cf-Access-Jwt-Assertion`) to every request it lets through. With these two settings (GitHub variables, applied on the next deploy), every API request without a valid token is refused, so a misconfigured or removed policy can't expose the app:
    - `ACCESS_TEAM_DOMAIN`: e.g. `<team>.cloudflareaccess.com`
    - `ACCESS_AUD`: the application's **Application Audience (AUD) Tag**, under Access → Applications → your app → Configure → Additional settings
 
@@ -175,12 +180,13 @@ A second lock in front of the app. Cloudflare's edge only lets your Google accou
 | `CUSTOM_DOMAIN` | GitHub variable | Domain to deploy to (`wrangler deploy --domain`) |
 | `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET` | Worker secrets | Google sign-in |
 | `TOKEN_ENC_KEY` | Worker secret | Encrypts Plaid tokens at rest |
-| `PLAID_CLIENT_ID`, `PLAID_SECRET`, `PLAID_ENV` | Worker secrets | Plaid (`sandbox` or `production`) |
-| `TIINGO_API_KEY` | Worker secret | Daily closes, history and live quotes (one bulk request) |
-| `FINNHUB_API_KEY` | Worker secret (optional) | Live quotes from Finnhub instead, with `QUOTE_PROVIDER=finnhub` |
-| `QUOTE_PROVIDER` | Worker secret (optional) | `tiingo` (default with a Tiingo key), `finnhub` or `none` |
-| `QUOTE_CACHE_SECONDS` | Worker secret (optional) | How long a live quote is reused (default `300`). Tiingo's free plan allows 50 requests an hour; lower it on a paid plan |
-| `ACCESS_TEAM_DOMAIN`, `ACCESS_AUD` | Worker secrets (optional) | Require a Cloudflare Access token on API requests |
+| `PLAID_CLIENT_ID`, `PLAID_SECRET` | Worker secrets | Plaid |
+| `PLAID_ENV` | GitHub variable | `sandbox` (default) or `production` |
+| `TIINGO_API_KEY` | Worker secret | Daily closes (mutual funds too), history, ticker lookups; live quotes without Finnhub (50 requests an hour free) |
+| `FINNHUB_API_KEY` | Worker secret (optional) | Live quotes (60 calls a minute free; no mutual funds or history, which come from Tiingo) |
+| `QUOTE_PROVIDER` | GitHub variable (optional) | `finnhub` (default with a Finnhub key), `tiingo` (default otherwise) or `none` |
+| `QUOTE_CACHE_SECONDS` | GitHub variable (optional) | How long a live quote is reused, app-wide (default `300`) |
+| `ACCESS_TEAM_DOMAIN`, `ACCESS_AUD` | GitHub variables (optional) | Require a Cloudflare Access token on API requests |
 | `DEV_LOGIN_EMAILS` | `.dev.vars` only | Local dev sign-in without Google |
 | `FX_PROVIDER=none` | tests only | No live exchange-rate calls |
 

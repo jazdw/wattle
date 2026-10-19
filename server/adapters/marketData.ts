@@ -4,7 +4,8 @@
  *    stock/ETF closes and live quotes in bulk via its IEX endpoint (free
  *    tier is personal use only — fine for Wattle).
  *  - Finnhub: live quotes for US stocks and ETFs, one request per ticker
- *    (kept as an alternative; off unless QUOTE_PROVIDER=finnhub).
+ *    (the default live quote provider when FINNHUB_API_KEY is set; its free
+ *    plan has no mutual funds or daily history, so closes come from Tiingo).
  *  - Frankfurter: daily ECB FX rates, no key.
  * Each implements a port from server/ports.ts so providers can be swapped.
  */
