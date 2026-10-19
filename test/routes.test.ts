@@ -196,6 +196,27 @@ describe('quotes', () => {
     expect(prices.calls.filter((call) => call.startsWith('describe:'))).toHaveLength(asked);
   });
 
+  it('asks a one-ticker-at-a-time provider (Finnhub) for at most 25 per refresh, then the rest', async () => {
+    const tickers = Array.from({ length: 30 }, (_, index) => `T${String(index).padStart(2, '0')}`);
+    const quotes = fakeQuotes(Object.fromEntries(tickers.map((ticker) => [ticker, { price: 10 }])));
+    const plaid = fakePlaid({
+      accounts: [account('brk', 'investment', 1000)],
+      securities: tickers.map((ticker) => security(`s-${ticker}`, ticker, 'equity', 10)),
+      holdings: tickers.map((ticker) => holding('brk', `s-${ticker}`, 1, 10)),
+    });
+    const { deps, api } = await household({ quotes, plaid });
+    await api('/api/plaid/exchange', { method: 'POST', json: { publicToken: 'p', kind: 'investments' } });
+    await flush(deps);
+
+    const first = (await api('/api/quotes')).body;
+    expect(quotes.calls).toHaveLength(25);
+    expect(first.quotes).toHaveLength(25);
+    expect(first.closes.length).toBe(5); // the rest: last close for now
+    const second = (await api('/api/quotes')).body; // the next poll fetches the remaining 5
+    expect(quotes.calls).toHaveLength(30);
+    expect(second.quotes).toHaveLength(30);
+  });
+
   it("shows the last close, not a quote from a previous session (a fund's NAV, a weekend)", async () => {
     const quotes = fakeQuotes({ VTI: { price: 310, time: Date.parse('2026-10-07T20:00:00Z') } }); // yesterday's close
     const prices = fakePrices({ VTI: closes('2026-10-01', 8, 300) });
