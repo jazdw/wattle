@@ -1,6 +1,7 @@
 import { createFinnhub, createFrankfurter, createTiingo, createTiingoQuotes } from './adapters/marketData';
 import { createPlaidClient } from './adapters/plaid';
 import type { Config, Db, Deps } from './ports';
+import { withBackoff } from './services/backoff';
 
 /** Environment variables / secrets, identical on Workers (.dev.vars) and Node (process.env). */
 export interface RawEnv {
@@ -15,12 +16,25 @@ export interface RawEnv {
   FINNHUB_API_KEY?: string;
   /** Live quotes: 'tiingo' (default when TIINGO_API_KEY is set), 'finnhub', or 'none'. */
   QUOTE_PROVIDER?: string;
+  /** How long a live quote is reused, in seconds (default 300). Lower it on a paid market-data plan. */
+  QUOTE_CACHE_SECONDS?: string;
   /** 'none' disables FX fetching (offline tests); default Frankfurter. */
   FX_PROVIDER?: string;
   /** Cloudflare Access team domain (e.g. myteam.cloudflareaccess.com); with ACCESS_AUD enables the token check. */
   ACCESS_TEAM_DOMAIN?: string;
   /** Application Audience (AUD) tag of the Access application. */
   ACCESS_AUD?: string;
+}
+
+/**
+ * Live quotes are reused this long. Tiingo's free plan allows 50 requests an
+ * hour; at 5 minutes an open Holdings page costs at most 12.
+ */
+const DEFAULT_QUOTE_CACHE_SECONDS = 300;
+
+function positiveInteger(value: string | undefined): number | undefined {
+  const number = Number(value);
+  return value && Number.isInteger(number) && number > 0 ? number : undefined;
 }
 
 function list(value: string | undefined): string[] {
@@ -33,6 +47,7 @@ function list(value: string | undefined): string[] {
 export function configFromEnv(env: RawEnv): Config {
   return {
     devLoginEmails: list(env.DEV_LOGIN_EMAILS),
+    quoteCacheSeconds: positiveInteger(env.QUOTE_CACHE_SECONDS) ?? DEFAULT_QUOTE_CACHE_SECONDS,
     googleClientId: env.GOOGLE_CLIENT_ID || undefined,
     googleClientSecret: env.GOOGLE_CLIENT_SECRET || undefined,
     tokenEncKey: env.TOKEN_ENC_KEY || undefined,
@@ -51,7 +66,7 @@ function quoteProvider(env: RawEnv) {
 
 /** Build the dependency set from environment variables and a database. */
 export function depsFromEnv(env: RawEnv, db: Db, background: Deps['background']): Deps {
-  return {
+  const deps: Deps = {
     db,
     config: configFromEnv(env),
     plaid:
@@ -69,4 +84,11 @@ export function depsFromEnv(env: RawEnv, db: Db, background: Deps['background'])
     background,
     sleep: (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
   };
+  // Back off from a provider that says "too many requests". Tiingo's prices
+  // and quotes share one key, so they share one limit.
+  const quoteName = env.QUOTE_PROVIDER === 'finnhub' ? 'finnhub' : 'tiingo';
+  if (deps.prices) deps.prices = withBackoff(deps.prices, 'tiingo', () => deps);
+  if (deps.quotes) deps.quotes = withBackoff(deps.quotes, quoteName, () => deps);
+  if (deps.fx) deps.fx = withBackoff(deps.fx, 'frankfurter', () => deps);
+  return deps;
 }

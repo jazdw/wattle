@@ -16,6 +16,8 @@ export type Db = BaseSQLiteDatabase<'async', any, typeof schema>;
 export interface Config {
   /** LOCAL DEVELOPMENT ONLY: emails that can sign in without Google on a private host. */
   devLoginEmails: string[];
+  /** How long a live quote is reused, in seconds (QUOTE_CACHE_SECONDS; default 300). */
+  quoteCacheSeconds: number;
   googleClientId?: string;
   googleClientSecret?: string;
   /** base64-encoded 32-byte key(s) for encrypting aggregator tokens: "v1:<key>[,v0:<key>]" or just "<key>". */
