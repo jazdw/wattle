@@ -53,9 +53,11 @@ export interface Quote {
   time: number;
 }
 
-/** Live quotes (Finnhub). */
+/** Live quotes (Tiingo by default, or Finnhub). */
 export interface QuoteProvider {
   quote(ticker: string): Promise<Quote | null>;
+  /** Many at once, in as few requests as possible (optional); unknown tickers are left out. */
+  quotes?(tickers: string[]): Promise<Quote[]>;
 }
 
 /** Daily FX rates (Frankfurter / ECB). Returns rate converting 1 `base` into `quote`. */

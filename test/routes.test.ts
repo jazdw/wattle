@@ -139,6 +139,57 @@ describe('quotes', () => {
     await api('/api/quotes');
     expect(quotes.calls).toEqual(['VTI']);
   });
+
+  it('asks a bulk provider (Tiingo) once for all stale tickers', async () => {
+    const calls: string[][] = [];
+    const quotes = {
+      quote: async () => null,
+      quotes: async (tickers: string[]) => {
+        calls.push(tickers);
+        return tickers.map((ticker) => ({ ticker, price: 100, change: 1, changePercent: 0.01, previousClose: 99, time: Date.parse('2026-10-08T15:00:00Z') }));
+      },
+    };
+    const plaid = fakePlaid({
+      accounts: [account('brk', 'investment', 1000)],
+      securities: [security('s-vti', 'VTI', 'etf', 300), security('s-spy', 'SPY', 'etf', 500)],
+      holdings: [holding('brk', 's-vti', 1, 300), holding('brk', 's-spy', 1, 500)],
+    });
+    const { deps, api } = await household({ quotes, plaid });
+    await api('/api/plaid/exchange', { method: 'POST', json: { publicToken: 'p', kind: 'investments' } });
+    await flush(deps);
+
+    const body = (await api('/api/quotes')).body;
+    expect(body.quotes.map((quote: { ticker: string }) => quote.ticker).sort()).toEqual(['SPY', 'VTI']);
+    expect(calls).toHaveLength(1);
+    expect(calls[0].sort()).toEqual(['SPY', 'VTI']);
+    await api('/api/quotes'); // cached for a minute
+    expect(calls).toHaveLength(1);
+  });
+
+  it('gives a public ticker typed into a manual account a live quote too', async () => {
+    const quotes = fakeQuotes({ AAPL: { price: 255 } });
+    const prices = fakePrices({ AAPL: closes('2026-10-01', 8, 250) });
+    const { api, create } = await household({ quotes, prices });
+    const id = await create({ name: 'Brokerage', type: 'investment' });
+    await api(`/api/accounts/${id}/holdings`, { method: 'PUT', json: { holdings: [{ ticker: 'AAPL', quantity: 2 }], version: 0 } });
+    expect((await api('/api/quotes')).body.quotes).toEqual([expect.objectContaining({ ticker: 'AAPL', price: 255 })]);
+  });
+
+  it("shows the last close, not a quote from a previous session (a fund's NAV, a weekend)", async () => {
+    const quotes = fakeQuotes({ VTI: { price: 310, time: Date.parse('2026-10-07T20:00:00Z') } }); // yesterday's close
+    const prices = fakePrices({ VTI: closes('2026-10-01', 8, 300) });
+    const plaid = fakePlaid({
+      accounts: [account('brk', 'investment', 1000)],
+      securities: [security('s-vti', 'VTI', 'etf', 300)],
+      holdings: [holding('brk', 's-vti', 1, 300)],
+    });
+    const { deps, api } = await household({ quotes, prices, plaid });
+    await api('/api/plaid/exchange', { method: 'POST', json: { publicToken: 'p', kind: 'investments' } });
+    await flush(deps);
+    const body = (await api('/api/quotes')).body;
+    expect(body.quotes).toEqual([]);
+    expect(body.closes).toEqual([expect.objectContaining({ ticker: 'VTI', close: 300 })]);
+  });
 });
 
 describe('imports', () => {
