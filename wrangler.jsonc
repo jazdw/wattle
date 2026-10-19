@@ -5,10 +5,12 @@
  *    by name (creating it the first time; scripts/remote-d1.mjs) and builds
  *    with its id (see vite.config.ts). Local development doesn't need one.
  *  - The domain comes from CUSTOM_DOMAIN (a repository secret in CI).
- *  - Settings and secrets are set on the Worker, so deploys never reset them:
+ *  - Secrets are set on the Worker, so deploys never reset them:
  *      npx wrangler secret put <NAME>
  *    GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET, TOKEN_ENC_KEY, PLAID_CLIENT_ID,
- *    PLAID_SECRET, PLAID_ENV, TIINGO_API_KEY, FINNHUB_API_KEY.
+ *    PLAID_SECRET, TIINGO_API_KEY, FINNHUB_API_KEY.
+ *  - Plain settings (PLAID_ENV, QUOTE_PROVIDER, …) are passed as variables
+ *    on each deploy by scripts/deploy.mjs, from GitHub repository variables.
  *  - Who can sign in is kept in the allowed_emails table: npm run allow.
  */
 {

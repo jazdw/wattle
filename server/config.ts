@@ -14,7 +14,7 @@ export interface RawEnv {
   PLAID_ENV?: string;
   TIINGO_API_KEY?: string;
   FINNHUB_API_KEY?: string;
-  /** Live quotes: 'tiingo' (default when TIINGO_API_KEY is set), 'finnhub', or 'none'. */
+  /** Live quotes: 'finnhub' (default when FINNHUB_API_KEY is set), 'tiingo' (default otherwise, with a Tiingo key), or 'none'. */
   QUOTE_PROVIDER?: string;
   /** How long a live quote is reused, in seconds (default 300). Lower it on a paid market-data plan. */
   QUOTE_CACHE_SECONDS?: string;
@@ -56,11 +56,22 @@ export function configFromEnv(env: RawEnv): Config {
   };
 }
 
-/** Live quotes come from Tiingo unless QUOTE_PROVIDER picks Finnhub (or none). */
+/**
+ * Which provider gives live quotes: Finnhub when its key is set (60 calls a
+ * minute free, so quotes needn't eat into Tiingo's 50 an hour), else Tiingo.
+ * QUOTE_PROVIDER overrides ('finnhub', 'tiingo' or 'none').
+ */
+function quoteProviderName(env: RawEnv): 'finnhub' | 'tiingo' | null {
+  const choice = env.QUOTE_PROVIDER ?? (env.FINNHUB_API_KEY ? 'finnhub' : 'tiingo');
+  if (choice === 'finnhub' && env.FINNHUB_API_KEY) return 'finnhub';
+  if (choice === 'tiingo' && env.TIINGO_API_KEY) return 'tiingo';
+  return null;
+}
+
 function quoteProvider(env: RawEnv) {
-  const choice = env.QUOTE_PROVIDER ?? (env.TIINGO_API_KEY ? 'tiingo' : 'none');
-  if (choice === 'tiingo' && env.TIINGO_API_KEY) return createTiingoQuotes(env.TIINGO_API_KEY);
-  if (choice === 'finnhub' && env.FINNHUB_API_KEY) return createFinnhub(env.FINNHUB_API_KEY);
+  const name = quoteProviderName(env);
+  if (name === 'finnhub') return createFinnhub(env.FINNHUB_API_KEY!);
+  if (name === 'tiingo') return createTiingoQuotes(env.TIINGO_API_KEY!);
   return null;
 }
 
@@ -86,9 +97,8 @@ export function depsFromEnv(env: RawEnv, db: Db, background: Deps['background'])
   };
   // Back off from a provider that says "too many requests". Tiingo's prices
   // and quotes share one key, so they share one limit.
-  const quoteName = env.QUOTE_PROVIDER === 'finnhub' ? 'finnhub' : 'tiingo';
   if (deps.prices) deps.prices = withBackoff(deps.prices, 'tiingo', () => deps);
-  if (deps.quotes) deps.quotes = withBackoff(deps.quotes, quoteName, () => deps);
+  if (deps.quotes) deps.quotes = withBackoff(deps.quotes, quoteProviderName(env)!, () => deps);
   if (deps.fx) deps.fx = withBackoff(deps.fx, 'frankfurter', () => deps);
   return deps;
 }

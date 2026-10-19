@@ -66,4 +66,11 @@ jobs:
           CUSTOM_DOMAIN: ${{ vars.CUSTOM_DOMAIN }}
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
+          # Plain app settings, passed to the Worker as variables (unset: default).
+          PLAID_ENV: ${{ vars.PLAID_ENV }}
+          QUOTE_PROVIDER: ${{ vars.QUOTE_PROVIDER }}
+          QUOTE_CACHE_SECONDS: ${{ vars.QUOTE_CACHE_SECONDS }}
+          FX_PROVIDER: ${{ vars.FX_PROVIDER }}
+          ACCESS_TEAM_DOMAIN: ${{ vars.ACCESS_TEAM_DOMAIN }}
+          ACCESS_AUD: ${{ vars.ACCESS_AUD }}
         run: npm run deploy
