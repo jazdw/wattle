@@ -122,6 +122,28 @@ describe('market data', () => {
     await expect(createTiingo('key').latestCloses!(['VTI'])).rejects.toThrow('HTTP 403');
   });
 
+  it('Tiingo: describes a ticker from its search, preferring the US listing', async () => {
+    const requests = stubFetch((url) =>
+      Response.json(
+        url.includes('query=VTI')
+          ? [
+              { ticker: 'VTI', name: 'Vanguard Total Stock Market ETF', assetType: 'ETF', countryCode: 'US' },
+              { ticker: 'VTI', name: 'Visionstate Corp', assetType: 'Stock', countryCode: 'CA' },
+              { ticker: 'VTIP', name: 'Vanguard Short-Term Inflation-Protected', assetType: 'ETF', countryCode: 'US' },
+            ]
+          : url.includes('query=VTSAX')
+            ? [{ ticker: 'VTSAX', name: 'Vanguard Total Stock Market Index Admiral', assetType: 'Mutual Fund', countryCode: 'US' }]
+            : [{ ticker: 'NOPEX', name: 'Something else', assetType: 'Stock', countryCode: 'US' }],
+      ),
+    );
+    const tiingo = createTiingo('key');
+    expect(await tiingo.describe!('VTI')).toEqual({ type: 'etf', name: 'Vanguard Total Stock Market ETF' });
+    expect(await tiingo.describe!('vtsax')).toEqual({ type: 'mutual fund', name: 'Vanguard Total Stock Market Index Admiral' });
+    expect(await tiingo.describe!('ZZZZ')).toBeNull(); // no exact match
+    expect(requests[0].url).toBe('https://api.tiingo.com/tiingo/utilities/search?query=VTI&limit=10');
+    expect(requests[0].headers.get('authorization')).toBe('Token key');
+  });
+
   it('Tiingo: live quotes for many tickers in one request', async () => {
     const requests = stubFetch(() =>
       Response.json([

@@ -41,6 +41,13 @@ export interface PriceProvider {
    * dailyCloses for those.
    */
   latestCloses?(tickers: string[]): Promise<Map<string, DailyClose>>;
+  /** What a ticker is (optional): its kind of security and name; null when unknown. */
+  describe?(ticker: string): Promise<SecurityDescription | null>;
+}
+
+export interface SecurityDescription {
+  type: 'equity' | 'etf' | 'mutual fund';
+  name: string | null;
 }
 
 export interface Quote {

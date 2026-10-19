@@ -62,6 +62,21 @@ describe('Holdings page', () => {
     expect(sent('PATCH /api/securities/s-plan')[0].body).toEqual({ classification: { categories: { us_bond: 1 } } });
   });
 
+  it('lets you set the type of a security you entered', async () => {
+    server.use(
+      http.get('*/api/portfolio', () =>
+        HttpResponse.json({ ...portfolio(), holdings: portfolio().holdings.map((row) => (row.ticker === 'VTI' ? { ...row, typeEditable: true } : row)) }),
+      ),
+    );
+    const { user } = renderPage(<Holdings />);
+    const vti = (await screen.findByText('VTI')).closest('tr') as HTMLElement;
+    await user.click(within(vti).getByRole('button', { name: 'US stocks' }));
+    const dialog = await screen.findByRole('dialog', { name: 'Classify VTI' });
+    await user.selectOptions(within(dialog).getByRole('combobox', { name: /^Type/ }), 'Mutual fund');
+    await user.click(within(dialog).getByRole('button', { name: 'Save' }));
+    await expect.poll(() => (sent('PATCH /api/securities/s-vti')[0]?.body as { type?: string })?.type).toBe('mutual fund');
+  });
+
   it('works without live quotes', async () => {
     server.use(http.get('*/api/quotes', () => HttpResponse.json({ quotes: [], closes: [] })));
     renderPage(<Holdings />);

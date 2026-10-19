@@ -70,8 +70,13 @@ export const manualHoldingsSchema = z.object({
   version: z.number().int().min(0),
 });
 
+/** Kinds of security you can set on one you entered (null: something else). */
+export const SECURITY_TYPES = ['equity', 'etf', 'mutual fund'] as const;
+
 export const securityPatchSchema = z.object({
   classification: classificationSchema,
+  /** Only for securities entered by hand: an institution's type comes from it on every sync. */
+  type: z.enum(SECURITY_TYPES).nullable().optional(),
 });
 
 export const targetSchema = z.object({

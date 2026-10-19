@@ -118,6 +118,8 @@ export interface HoldingRow {
   ticker: string | null;
   name: string | null;
   type: string | null;
+  /** Entered by hand (not from an institution), so you can set its type. */
+  typeEditable: boolean;
   isPublic: boolean;
   quantity: number;
   /** Unit price in native currency. */

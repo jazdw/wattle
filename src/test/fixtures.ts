@@ -75,6 +75,7 @@ function holding(overrides: Partial<HoldingRow>): HoldingRow {
     ticker: null,
     name: null,
     type: 'etf',
+    typeEditable: false,
     isPublic: true,
     quantity: 1,
     price: 1,

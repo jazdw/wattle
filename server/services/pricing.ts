@@ -9,7 +9,7 @@ import type { Currency, FxRates } from '../../shared/money';
 import type { BatchItem } from 'drizzle-orm/batch';
 import { chunkRows, inChunks, runAtomic } from '../db/batch';
 import { fxDaily, priceRuns, pricesDaily, type PriceCall, type PriceChange } from '../db/schema';
-import type { DailyClose, Deps } from '../ports';
+import type { DailyClose, Deps, SecurityDescription } from '../ports';
 import { cacheGet, cacheGetMany, cacheSet, cacheSetMany } from './cache';
 
 /** Look back this far for the last close before a range starts. */
@@ -269,6 +269,39 @@ export async function ensureCloses(deps: Deps, tickers: string[], start: IsoDate
   }
   await saveFetchedCloses(deps, run, rows);
   await cacheSetMany(deps, newlyUnknown.map((ticker) => [unknownKey(ticker), true]), UNKNOWN_TTL_SECONDS);
+}
+
+/** Remember what a ticker is for a month (it rarely changes). */
+const DESCRIBE_TTL_SECONDS = 30 * 24 * 3600;
+const describeKey = (ticker: string) => `describe:${ticker}`;
+/** US mutual fund tickers are five letters ending in X (VTSAX, VFFVX): a convention, used only as a fallback. */
+const LOOKS_LIKE_US_FUND = /^[A-Z]{4}X$/;
+
+/**
+ * What each ticker is (stock, ETF or mutual fund) and its name, for tickers
+ * entered by hand. Asks the price provider once per ticker (cached), falling
+ * back to the naming convention; tickers it can't tell are left out.
+ */
+export async function describeTickers(deps: Deps, tickers: string[]): Promise<Map<string, SecurityDescription>> {
+  const unique = normalise(tickers);
+  const found = await cacheGetMany<SecurityDescription | false>(deps, unique.map(describeKey));
+  const result = new Map<string, SecurityDescription>();
+  const learned: [string, SecurityDescription | false][] = [];
+  for (const ticker of unique) {
+    let description = found.get(describeKey(ticker));
+    if (description === undefined && deps.prices?.describe) {
+      try {
+        description = (await deps.prices.describe(ticker)) ?? false;
+        learned.push([describeKey(ticker), description]);
+      } catch (error) {
+        console.warn('Ticker lookup failed', ticker, error instanceof Error ? error.message : error);
+      }
+    }
+    if (description) result.set(ticker, description);
+    else if (LOOKS_LIKE_US_FUND.test(ticker)) result.set(ticker, { type: 'mutual fund', name: null });
+  }
+  await cacheSetMany(deps, learned, DESCRIBE_TTL_SECONDS);
+  return result;
 }
 
 export type CloseLookup = (ticker: string, date: IsoDate) => number | null;
