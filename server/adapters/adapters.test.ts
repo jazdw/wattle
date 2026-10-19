@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { createFinnhub, createFrankfurter, createTiingo } from './marketData';
+import { createFinnhub, createFrankfurter, createTiingo, createTiingoQuotes } from './marketData';
 import { createPlaidClient, PlaidApiError } from './plaid';
 
 /** Record requests and answer from a handler. */
@@ -120,6 +120,27 @@ describe('market data', () => {
     expect(requests).toHaveLength(2);
     stubFetch(() => new Response('', { status: 403 }));
     await expect(createTiingo('key').latestCloses!(['VTI'])).rejects.toThrow('HTTP 403');
+  });
+
+  it('Tiingo: live quotes for many tickers in one request', async () => {
+    const requests = stubFetch(() =>
+      Response.json([
+        { ticker: 'VTI', timestamp: '2026-10-19T10:39:50-04:00', tngoLast: 375.86, prevClose: 374.07 },
+        { ticker: 'SPY', timestamp: '2026-10-19T10:39:49-04:00', tngoLast: 767.26, prevClose: null },
+        { ticker: 'AAPL', timestamp: '2026-10-19T10:39:49-04:00', tngoLast: 1, prevClose: 1 }, // not asked for
+      ]),
+    );
+    const quotes = await createTiingoQuotes('key').quotes!(['vti', 'SPY']);
+    expect(requests).toHaveLength(1);
+    expect(requests[0].url).toBe('https://api.tiingo.com/iex/?tickers=vti%2Cspy');
+    expect(requests[0].headers.get('authorization')).toBe('Token key');
+    expect(quotes).toEqual([
+      { ticker: 'VTI', price: 375.86, change: expect.closeTo(1.79, 5), changePercent: expect.closeTo(1.79 / 374.07, 6), previousClose: 374.07, time: Date.parse('2026-10-19T14:39:50Z') },
+      // No previous close: no change rather than a made-up one.
+      { ticker: 'SPY', price: 767.26, change: 0, changePercent: 0, previousClose: 767.26, time: Date.parse('2026-10-19T14:39:49Z') },
+    ]);
+    stubFetch(() => Response.json([]));
+    expect(await createTiingoQuotes('key').quote('ZZZ')).toBeNull();
   });
 
   it('Finnhub: quotes, unknown symbols, errors', async () => {

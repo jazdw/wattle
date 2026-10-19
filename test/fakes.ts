@@ -202,7 +202,8 @@ export function fakeQuotes(quotes: Record<string, Partial<Quote>>): QuoteProvide
     async quote(ticker) {
       calls.push(ticker);
       const quote = quotes[ticker];
-      return quote ? { ticker, price: 0, change: 0, changePercent: 0, previousClose: 0, time: 0, ...quote } : null;
+      // Stamped during the test day's session (tests run at 22:00 New York, 8 Oct).
+      return quote ? { ticker, price: 0, change: 0, changePercent: 0, previousClose: 0, time: Date.parse('2026-10-08T15:00:00Z'), ...quote } : null;
     },
   };
 }

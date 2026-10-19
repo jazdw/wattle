@@ -1,9 +1,10 @@
 /**
  * Market-data adapters:
  *  - Tiingo: end-of-day closes, including mutual fund NAVs, and latest
- *    stock/ETF closes in bulk via its IEX endpoint (free tier is personal use
- *    only — fine for Wattle).
- *  - Finnhub: live quotes for US stocks and ETFs.
+ *    stock/ETF closes and live quotes in bulk via its IEX endpoint (free
+ *    tier is personal use only — fine for Wattle).
+ *  - Finnhub: live quotes for US stocks and ETFs, one request per ticker
+ *    (kept as an alternative; off unless QUOTE_PROVIDER=finnhub).
  *  - Frankfurter: daily ECB FX rates, no key.
  * Each implements a port from server/ports.ts so providers can be swapped.
  */
@@ -35,24 +36,66 @@ export function createTiingo(apiKey: string): PriceProvider {
     // on IEX; callers fetch those one at a time with dailyCloses.
     async latestCloses(tickers) {
       const closes = new Map<string, DailyClose>();
-      for (let index = 0; index < tickers.length; index += BULK_TICKERS) {
-        const chunk = tickers.slice(index, index + BULK_TICKERS).map((ticker) => ticker.toUpperCase());
-        const params = new URLSearchParams({ tickers: chunk.join(',').toLowerCase() });
-        const response = await fetch(`https://api.tiingo.com/iex/?${params}`, {
-          headers: { 'content-type': 'application/json', authorization: `Token ${apiKey}` },
-        });
-        if (!response.ok) throw new Error(`Tiingo IEX: HTTP ${response.status}`);
-        const rows = (await response.json()) as { ticker?: string; timestamp?: string; tngoLast?: number | null }[];
-        // Filter to what was asked for, in case the whole market comes back.
-        const wanted = new Set(chunk);
-        for (const row of rows) {
-          const ticker = row.ticker?.toUpperCase();
-          if (!ticker || !wanted.has(ticker) || typeof row.tngoLast !== 'number' || !row.timestamp) continue;
-          const clock = newYorkClock(new Date(row.timestamp));
-          if (clock.minutes >= MARKET_CLOSE_MINUTES) closes.set(ticker, { date: clock.date, close: row.tngoLast });
-        }
+      for (const row of await tiingoIex(apiKey, tickers)) {
+        const clock = newYorkClock(new Date(row.timestamp));
+        if (clock.minutes >= MARKET_CLOSE_MINUTES) closes.set(row.ticker, { date: clock.date, close: row.tngoLast });
       }
       return closes;
+    },
+  };
+}
+
+interface IexRow {
+  ticker: string;
+  timestamp: string;
+  /** Tiingo's latest price: the last trade, or the bid/ask midpoint on the free tier. */
+  tngoLast: number;
+  prevClose: number | null;
+}
+
+/** Tiingo's IEX endpoint for many tickers, in as few requests as possible. */
+async function tiingoIex(apiKey: string, tickers: string[]): Promise<IexRow[]> {
+  const found: IexRow[] = [];
+  for (let index = 0; index < tickers.length; index += BULK_TICKERS) {
+    const chunk = tickers.slice(index, index + BULK_TICKERS).map((ticker) => ticker.toUpperCase());
+    const params = new URLSearchParams({ tickers: chunk.join(',').toLowerCase() });
+    const response = await fetch(`https://api.tiingo.com/iex/?${params}`, {
+      headers: { 'content-type': 'application/json', authorization: `Token ${apiKey}` },
+    });
+    if (!response.ok) throw new Error(`Tiingo IEX: HTTP ${response.status}`);
+    const rows = (await response.json()) as { ticker?: string; timestamp?: string; tngoLast?: number | null; prevClose?: number | null }[];
+    // Filter to what was asked for, in case the whole market comes back.
+    const wanted = new Set(chunk);
+    for (const row of rows) {
+      const ticker = row.ticker?.toUpperCase();
+      if (!ticker || !wanted.has(ticker) || typeof row.tngoLast !== 'number' || !row.timestamp) continue;
+      found.push({ ticker, timestamp: row.timestamp, tngoLast: row.tngoLast, prevClose: row.prevClose ?? null });
+    }
+  }
+  return found;
+}
+
+/** Live stock/ETF quotes from Tiingo: one request for all tickers. */
+export function createTiingoQuotes(apiKey: string): QuoteProvider {
+  const toQuote = (row: IexRow): Quote => {
+    const previousClose = row.prevClose ?? row.tngoLast;
+    const change = row.tngoLast - previousClose;
+    return {
+      ticker: row.ticker,
+      price: row.tngoLast,
+      change,
+      changePercent: previousClose ? change / previousClose : 0,
+      previousClose,
+      time: Date.parse(row.timestamp),
+    };
+  };
+  return {
+    async quote(ticker) {
+      const [row] = await tiingoIex(apiKey, [ticker]);
+      return row ? toQuote(row) : null;
+    },
+    async quotes(tickers) {
+      return (await tiingoIex(apiKey, tickers)).map(toQuote);
     },
   };
 }

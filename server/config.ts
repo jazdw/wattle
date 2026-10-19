@@ -1,4 +1,4 @@
-import { createFinnhub, createFrankfurter, createTiingo } from './adapters/marketData';
+import { createFinnhub, createFrankfurter, createTiingo, createTiingoQuotes } from './adapters/marketData';
 import { createPlaidClient } from './adapters/plaid';
 import type { Config, Db, Deps } from './ports';
 
@@ -13,6 +13,8 @@ export interface RawEnv {
   PLAID_ENV?: string;
   TIINGO_API_KEY?: string;
   FINNHUB_API_KEY?: string;
+  /** Live quotes: 'tiingo' (default when TIINGO_API_KEY is set), 'finnhub', or 'none'. */
+  QUOTE_PROVIDER?: string;
   /** 'none' disables FX fetching (offline tests); default Frankfurter. */
   FX_PROVIDER?: string;
   /** Cloudflare Access team domain (e.g. myteam.cloudflareaccess.com); with ACCESS_AUD enables the token check. */
@@ -39,6 +41,14 @@ export function configFromEnv(env: RawEnv): Config {
   };
 }
 
+/** Live quotes come from Tiingo unless QUOTE_PROVIDER picks Finnhub (or none). */
+function quoteProvider(env: RawEnv) {
+  const choice = env.QUOTE_PROVIDER ?? (env.TIINGO_API_KEY ? 'tiingo' : 'none');
+  if (choice === 'tiingo' && env.TIINGO_API_KEY) return createTiingoQuotes(env.TIINGO_API_KEY);
+  if (choice === 'finnhub' && env.FINNHUB_API_KEY) return createFinnhub(env.FINNHUB_API_KEY);
+  return null;
+}
+
 /** Build the dependency set from environment variables and a database. */
 export function depsFromEnv(env: RawEnv, db: Db, background: Deps['background']): Deps {
   return {
@@ -53,7 +63,7 @@ export function depsFromEnv(env: RawEnv, db: Db, background: Deps['background'])
           })
         : null,
     prices: env.TIINGO_API_KEY ? createTiingo(env.TIINGO_API_KEY) : null,
-    quotes: env.FINNHUB_API_KEY ? createFinnhub(env.FINNHUB_API_KEY) : null,
+    quotes: quoteProvider(env),
     fx: env.FX_PROVIDER === 'none' ? null : createFrankfurter(),
     now: () => new Date(),
     background,
