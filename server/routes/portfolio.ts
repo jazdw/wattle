@@ -197,6 +197,8 @@ portfolioRoutes.put('/targets', async (c) => {
  */
 const LIVE_TYPES = new Set(['equity', 'etf']);
 const wantsLiveQuote = (type: string | null) => type !== null && LIVE_TYPES.has(type);
+/** Per page refresh, for providers with no bulk quote. */
+const MAX_SINGLE_QUOTES_PER_REQUEST = 25;
 
 portfolioRoutes.get('/quotes', async (c) => {
   const deps = c.env.deps;
@@ -229,7 +231,11 @@ portfolioRoutes.get('/quotes', async (c) => {
       if (provider.quotes) {
         for (const quote of await provider.quotes(stale)) fetched.set(quote.ticker.toUpperCase(), quote);
       } else {
-        for (const ticker of stale) {
+        // One request per ticker (Finnhub): at most a batch per page refresh,
+        // so many tickers never burst past Finnhub's 30 a second or Workers'
+        // 50 outbound requests per invocation. The rest show their previous
+        // quote or last close, and refresh on the page's next poll.
+        for (const ticker of stale.slice(0, MAX_SINGLE_QUOTES_PER_REQUEST)) {
           const quote = await provider.quote(ticker);
           if (quote) fetched.set(ticker.toUpperCase(), quote);
         }
