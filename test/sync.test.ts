@@ -208,6 +208,32 @@ describe('ongoing sync', () => {
   });
 });
 
+describe('market pricing', () => {
+  it('prices stocks and ETFs from market data even without a close from Plaid, but not private funds', async () => {
+    const plaid = fakePlaid({
+      accounts: [account('k', 'investment', 1000, { subtype: '401k' })],
+      securities: [
+        security('s-stock', 'SBSI', 'equity', null),
+        security('s-etf', 'EWZ', 'etf', null),
+        security('s-fund', 'PLANFUND', 'mutual fund', null), // a 401(k) trust
+        security('s-listed-fund', 'VTSAX', 'mutual fund', 150), // Plaid gave a close
+        security('s-cash', 'CUR:USD', 'cash', 1),
+      ],
+      holdings: [holding('k', 's-stock', 1, 34), holding('k', 's-etf', 1, 41), holding('k', 's-fund', 1, 20), holding('k', 's-listed-fund', 1, 150)],
+    });
+    const { deps } = await linked(plaid);
+    const rows = await deps.db.select({ ticker: schema.securities.ticker, isPublic: schema.securities.isPublic, lastPrice: schema.securities.lastPrice }).from(schema.securities);
+    const byTicker = new Map(rows.map((row) => [row.ticker, row]));
+    expect(byTicker.get('SBSI')?.isPublic).toBe(true);
+    expect(byTicker.get('EWZ')?.isPublic).toBe(true);
+    expect(byTicker.get('PLANFUND')?.isPublic).toBe(false);
+    expect(byTicker.get('VTSAX')?.isPublic).toBe(true);
+    expect(byTicker.get('CUR:USD')?.isPublic).toBe(false);
+    // Without a close from Plaid, the institution's price is kept as the fallback.
+    expect(byTicker.get('SBSI')?.lastPrice).toBe(34);
+  });
+});
+
 describe('disconnecting', () => {
   it('keeps accounts as manual ones by default', async () => {
     const { deps, api, plaid, connection } = await linked();
