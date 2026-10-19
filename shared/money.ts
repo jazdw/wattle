@@ -10,6 +10,15 @@ export function isCurrency(value: unknown): value is Currency {
   return typeof value === 'string' && (CURRENCIES as readonly string[]).includes(value);
 }
 
+/** A currency's English name from its ISO 4217 code ("USD" → "US Dollar"); the code if unknown. */
+export function currencyName(code: string): string {
+  try {
+    return new Intl.DisplayNames(['en'], { type: 'currency' }).of(code.toUpperCase()) ?? code;
+  } catch {
+    return code;
+  }
+}
+
 export function toMinor(amount: number): number {
   return Math.round(amount * 100);
 }

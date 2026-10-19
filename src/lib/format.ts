@@ -29,8 +29,9 @@ export function relativeTime(epochMs: number | null): string {
   return `${Math.round(hours / 24)}d ago`;
 }
 
+/** Units held, in full: fractional shares (and crypto) to 6 places, 8 below one unit; no trailing zeros. */
 export function quantity(value: number): string {
-  return new Intl.NumberFormat('en-US', { maximumFractionDigits: value < 10 ? 4 : 2 }).format(value);
+  return new Intl.NumberFormat('en-US', { maximumFractionDigits: Math.abs(value) < 1 ? 8 : 6 }).format(value);
 }
 
 /** Positive/negative colour class for changes. */

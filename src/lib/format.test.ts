@@ -8,8 +8,12 @@ describe('format helpers', () => {
     expect(money(1_00, 'USD')).toBe('$1');
     expect(shortDate('2026-10-08')).toMatch(/Oct\s+8/);
     expect(longDate('2026-10-08')).toMatch(/2026/);
-    expect(quantity(1.23456)).toBe('1.2346');
-    expect(quantity(1234.5678)).toBe('1,234.57');
+    // Fractional shares in full: 6 places, 8 below one unit (crypto), no trailing zeros.
+    expect(quantity(1.23456)).toBe('1.23456');
+    expect(quantity(1234.5678)).toBe('1,234.5678');
+    expect(quantity(643.80867509953123)).toBe('643.808675');
+    expect(quantity(0.00293644)).toBe('0.00293644');
+    expect(quantity(213)).toBe('213');
     expect(changeClass(1)).toBe('text-positive');
     expect(changeClass(-1)).toBe('text-negative');
     expect(changeClass(0)).toBe('text-muted-foreground');

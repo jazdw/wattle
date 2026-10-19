@@ -5,13 +5,14 @@
 import { and, eq } from 'drizzle-orm';
 import { categoryTotals, styleBreakdown, type Position } from '../../shared/allocation';
 import { marketDate } from '../../shared/dates';
-import { convertMinor, isCurrency, type Currency, type FxRates } from '../../shared/money';
+import { convertMinor, currencyName, isCurrency, type Currency, type FxRates } from '../../shared/money';
 import type { Category, Classification } from '../../shared/taxonomy';
 import type { HoldingRow, PortfolioResponse } from '../../shared/types';
 import { accounts, holdings, securities, targets } from '../db/schema';
 import type { Tenant } from '../db/tenant';
 import type { Deps } from '../ports';
 import { closeLookup, fxLookup } from './pricing';
+import { isCashSecurity } from './valuation';
 
 const LIABILITY_TYPES = new Set(['credit', 'loan']);
 
@@ -95,10 +96,14 @@ export async function loadPortfolio(deps: Deps, tenant: Tenant, currency: Curren
     const classification = row.classification ?? { categories: { other: 1 } };
     addPosition(row.accountId, value, classification);
 
+    // Cash positions: institutions name them inconsistently (Plaid: "U S
+    // Dollar", no ticker), so show the ISO 4217 code and its name instead,
+    // for any currency. Plaid's CUR:XXX ticker names the currency when given.
+    const cashCode = isCashSecurity(row) ? (row.ticker?.startsWith('CUR:') ? row.ticker.slice(4) : row.currency).toUpperCase() : null;
     const entry = aggregated.get(row.securityId) ?? {
       securityId: row.securityId,
-      ticker: row.ticker,
-      name: row.name,
+      ticker: cashCode ?? row.ticker,
+      name: cashCode ? `${currencyName(cashCode)} (cash)` : row.name,
       type: row.type,
       isPublic: row.isPublic,
       quantity: 0,
