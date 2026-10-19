@@ -161,8 +161,8 @@ export function Growth() {
                   <Td className="text-right">{money(row.first, currency)}</Td>
                   <Td className="text-right font-medium">{money(row.last, currency)}</Td>
                   <Td className={`text-right ${changeClass(row.change)}`}>
-                    {money(row.change, currency, { signed: true })}
-                    <span className="ml-1 text-xs">({formatPercent(row.percent, 1, true)})</span>
+                    {money(row.change, currency)}
+                    <span className="ml-1 text-xs">({formatPercent(row.percent, 1)})</span>
                   </Td>
                 </tr>
               ))}
