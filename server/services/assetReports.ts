@@ -47,12 +47,13 @@ export async function collectPendingReport(
       throw error;
     }
     // Plaid couldn't build the report: give up on it (CSV import instead).
+    // Investment history, if the login has it, was loaded already.
     run.fail(error);
     await lease.renew();
     await runAtomic(tenant.db, [
       tenant.db
         .update(connections)
-        .set({ assetReportTokenEnc: null, assetReportId: null, backfillStatus: 'failed' })
+        .set({ assetReportTokenEnc: null, assetReportId: null, backfillStatus: connection.hasInvestments ? 'done' : 'failed' })
         .where(tenant.scope(connections, eq(connections.id, connection.id))),
       run.statement(),
     ]);
