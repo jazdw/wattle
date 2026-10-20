@@ -51,3 +51,40 @@ export const ACCOUNT_TYPE_LABELS: Record<string, string> = {
 };
 
 export const ACCOUNT_TYPE_ORDER = ['depository', 'investment', 'property', 'other', 'credit', 'loan'];
+
+/** Plaid subtypes whose plain capitalisation reads wrong. */
+const SUBTYPE_LABELS: Record<string, string> = {
+  '401a': '401(a)',
+  '401k': '401(k)',
+  '403b': '403(b)',
+  '457b': '457(b)',
+  '529': '529 plan',
+  roth: 'Roth IRA',
+  'roth 401k': 'Roth 401(k)',
+  student: 'Student loan',
+  auto: 'Auto loan',
+  'non-taxable brokerage account': 'Non-taxable brokerage',
+};
+/** Abbreviations kept in capitals (CD, IRA, HSA, SEP IRA, RRSP, …). */
+const ACRONYMS = new Set(['cd', 'ira', 'hsa', 'hra', 'sep', 'sarsep', 'simple', 'ugma', 'utma', 'esa', 'tsp', 'nqdc', 'ebt', 'gic', 'isa', 'sipp', 'rrsp', 'rrif', 'tfsa', 'resp', 'rdsp', 'lira', 'lif', 'lrif', 'lrsp', 'prif', 'rlif']);
+const TYPE_KIND: Record<string, string> = {
+  depository: 'Bank account',
+  investment: 'Investments',
+  property: 'Property',
+  credit: 'Credit',
+  loan: 'Loan',
+  other: 'Other',
+};
+
+/** An account's kind for display: "Checking", "401(k)", "Roth IRA", or its type when there's no subtype. */
+export function accountKind(type: string, subtype: string | null): string {
+  if (!subtype) return TYPE_KIND[type] ?? sentence(type);
+  const known = SUBTYPE_LABELS[subtype.toLowerCase()];
+  if (known) return known;
+  const words = subtype.toLowerCase().split(' ').map((word) => (ACRONYMS.has(word) ? word.toUpperCase() : word));
+  return sentence(words.join(' '));
+}
+
+function sentence(text: string): string {
+  return text.charAt(0).toUpperCase() + text.slice(1);
+}
