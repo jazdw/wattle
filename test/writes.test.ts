@@ -48,6 +48,9 @@ const REVIEWED: Record<string, Record<string, string>> = {
     accounts: 'manual balances from holdings: snapshot lease, atomic with the rows',
   },
   'server/services/lease.ts': { leases: 'the lease itself: conditional upserts and holder-checked updates' },
+  'server/services/securityTypes.ts': {
+    securities: 'nightly: fills type (and a ticker-only name) of hand-entered securities only where still unset; one batch',
+  },
   'server/services/activity.ts': {
     syncRuns: 'log rows, written in the batch of the change they record (or alone for skipped/failed runs)',
     priceRuns: 'pruning old entries',

@@ -12,6 +12,7 @@ import { addDays, marketDate } from '../../shared/dates';
 import { pruneLogs } from './activity';
 import { cachePrune } from './cache';
 import { ensureFx } from './pricing';
+import { typeHandEnteredSecurities } from './securityTypes';
 import { snapshotHousehold } from './snapshots';
 import { activeConnections, syncConnection } from './sync';
 
@@ -41,6 +42,11 @@ export async function runDaily(deps: Deps): Promise<DailyReport> {
       } catch (error) {
         errors.push(`sync ${connection.id}: ${error instanceof Error ? error.message : String(error)}`);
       }
+    }
+    try {
+      await typeHandEnteredSecurities(deps, tenant);
+    } catch (error) {
+      errors.push(`types ${id}: ${error instanceof Error ? error.message : String(error)}`);
     }
     try {
       await snapshotHousehold(deps, tenant, date);
