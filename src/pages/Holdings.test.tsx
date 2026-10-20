@@ -26,7 +26,7 @@ describe('Holdings page', () => {
     expect(within(vtiax).queryByLabelText('Live')).not.toBeInTheDocument(); // a last close isn't live
     expect(within(vti).getByText('ETF')).toBeInTheDocument(); // type beside the ticker
     expect(within(vtiax).getByText('Mutual fund')).toBeInTheDocument();
-    expect(within(vtiax).getByTitle(/^Net asset value on /)).toHaveTextContent(/^NAV · /); // a fund's price is its NAV
+    expect(within(vtiax).getByTitle(/^Net asset value on /)).toHaveTextContent(/ \(NAV\)$/); // a fund's price is its NAV
 
     // Header total: day change across live-quoted holdings.
     const todays = screen.getByText("Today's change").closest('div') as HTMLElement;

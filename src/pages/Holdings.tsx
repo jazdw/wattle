@@ -196,8 +196,8 @@ export function Holdings() {
                           {!quote && close && (
                             // A fund's price is its NAV, struck once a day after the close.
                             <p className="whitespace-nowrap text-xs text-muted-foreground" title={`${holding.type === 'mutual fund' ? 'Net asset value' : 'Close'} on ${longDate(close.date)}`}>
-                              {holding.type === 'mutual fund' && 'NAV · '}
                               {shortDate(close.date)}
+                              {holding.type === 'mutual fund' && ' (NAV)'}
                             </p>
                           )}
                         </Td>
