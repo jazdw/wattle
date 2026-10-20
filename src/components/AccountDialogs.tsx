@@ -8,7 +8,7 @@ import type { AccountSummary } from '../../shared/types';
 import { api } from '../api';
 import { useAuth } from '../hooks/useAuth';
 import { extractBalances, parseCsv, PRESETS, type BalanceMapping, type DateFormat } from '../lib/csv';
-import { longDate, money } from '../lib/format';
+import { accountKind, longDate, money } from '../lib/format';
 import { Button } from './ui/button';
 import { Dialog, DialogContent } from './ui/dialog';
 import { Field, Input, NativeSelect } from './ui/input';
@@ -217,7 +217,7 @@ export function EditAccountDialog({
 
   return (
     <Dialog open onOpenChange={(open) => !open && onClose()}>
-      <DialogContent title={account.name} description={[account.institutionName, account.mask && `··${account.mask}`, account.subtype].filter(Boolean).join(' · ')}>
+      <DialogContent title={account.name} description={[account.institutionName, account.mask && `··${account.mask}`, accountKind(account.type, account.subtype)].filter(Boolean).join(' · ')}>
         <div className="grid gap-3 sm:grid-cols-2">
           <Field label="Name">
             <Input value={form.name} onChange={(event) => setForm({ ...form, name: event.target.value })} />

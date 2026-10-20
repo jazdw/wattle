@@ -13,7 +13,7 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '../co
 import { Alert, Skeleton } from '../components/ui/misc';
 import { useAccounts, useConnections } from '../hooks/queries';
 import { useAuth, useOwnerName } from '../hooks/useAuth';
-import { money, relativeTime } from '../lib/format';
+import { accountKind, money, relativeTime } from '../lib/format';
 
 const STATUS_TEXT: Record<ConnectionSummary['status'], string> = {
   ok: 'Connected',
@@ -244,7 +244,7 @@ function AccountList({
               {account.mask && <span className="font-normal text-muted-foreground">··{account.mask}</span>}
             </p>
             <p className="flex flex-wrap items-center gap-1.5 text-xs text-muted-foreground">
-              {account.subtype ?? account.type}
+              {accountKind(account.type, account.subtype)}
               <Badge variant={account.ownerUserId ? 'outline' : 'gold'}>{ownerName(account.ownerUserId)}</Badge>
               {account.isHidden && <Badge variant="outline">Hidden — not synced or counted</Badge>}
               {account.missingSince && !account.isHidden && (
