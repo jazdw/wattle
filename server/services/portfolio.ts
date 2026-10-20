@@ -56,6 +56,8 @@ export async function loadPortfolio(deps: Deps, tenant: Tenant, currency: Curren
       costBasis: holdings.costBasis,
       currency: holdings.currency,
       ticker: securities.ticker,
+      cusip: securities.cusip,
+      isin: securities.isin,
       name: securities.name,
       type: securities.type,
       externalId: securities.externalId,
@@ -104,6 +106,8 @@ export async function loadPortfolio(deps: Deps, tenant: Tenant, currency: Curren
     const entry = aggregated.get(row.securityId) ?? {
       securityId: row.securityId,
       ticker: cashCode ?? row.ticker,
+      cusip: row.cusip,
+      isin: row.isin,
       name: cashCode ? `${currencyName(cashCode)} (cash)` : row.name,
       type: row.type,
       typeEditable: row.externalId === null,
