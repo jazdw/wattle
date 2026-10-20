@@ -153,9 +153,20 @@ export function Holdings() {
                           </button>
                         </Td>
                         <Td>
-                          <p className="font-medium">
-                            {holding.ticker ?? '—'}
-                            {TYPE_LABELS[holding.type ?? ''] && <span className="ml-1.5 text-xs font-normal text-muted-foreground">· {TYPE_LABELS[holding.type ?? '']}</span>}
+                          <p className="flex items-center gap-1.5 font-medium">
+                            {/* Bonds have no ticker: their CUSIP or ISIN identifies them. */}
+                            {holding.ticker ? (
+                              holding.ticker
+                            ) : holding.cusip || holding.isin ? (
+                              <span title={holding.cusip ? 'CUSIP' : 'ISIN'}>{holding.cusip ?? holding.isin}</span>
+                            ) : (
+                              '—'
+                            )}
+                            {TYPE_LABELS[holding.type ?? ''] && (
+                              <Badge variant="outline" className="px-1.5 py-0 text-[10px] font-normal">
+                                {TYPE_LABELS[holding.type ?? '']}
+                              </Badge>
+                            )}
                           </p>
                           <p className="max-w-64 truncate text-xs text-muted-foreground">{holding.name}</p>
                         </Td>

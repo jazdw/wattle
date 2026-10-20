@@ -208,6 +208,9 @@ export const securities = sqliteTable(
     /** Plaid security_id, when the security came from Plaid. */
     externalId: text('external_id'),
     ticker: text('ticker'),
+    /** Identifiers for securities without a ticker (individual bonds), when the institution sends them. */
+    cusip: text('cusip'),
+    isin: text('isin'),
     name: text('name'),
     type: text('type'),
     subtype: text('subtype'),

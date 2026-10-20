@@ -24,8 +24,8 @@ describe('Holdings page', () => {
     expect(within(vtiax).getByText('35.20')).toBeInTheDocument();
     expect(within(vtiax).getByText(/Mixed \(International stocks 75%\)/)).toBeInTheDocument();
     expect(within(vtiax).queryByLabelText('Live')).not.toBeInTheDocument(); // a last close isn't live
-    expect(within(vti).getByText('· ETF')).toBeInTheDocument(); // type beside the ticker
-    expect(within(vtiax).getByText('· Mutual fund')).toBeInTheDocument();
+    expect(within(vti).getByText('ETF')).toBeInTheDocument(); // type beside the ticker
+    expect(within(vtiax).getByText('Mutual fund')).toBeInTheDocument();
     expect(within(vtiax).getByTitle(/^Net asset value on /)).toHaveTextContent(/^NAV · /); // a fund's price is its NAV
 
     // Header total: day change across live-quoted holdings.
@@ -103,6 +103,24 @@ describe('Holdings page', () => {
     expect(screen.getByText('Holdings value')).toBeInTheDocument(); // not "(live)"
     const todays = screen.getByText("Today's change").closest('div') as HTMLElement;
     expect(within(todays).getByText('$1,500.00')).toBeInTheDocument(); // today's change still shown
+  });
+
+  it("identifies a bond without a ticker by its CUSIP", async () => {
+    server.use(
+      http.get('*/api/portfolio', () =>
+        HttpResponse.json({
+          ...portfolio(),
+          holdings: [
+            ...portfolio().holdings,
+            { ...portfolio().holdings[0], securityId: 's-bill', ticker: null, cusip: '912797GZ4', name: 'United States Treas Bills 0.000% 10/31/24', type: 'fixed income' },
+          ],
+        }),
+      ),
+    );
+    renderPage(<Holdings />);
+    const bill = (await screen.findByText('912797GZ4')).closest('tr') as HTMLElement;
+    expect(within(bill).getByTitle('CUSIP')).toBeInTheDocument();
+    expect(within(bill).getByText('Bond')).toBeInTheDocument();
   });
 
   it('works without live quotes', async () => {
