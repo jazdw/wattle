@@ -56,7 +56,8 @@ describe('manual accounts', () => {
     await user.click(within(rowFor('REST Super')).getByRole('button', { name: 'Edit account' }));
     const dialog = await screen.findByRole('dialog', { name: 'REST Super' });
     expect(await within(dialog).findByText(/Sep 30, 2026/)).toBeInTheDocument();
-    await user.type(within(dialog).getByPlaceholderText('Balance'), '152000');
+    expect(within(dialog).getByText('in AUD')).toBeInTheDocument(); // the account's own currency
+    await user.type(within(dialog).getByLabelText('Balance (AUD)'), '152000');
     await user.click(within(dialog).getByRole('button', { name: 'Save' }));
     await expect.poll(() => sent('POST /api/accounts/super/balances').length).toBe(1);
     expect(sent('POST /api/accounts/super/balances')[0].body).toMatchObject({ balance: 152000 });
@@ -106,7 +107,7 @@ describe('manual accounts', () => {
     const { user } = await openAccounts();
     await user.click(within(rowFor('Chase Checking')).getByRole('button', { name: 'Edit account' }));
     const dialog = await screen.findByRole('dialog', { name: 'Chase Checking' });
-    expect(within(dialog).queryByPlaceholderText('Balance')).not.toBeInTheDocument(); // linked: no manual balances
+    expect(within(dialog).queryByText(/Record a balance/)).not.toBeInTheDocument(); // linked: no manual balances
     await user.click(within(dialog).getByRole('switch', { name: /Hide this account/ }));
     await user.click(within(dialog).getByRole('switch', { name: /delete its stored history/ }));
     await user.click(within(dialog).getByRole('button', { name: 'Save' }));

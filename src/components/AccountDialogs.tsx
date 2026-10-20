@@ -265,11 +265,14 @@ export function EditAccountDialog({
 
         {account.source === 'manual' && (
           <div className="grid gap-2 rounded-md border p-3">
-            <p className="text-sm font-medium">Record a balance</p>
+            <p className="text-sm font-medium">
+              Record a balance <span className="font-normal text-muted-foreground">in {account.currency}</span>
+            </p>
             <div className="grid grid-cols-2 gap-2">
               <Input
                 inputMode="decimal"
-                placeholder={liability ? 'Amount owed' : 'Balance'}
+                aria-label={`${liability ? 'Amount owed' : 'Balance'} (${account.currency})`}
+                placeholder={`${liability ? 'Amount owed' : 'Balance'} (${account.currency})`}
                 value={balance.amount}
                 onChange={(event) => setBalance({ ...balance, amount: event.target.value })}
               />
