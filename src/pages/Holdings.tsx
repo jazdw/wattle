@@ -21,6 +21,17 @@ function mainCategory(holding: HoldingRow): string {
   return entries.length > 1 && (share ?? 0) < 0.95 ? `Mixed (${label} ${formatPercent(share ?? 0, 0)})` : label;
 }
 
+/** Plaid's security types (and those looked up for hand-entered tickers), as shown. */
+const TYPE_LABELS: Record<string, string> = {
+  equity: 'Stock',
+  etf: 'ETF',
+  'mutual fund': 'Mutual fund',
+  'fixed income': 'Bond',
+  cash: 'Cash',
+  cryptocurrency: 'Crypto',
+  derivative: 'Option',
+};
+
 export function Holdings() {
   const { currency } = useAuth();
   const portfolio = usePortfolio();
@@ -142,7 +153,10 @@ export function Holdings() {
                           </button>
                         </Td>
                         <Td>
-                          <p className="font-medium">{holding.ticker ?? '—'}</p>
+                          <p className="font-medium">
+                            {holding.ticker ?? '—'}
+                            {TYPE_LABELS[holding.type ?? ''] && <span className="ml-1.5 text-xs font-normal text-muted-foreground">· {TYPE_LABELS[holding.type ?? '']}</span>}
+                          </p>
                           <p className="max-w-64 truncate text-xs text-muted-foreground">{holding.name}</p>
                         </Td>
                         <Td>
@@ -168,7 +182,13 @@ export function Holdings() {
                               {new Date(quote.time).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })}
                             </p>
                           )}
-                          {!quote && close && <p className="text-xs text-muted-foreground" title={longDate(close.date)}>{shortDate(close.date)}</p>}
+                          {!quote && close && (
+                            // A fund's price is its NAV, struck once a day after the close.
+                            <p className="whitespace-nowrap text-xs text-muted-foreground" title={`${holding.type === 'mutual fund' ? 'Net asset value' : 'Close'} on ${longDate(close.date)}`}>
+                              {holding.type === 'mutual fund' && 'NAV · '}
+                              {shortDate(close.date)}
+                            </p>
+                          )}
                         </Td>
                         <Td className={`text-right ${quote ? changeClass(quote.change) : ''}`}>
                           {quote ? (
