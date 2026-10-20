@@ -53,11 +53,6 @@ export function Accounts() {
     onSuccess: () => void queryClient.invalidateQueries(),
     onError: (caught) => setError(caught.message),
   });
-  const hide = useMutation({
-    mutationFn: (id: string) => api(`/api/accounts/${id}`, { method: 'PATCH', body: JSON.stringify({ isHidden: true }) }),
-    onSuccess: () => void queryClient.invalidateQueries(),
-    onError: (caught) => setError(caught.message),
-  });
   const describeAccount = (id: string) => {
     const found = accounts.data?.accounts.find((row) => row.id === id);
     return found ? `${found.name}${found.institutionName ? ` at ${found.institutionName}` : ''}` : 'another account';
@@ -168,8 +163,6 @@ export function Accounts() {
                   currency={currency}
                   ownerName={ownerName}
                   onEdit={setEditing}
-                  describe={describeAccount}
-                  onHide={(account) => hide.mutate(account.id)}
                 />
               </CardContent>
             </Card>
@@ -203,7 +196,11 @@ export function Accounts() {
 
       <NewAccountDialog open={creating} onOpenChange={setCreating} />
       <ImportDialog accounts={accounts.data?.accounts ?? []} open={importing} onOpenChange={setImporting} />
-      <EditAccountDialog account={editing} onClose={() => setEditing(null)} />
+      <EditAccountDialog
+        account={editing}
+        duplicateOf={editing?.possibleDuplicateOf ? describeAccount(editing.possibleDuplicateOf) : null}
+        onClose={() => setEditing(null)}
+      />
       <HoldingsDialog account={holdingsFor} onClose={() => setHoldingsFor(null)} />
       <ActivityDialog connection={activityFor} onClose={() => setActivityFor(null)} />
     </>
@@ -216,17 +213,12 @@ function AccountList({
   ownerName,
   onEdit,
   onHoldings,
-  describe,
-  onHide,
 }: {
   accounts: AccountSummary[];
   currency: 'USD' | 'AUD';
   ownerName: (id: string | null) => string;
   onEdit: (account: AccountSummary) => void;
   onHoldings?: (account: AccountSummary) => void;
-  /** "Name at Institution" for an account id (to name a duplicate's original). */
-  describe?: (id: string) => string;
-  onHide?: (account: AccountSummary) => void;
 }) {
   if (accounts.length === 0) return <p className="text-sm text-muted-foreground">No accounts.</p>;
   return (
@@ -249,19 +241,14 @@ function AccountList({
                 </Badge>
               )}
               {account.holdingCount > 0 && <span>{account.holdingCount} holdings</span>}
-              {account.possibleDuplicateOf && describe && (
-                <Badge variant="warning" title="Same type, balance and last four digits as an account from another login. If it's the same account (e.g. a joint account you've both linked), hide one copy so it isn't counted twice.">
-                  Possible duplicate of {describe(account.possibleDuplicateOf)}
+              {account.possibleDuplicateOf && (
+                <Badge variant="warning" title="Looks like an account from another login. Edit it to see which, and hide this copy if it's the same account.">
+                  Possible duplicate
                 </Badge>
               )}
             </p>
           </div>
           <div className="flex shrink-0 items-center gap-1">
-            {account.possibleDuplicateOf && onHide && (
-              <Button variant="outline" size="sm" onClick={() => onHide(account)}>
-                Hide this copy
-              </Button>
-            )}
             <span className="mr-2 font-medium">{account.isHidden ? '—' : money(account.displayBalance, currency)}</span>
             {onHoldings && (account.type === 'investment' || account.holdingCount > 0) && (
               <Button variant="ghost" size="icon" onClick={() => onHoldings(account)} aria-label="Edit holdings" title="Holdings">
