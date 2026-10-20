@@ -234,6 +234,17 @@ describe('market pricing', () => {
   });
 });
 
+describe('security identifiers', () => {
+  it("keeps a bond's CUSIP and ISIN when the institution sends them", async () => {
+    const plaid = brokerage();
+    plaid.state.securities.push({ ...security('s-bill', null, 'fixed income', null, 'United States Treas Bills 0.000% 10/31/24'), cusip: '912797GZ4', isin: 'US912797GZ43' } as never);
+    plaid.state.holdings.push(holding('brk', 's-bill', 10, 94.8));
+    const { api } = await linked(plaid);
+    const bill = (await api('/api/portfolio')).body.holdings.find((row: { type: string }) => row.type === 'fixed income');
+    expect(bill).toMatchObject({ ticker: null, cusip: '912797GZ4', isin: 'US912797GZ43' });
+  });
+});
+
 describe('cash positions', () => {
   it('show their ISO currency code and name, whatever the institution calls them', async () => {
     const plaid = brokerage();

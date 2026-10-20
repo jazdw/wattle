@@ -559,6 +559,8 @@ async function planSecurities(
           .update(securities)
           .set({
             ticker,
+            cusip: security.cusip ?? null,
+            isin: security.isin ?? null,
             name: security.name,
             type: security.type,
             subtype: security.subtype ?? null,
@@ -580,6 +582,8 @@ async function planSecurities(
       householdId: tenant.householdId,
       externalId: security.security_id,
       ticker,
+      cusip: security.cusip ?? null,
+      isin: security.isin ?? null,
       name: security.name,
       type: security.type,
       subtype: security.subtype ?? null,

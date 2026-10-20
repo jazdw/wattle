@@ -116,6 +116,9 @@ export interface AccountsResponse {
 export interface HoldingRow {
   securityId: string;
   ticker: string | null;
+  /** Identifiers for a security without a ticker (an individual bond), when the institution sends them. */
+  cusip: string | null;
+  isin: string | null;
   name: string | null;
   type: string | null;
   /** Entered by hand (not from an institution), so you can set its type. */

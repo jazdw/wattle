@@ -73,6 +73,8 @@ function holding(overrides: Partial<HoldingRow>): HoldingRow {
   return {
     securityId: 's',
     ticker: null,
+    cusip: null,
+    isin: null,
     name: null,
     type: 'etf',
     typeEditable: false,
