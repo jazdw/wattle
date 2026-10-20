@@ -32,15 +32,26 @@ describe('Plaid client', () => {
   it('requests products per link kind and never the auth product', async () => {
     const requests = stubFetch(() => Response.json({ link_token: 'lt' }));
     await plaid.createLinkToken({ clientUserId: 'u1', kind: 'investments', webhook: 'https://x/api/plaid/webhook' });
-    await plaid.createLinkToken({ clientUserId: 'u1', kind: 'banking', webhook: null });
-    await plaid.createLinkToken({ clientUserId: 'u1', kind: 'banking', webhook: null, accessToken: 'access-1' });
-    const [investments, banking, update] = requests.map((request) => request.body as Record<string, unknown>);
-    expect(investments).toMatchObject({ products: ['investments'], webhook: 'https://x/api/plaid/webhook', user: { client_user_id: 'u1' } });
-    expect(banking).toMatchObject({ products: ['assets'] });
-    expect(banking.webhook).toBeUndefined();
+    await plaid.createLinkToken({ clientUserId: 'u1', kind: 'account', webhook: null });
+    await plaid.createLinkToken({ clientUserId: 'u1', kind: 'account', webhook: null, accessToken: 'access-1' });
+    const [investments, account, update] = requests.map((request) => request.body as Record<string, unknown>);
+    expect(investments).toMatchObject({
+      products: ['investments'],
+      additional_consented_products: ['transactions', 'liabilities'],
+      webhook: 'https://x/api/plaid/webhook',
+      user: { client_user_id: 'u1' },
+    });
+    expect(investments.required_if_supported_products).toBeUndefined();
+    // Any login: balance history first, holdings where there are investment accounts.
+    expect(account).toMatchObject({
+      products: ['assets'],
+      required_if_supported_products: ['investments'],
+      additional_consented_products: ['transactions', 'liabilities'],
+    });
+    expect(account.webhook).toBeUndefined();
     expect(update).toMatchObject({ access_token: 'access-1' });
     expect(update.products).toBeUndefined();
-    for (const body of [investments, banking, update]) expect(JSON.stringify(body)).not.toContain('"auth"');
+    for (const body of [investments, account, update]) expect(JSON.stringify(body)).not.toContain('"auth"');
   });
 
   it('maps API errors to PlaidApiError', async () => {

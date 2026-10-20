@@ -5,11 +5,11 @@ import { loadPlaid, openPlaidLink } from '../lib/plaidLink';
 import { Button } from './ui/button';
 
 interface Props {
-  kind: 'investments' | 'banking';
+  kind: 'investments' | 'account';
   /** Update mode: re-authenticate this connection. */
   connectionId?: string;
   label: string;
-  variant?: 'default' | 'outline' | 'accent';
+  variant?: 'default' | 'outline' | 'accent' | 'link';
   size?: 'default' | 'sm';
   onError?: (message: string) => void;
 }

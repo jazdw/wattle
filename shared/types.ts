@@ -37,7 +37,12 @@ export type ConnectionStatus = 'ok' | 'login_required' | 'pending_expiration' | 
 export interface ConnectionSummary {
   id: string;
   institutionName: string | null;
-  kind: 'investments' | 'banking';
+  /** Which Link button created it. */
+  kind: 'account' | 'investments';
+  /** Holdings and rebuilt investment history. */
+  hasInvestments: boolean;
+  /** Daily balance history from the bank (Plaid Assets). */
+  hasBalanceHistory: boolean;
   status: ConnectionStatus;
   errorCode: string | null;
   ownerUserId: string | null;

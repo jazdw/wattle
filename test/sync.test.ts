@@ -86,14 +86,14 @@ describe('linking', () => {
     const home = await createHousehold(deps, 'Home', 'me@example.com');
     const api = client(deps, home.cookie);
     expect((await api('/api/plaid/link-token', { method: 'POST', json: { kind: 'investments' } })).status).toBe(503);
-    expect((await api('/api/plaid/exchange', { method: 'POST', json: { publicToken: 'x', kind: 'banking' } })).status).toBe(503);
+    expect((await api('/api/plaid/exchange', { method: 'POST', json: { publicToken: 'x', kind: 'account' } })).status).toBe(503);
   });
 
   it('creates link tokens, including update mode for an existing connection', async () => {
     const { api, plaid, connection } = await linked();
-    expect((await api('/api/plaid/link-token', { method: 'POST', json: { kind: 'banking' } })).body.linkToken).toBe('link-sandbox-token');
+    expect((await api('/api/plaid/link-token', { method: 'POST', json: { kind: 'account' } })).body.linkToken).toBe('link-sandbox-token');
     await api('/api/plaid/link-token', { method: 'POST', json: { kind: 'investments', connectionId: connection.id } });
-    expect(plaid.state.calls).toContain('link:banking:new');
+    expect(plaid.state.calls).toContain('link:account:new');
     expect(plaid.state.calls).toContain('link:investments:update');
     expect((await api('/api/plaid/link-token', { method: 'POST', json: { kind: 'investments', connectionId: 'nope' } })).status).toBe(404);
     expect((await api('/api/plaid/link-token', { method: 'POST', json: { kind: 'stocks' } })).status).toBe(400);
@@ -335,7 +335,7 @@ describe('history backfill', () => {
     });
     const deps = await createTestDeps({ plaid });
     const home = await createHousehold(deps, 'Home', 'me@example.com');
-    await client(deps, home.cookie)('/api/plaid/exchange', { method: 'POST', json: { publicToken: 'p', kind: 'banking' } });
+    await client(deps, home.cookie)('/api/plaid/exchange', { method: 'POST', json: { publicToken: 'p', kind: 'account' } });
     await flush(deps);
     const tenant = new Tenant(deps.db, home.householdId);
     const [connection] = await deps.db.select().from(schema.connections);
@@ -364,7 +364,7 @@ describe('history backfill', () => {
     const deps = await createTestDeps({ plaid });
     const home = await createHousehold(deps, 'Home', 'me@example.com');
     const api = client(deps, home.cookie);
-    await api('/api/plaid/exchange', { method: 'POST', json: { publicToken: 'p', kind: 'banking' } });
+    await api('/api/plaid/exchange', { method: 'POST', json: { publicToken: 'p', kind: 'account' } });
     await flush(deps);
     const [connection] = await deps.db.select().from(schema.connections);
 
@@ -385,11 +385,60 @@ describe('history backfill', () => {
     expect(plaid.state.calls.filter((call) => call === 'asset_report:get')).toHaveLength(calls);
   });
 
+  it('loads both kinds of history for a login with Investments and Assets', async () => {
+    // A brokerage with a cash account, linked once with "Link account".
+    const plaid = fakePlaid({
+      accounts: [account('brk', 'investment', 1000, { subtype: 'brokerage' }), account('cash', 'depository', 300, { subtype: 'cash management' })],
+      securities: [security('s-vti', 'VTI', 'etf', 100)],
+      holdings: [holding('brk', 's-vti', 10, 100)],
+      historicalBalances: { brk: [{ date: '2026-10-01', current: 1 }], cash: [{ date: '2026-10-01', current: 250 }] },
+      itemProducts: ['assets', 'investments'],
+      assetReportReady: false,
+    });
+    const deps = await createTestDeps({ plaid, prices: fakePrices({ VTI: closes('2026-09-20', 30, 100) }) });
+    const home = await createHousehold(deps, 'Home', 'me@example.com');
+    const api = client(deps, home.cookie);
+    await api('/api/plaid/exchange', { method: 'POST', json: { publicToken: 'p', kind: 'account' } });
+    await flush(deps);
+    const accounts = (await api('/api/accounts')).body.accounts as { id: string; name: string; holdingCount: number }[];
+    const brk = accounts.find((row) => row.name === 'brk')!;
+    const cash = accounts.find((row) => row.name === 'cash')!;
+    expect(brk.holdingCount).toBe(1);
+    const backfilled = async (accountId: string) =>
+      deps.db.select().from(schema.accountDaily).where(and(eq(schema.accountDaily.accountId, accountId), eq(schema.accountDaily.source, 'backfill')));
+
+    // Investments rebuilt straight away; still waiting for the bank's report.
+    let [connection] = await deps.db.select().from(schema.connections);
+    expect(connection).toMatchObject({ hasInvestments: true, hasBalanceHistory: true, backfillStatus: 'running' });
+    expect((await backfilled(brk.id)).length).toBeGreaterThan(1);
+    expect(await backfilled(cash.id)).toHaveLength(0);
+    expect((await api('/api/connections')).body.connections[0]).toMatchObject({ hasInvestments: true, hasBalanceHistory: true });
+
+    // The report fills in the cash account, not the rebuilt brokerage.
+    plaid.state.assetReportReady = true;
+    await api(`/api/connections/${connection.id}/sync`, { method: 'POST' });
+    [connection] = await deps.db.select().from(schema.connections);
+    expect(connection.backfillStatus).toBe('done');
+    expect((await backfilled(cash.id)).map((row) => [row.date, row.balance])).toEqual([['2026-10-01', 250_00]]);
+    expect((await backfilled(brk.id)).find((row) => row.date === '2026-10-01')?.balance).not.toBe(1_00);
+  });
+
+  it('a login linked with Link account but no investment accounts has balance history only', async () => {
+    const plaid = fakePlaid({ accounts: [account('chk', 'depository', 1000)], historicalBalances: { chk: [{ date: '2026-10-01', current: 900 }] }, itemProducts: ['assets'] });
+    const deps = await createTestDeps({ plaid });
+    const home = await createHousehold(deps, 'Home', 'me@example.com');
+    await client(deps, home.cookie)('/api/plaid/exchange', { method: 'POST', json: { publicToken: 'p', kind: 'account' } });
+    await flush(deps);
+    const [connection] = await deps.db.select().from(schema.connections);
+    expect(connection).toMatchObject({ hasInvestments: false, hasBalanceHistory: true });
+    expect(plaid.state.calls).not.toContain('holdings');
+  });
+
   it('skips balance history where the institution does not support Assets', async () => {
     const plaid = fakePlaid({ accounts: [account('chk', 'depository', 1000)], assetReportFails: true });
     const deps = await createTestDeps({ plaid });
     const home = await createHousehold(deps, 'Home', 'me@example.com');
-    await client(deps, home.cookie)('/api/plaid/exchange', { method: 'POST', json: { publicToken: 'p', kind: 'banking' } });
+    await client(deps, home.cookie)('/api/plaid/exchange', { method: 'POST', json: { publicToken: 'p', kind: 'account' } });
     await flush(deps);
     const [connection] = await deps.db.select().from(schema.connections);
     expect(connection.backfillStatus).toBe('skipped');

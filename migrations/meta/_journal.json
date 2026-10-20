@@ -15,6 +15,13 @@
       "when": 1792427590551,
       "tag": "0001_security_identifiers",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "6",
+      "when": 1792507770203,
+      "tag": "0002_link_products",
+      "breakpoints": true
     }
   ]
 }

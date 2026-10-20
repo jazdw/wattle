@@ -46,7 +46,7 @@ describe('accounts', () => {
   it('protects linked accounts from manual edits', async () => {
     const plaid = fakePlaid({ accounts: [account('chk', 'depository', 100)] });
     const { deps, api } = await household({ plaid });
-    await api('/api/plaid/exchange', { method: 'POST', json: { publicToken: 'p', kind: 'banking' } });
+    await api('/api/plaid/exchange', { method: 'POST', json: { publicToken: 'p', kind: 'account' } });
     await flush(deps);
     const [linked] = await deps.db.select().from(schema.accounts);
     expect((await api(`/api/accounts/${linked.id}`, { method: 'DELETE' })).status).toBe(409);
@@ -310,7 +310,7 @@ describe('daily job', () => {
   it('refresh syncs and snapshots for the signed-in household', async () => {
     const plaid = fakePlaid({ accounts: [account('chk', 'depository', 50)] });
     const { deps, api } = await household({ plaid });
-    await api('/api/plaid/exchange', { method: 'POST', json: { publicToken: 'p', kind: 'banking' } });
+    await api('/api/plaid/exchange', { method: 'POST', json: { publicToken: 'p', kind: 'account' } });
     await flush(deps);
     await deps.db.update(schema.connections).set({ lastSyncedAt: null });
     expect((await api('/api/refresh', { method: 'POST' })).body.synced).toBe(1);

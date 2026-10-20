@@ -4,7 +4,7 @@ import * as schema from '../server/db/schema';
 import { account, fakePlaid, holding, security, signWebhook } from './fakes';
 import { client, createHousehold, createTestDeps, flush } from './helpers';
 
-async function setup(kind: 'investments' | 'banking' = 'investments') {
+async function setup(kind: 'investments' | 'account' = 'investments') {
   const plaid = fakePlaid({
     accounts: [account('brk', 'investment', 1000)],
     securities: [security('s-vti', 'VTI', 'etf', 100)],
@@ -87,13 +87,13 @@ describe('Plaid webhooks', () => {
   });
 
   it('collects balance history when an asset report is ready, or records its failure', async () => {
-    const ready = await setup('banking');
+    const ready = await setup('account');
     expect((await ready.connection()).assetReportId).toBe('ar-1');
     // The webhook carries the report id, not the item.
     await ready.send({ webhook_type: 'ASSETS', webhook_code: 'PRODUCT_READY', asset_report_id: 'ar-1' });
     expect(await ready.connection()).toMatchObject({ backfillStatus: 'done', assetReportId: null });
 
-    const failed = await setup('banking');
+    const failed = await setup('account');
     failed.plaid.state.assetReportGetError = 'ASSET_REPORT_GENERATION_FAILED';
     // The webhook triggers a sync, which asks Plaid and records the failure.
     await failed.send({ webhook_type: 'ASSETS', webhook_code: 'ERROR', asset_report_id: 'ar-1' });

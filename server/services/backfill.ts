@@ -1,8 +1,8 @@
 /**
- * History backfill when a connection is first linked:
- *  - investment accounts: rebuilt from investment transactions + daily closes
- *    (see backfillCore.ts);
- *  - bank and credit accounts: Plaid Asset Report `historical_balances`
+ * History backfill when a connection is first linked. A login can have both:
+ *  - with Investments: investment accounts rebuilt from investment
+ *    transactions + daily closes (see backfillCore.ts);
+ *  - with Assets: the other accounts' Plaid Asset Report `historical_balances`
  *    (up to 731 days), requested here and collected later (./assetReports).
  * Backfilled rows never overwrite synced, imported or manual rows, so a load
  * that fails part-way is safe to re-run: the rows are written in chunks, and
@@ -50,7 +50,7 @@ export async function backfillConnection(
   let lease = await Lease.acquire(deps, tenant, key);
   if (!lease) {
     // Due: a load that never ran is "pending"; a reload is marked stale.
-    await (connection.kind === 'investments' && connection.backfillStatus === 'done'
+    await (connection.hasInvestments && connection.backfillStatus === 'done'
       ? tenant.db.update(connections).set({ historyStaleAt: deps.now().getTime() }).where(tenant.scope(connections, eq(connections.id, connection.id)))
       : backfillStatusStatement(tenant, connection.id, 'pending'));
     await Lease.leaveNote(deps, tenant, key);
@@ -61,7 +61,7 @@ export async function backfillConnection(
       return;
     }
   }
-  await underConnectionLease(deps, tenant, connection.id, trigger, lease, { reportJustRequested: connection.kind === 'banking' }, () =>
+  await underConnectionLease(deps, tenant, connection.id, trigger, lease, { reportJustRequested: connection.hasBalanceHistory }, () =>
     runHistoryLoad(deps, tenant, connection.id, trigger, lease, webhookUrl),
   );
 }
@@ -69,7 +69,9 @@ export async function backfillConnection(
 /**
  * The history load itself; the caller holds the connection's lease (renewed
  * before every write). Investment history is rebuilt from transactions and
- * daily closes; for banks an asset report is requested (collected later).
+ * daily closes; with Assets an asset report is requested (collected later)
+ * for the other accounts. A rebuild after a late transaction redoes only the
+ * investment history.
  * Rows are written in chunks (insert-or-ignore, so a load that dies part-way
  * is safe to re-run), and the outcome with its log row atomically at the end.
  * Failures are logged, not thrown, except losing the lease.
@@ -91,14 +93,19 @@ export async function runHistoryLoad(
     await lease.renew();
     await backfillStatusStatement(tenant, connection.id, 'running');
     await ensureFx(deps, addDays(today, -HISTORY_DAYS), today);
-    let outcome: BatchItem<'sqlite'>[];
-    if (connection.kind === 'investments') {
+    const rebuild = connection.historyStaleAt !== null && connection.backfillStatus === 'done';
+    const outcome: BatchItem<'sqlite'>[] = [];
+    // Asked for once, on the first load: a rebuild only redoes investments.
+    const report = connection.hasBalanceHistory && !rebuild ? await requestBalanceHistory(deps, tenant, connection, webhookUrl, run) : null;
+    if (report) outcome.push(...report.statements);
+    if (connection.hasInvestments) {
       const accountRows = await tenant.db
-        .select({ id: accounts.id })
+        .select({ id: accounts.id, type: accounts.type })
         .from(accounts)
         .where(tenant.scope(accounts, eq(accounts.connectionId, connection.id), eq(accounts.isHidden, false)));
-      const accountIds = accountRows.map((row) => row.id);
-      if (connection.historyStaleAt !== null && connection.backfillStatus === 'done' && accountIds.length > 0) {
+      // With Assets, the bank's balance history covers the other accounts.
+      const accountIds = accountRows.filter((row) => !connection.hasBalanceHistory || row.type === 'investment').map((row) => row.id);
+      if (rebuild && accountIds.length > 0) {
         // Rebuild: drop the previous estimate (only backfilled rows; synced,
         // imported and manual ones stay) and reconstruct with every transaction.
         run.note = 'Rebuilt because a transaction dated before the previous history arrived later.';
@@ -109,19 +116,20 @@ export async function runHistoryLoad(
         ]);
       }
       for (const accountId of accountIds) run.count('days', await backfillInvestmentAccount(deps, tenant, accountId, lease));
-      outcome = [
+      outcome.push(
         tenant.db
           .update(connections)
           .set({
-            backfillStatus: 'done',
+            // Still waiting for the bank's report, if one was asked for.
+            backfillStatus: report?.requested ? 'running' : 'done',
             historyAsOf: today,
             // A late transaction that arrived during this load needs another.
             historyStaleAt: sql`case when ${connections.historyStaleAt} < ${startedAt} then null else ${connections.historyStaleAt} end`,
           })
           .where(tenant.scope(connections, eq(connections.id, connection.id))),
-      ];
-    } else {
-      outcome = await requestBalanceHistory(deps, tenant, connection, webhookUrl, run);
+      );
+    } else if (!report?.requested) {
+      outcome.push(backfillStatusStatement(tenant, connection.id, 'skipped'));
     }
     await lease.renew();
     await runAtomic(tenant.db, [...outcome, run.statement()]);
@@ -243,27 +251,30 @@ async function requestBalanceHistory(
   connection: ConnectionRow,
   webhookUrl: string | null,
   run: SyncRun,
-): Promise<BatchItem<'sqlite'>[]> {
-  if (!deps.plaid) return [];
+): Promise<{ requested: boolean; statements: BatchItem<'sqlite'>[] }> {
+  if (!deps.plaid) return { requested: false, statements: [] };
   const keys = await loadTokenKeys(deps.config.tokenEncKey);
   const accessToken = await accessTokenFor(deps, connection);
   try {
     const report = await run.plaid().createAssetReport(accessToken, 731, webhookUrl);
     run.count('assetReportsRequested', 1);
-    return [
-      tenant.db
+    return {
+      requested: true,
+      statements: [
+        tenant.db
         .update(connections)
         .set({
           assetReportTokenEnc: await encryptToken(keys, report.token, tokenAad(tenant.householdId, connection.id)),
           assetReportId: report.id,
         })
         .where(tenant.scope(connections, eq(connections.id, connection.id))),
-    ];
+      ],
+    };
   } catch (error) {
-    // Institutions without Assets support: history comes from CSV import instead.
+    // No balance history after all: history comes from CSV import instead.
     if (error instanceof PlaidApiError) {
-      run.note = `The institution doesn't provide balance history (${error.code}); import a CSV instead.`;
-      return [backfillStatusStatement(tenant, connection.id, 'skipped')];
+      run.note = `The institution didn't provide balance history (${error.code}); import a CSV instead.`;
+      return { requested: false, statements: [] };
     }
     throw error;
   }
