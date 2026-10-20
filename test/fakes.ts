@@ -9,6 +9,8 @@ type Partialish<T> = { [K in keyof T]?: unknown } & Record<string, unknown>;
 export interface PlaidState {
   itemId: string;
   institutionName: string;
+  /** The Item's products as /item/get lists them (unset: not listed). */
+  itemProducts?: string[];
   accounts: Partialish<AccountBase>[];
   holdings: Partialish<Holding>[];
   securities: Partialish<Security>[];
@@ -113,7 +115,8 @@ export function fakePlaid(initial: Partial<PlaidState> = {}): PlaidApi & { state
       return 'link-sandbox-token';
     },
     exchangePublicToken: async () => ({ accessToken: `access-sandbox-${state.itemId}`, itemId: state.itemId }),
-    getItem: async () => ({ item_id: state.itemId, institution_id: 'ins_1', consent_expiration_time: null }) as never,
+    getItem: async () =>
+      ({ item_id: state.itemId, institution_id: 'ins_1', consent_expiration_time: null, ...(state.itemProducts ? { products: state.itemProducts } : {}) }) as never,
     getInstitutionName: async () => state.institutionName,
     getAccounts: async () => {
       guard('accounts');

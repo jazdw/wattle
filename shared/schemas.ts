@@ -16,14 +16,14 @@ export const classificationSchema = z.object({
 });
 
 export const linkTokenSchema = z.object({
-  kind: z.enum(['investments', 'banking']),
+  kind: z.enum(['account', 'investments']),
   /** Re-authenticate an existing connection (update mode). */
   connectionId: z.string().optional(),
 });
 
 export const exchangeSchema = z.object({
   publicToken: z.string().min(1),
-  kind: z.enum(['investments', 'banking']),
+  kind: z.enum(['account', 'investments']),
 });
 
 export const manualAccountSchema = z.object({

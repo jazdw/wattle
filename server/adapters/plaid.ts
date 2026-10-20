@@ -49,7 +49,7 @@ export interface PlaidCall {
   error?: string;
 }
 
-export type LinkKind = 'investments' | 'banking';
+export type LinkKind = 'investments' | 'account';
 
 export interface LinkTokenOptions {
   /** Stable, non-identifying id for the Wattle user. */
@@ -101,13 +101,26 @@ export interface PlaidApi {
   getWebhookVerificationKey(keyId: string): Promise<JWKPublicKey>;
 }
 
-const PRODUCTS: Record<LinkKind, { products: string[]; optional?: string[] }> = {
-  // Brokerages, 401(k)s, HSAs.
-  investments: { products: ['investments'] },
-  // Checking, savings, credit cards. Assets gives up to two years of daily
-  // balance history for the backfill; no transactions are stored.
-  banking: { products: ['assets'] },
+/**
+ * What each Link button asks Plaid for. Only `products` narrows which
+ * institutions Link lists, and Assets can only go there (it can't be optional
+ * or added later without update mode). Products consented to but not used
+ * aren't billed, and can be switched on later on the same Item (no new slot).
+ */
+const LATER = ['transactions', 'liabilities'];
+const PRODUCTS: Record<LinkKind, { products: string[]; ifSupported?: string[]; consented: string[] }> = {
+  // Any login: up to two years of daily balance history (Assets), plus
+  // holdings wherever it has investment accounts. No transactions are stored.
+  account: { products: ['assets'], ifSupported: ['investments'], consented: LATER },
+  // Fallback for institutions without Assets support (some 401(k) providers).
+  investments: { products: ['investments'], consented: LATER },
 };
+
+/** Which of the products Wattle uses an Item has (from /item/get). */
+export function itemProducts(item: Pick<Item, 'products' | 'billed_products'>): { investments: boolean; assets: boolean } {
+  const all = new Set<string>([...(item.products ?? []), ...(item.billed_products ?? [])]);
+  return { investments: all.has('investments'), assets: all.has('assets') };
+}
 
 export function createPlaidClient(config: PlaidConfig, log?: PlaidCall[]): PlaidApi {
   const baseUrl = `https://${config.env}.plaid.com`;
@@ -153,7 +166,8 @@ export function createPlaidClient(config: PlaidConfig, log?: PlaidCall[]): Plaid
       } else {
         const products = PRODUCTS[options.kind];
         body.products = products.products;
-        if (products.optional) body.optional_products = products.optional;
+        if (products.ifSupported) body.required_if_supported_products = products.ifSupported;
+        body.additional_consented_products = products.consented;
       }
       const result = await call<{ link_token: string }>('/link/token/create', body);
       return result.link_token;

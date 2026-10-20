@@ -73,6 +73,8 @@ connectionRoutes.get('/', async (c) => {
         id: row.id,
         institutionName: row.institutionName,
         kind: row.kind,
+        hasInvestments: row.hasInvestments,
+        hasBalanceHistory: row.hasBalanceHistory,
         // A consent warning shows while the login otherwise works; a login
         // problem takes precedence.
         status: row.status === 'ok' && consentEnding(row, c.env.deps.now().getTime()) ? 'pending_expiration' : row.status,

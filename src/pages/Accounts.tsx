@@ -34,6 +34,14 @@ const BACKFILL_TEXT: Record<ConnectionSummary['backfillStatus'], string | null> 
 /** Plaid's Trial plan allows 10 production Items, and removed ones still count. */
 const TRIAL_ITEM_LIMIT = 10;
 
+/** What a login brings in, from the Plaid products it has. */
+function provides(connection: ConnectionSummary): string {
+  if (connection.hasInvestments && connection.hasBalanceHistory) return 'Holdings and balance history';
+  if (connection.hasInvestments) return 'Holdings';
+  if (connection.hasBalanceHistory) return 'Balance history';
+  return 'Balances';
+}
+
 export function Accounts() {
   const { currency } = useAuth();
   const ownerName = useOwnerName();
@@ -79,10 +87,7 @@ export function Accounts() {
         actions={
           <>
             {connections.data?.plaidEnv && (
-              <>
-                <PlaidLinkButton kind="investments" label="Link investments" onError={setError} />
-                <PlaidLinkButton kind="banking" label="Link bank / card" variant="outline" onError={setError} />
-              </>
+              <PlaidLinkButton kind="account" label="Link account" onError={setError} />
             )}
             <Button variant="outline" onClick={() => setCreating(true)}>
               <Plus /> Manual account
@@ -103,6 +108,13 @@ export function Accounts() {
         <div className="mb-4">
           <Alert variant="warning">Plaid isn't configured on the server; only manual accounts are available.</Alert>
         </div>
+      )}
+      {connections.data?.plaidEnv && (
+        <p className="-mt-2 mb-4 flex flex-wrap items-center gap-x-1 text-xs text-muted-foreground">
+          Link account brings in balances with up to two years of history, plus holdings for investment accounts. Can't find your institution
+          (some 401(k) providers)?
+          <PlaidLinkButton kind="investments" label="Link investments only" variant="link" size="sm" onError={setError} />
+        </p>
       )}
       {connections.data?.plaidEnv === 'sandbox' && (
         <div className="mb-4">
@@ -126,7 +138,7 @@ export function Accounts() {
                     {BACKFILL_TEXT[connection.backfillStatus] && <Badge variant="outline">{BACKFILL_TEXT[connection.backfillStatus]}</Badge>}
                   </CardTitle>
                   <CardDescription>
-                    Linked by {ownerName(connection.ownerUserId)} · {connection.kind === 'investments' ? 'Investments' : 'Banking'} · synced{' '}
+                    Linked by {ownerName(connection.ownerUserId)} · {provides(connection)} · synced{' '}
                     {relativeTime(connection.lastSyncedAt)}
                   </CardDescription>
                 </div>

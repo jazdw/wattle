@@ -8,7 +8,7 @@ import type { AccountBase, Holding, InvestmentTransaction, Security as PlaidSecu
 import { suggestClassification } from '../../shared/classify';
 import { addDays, marketDate } from '../../shared/dates';
 import { toMinor } from '../../shared/money';
-import { PlaidApiError, type LinkKind, type PlaidApi } from '../adapters/plaid';
+import { itemProducts, PlaidApiError, type LinkKind, type PlaidApi } from '../adapters/plaid';
 import type { BatchItem } from 'drizzle-orm/batch';
 import { chunkRows, inChunks, runAtomic } from '../db/batch';
 import { accounts, connections, holdings, investmentTransactions, pricesDaily, securities } from '../db/schema';
@@ -85,6 +85,8 @@ export async function linkConnection(
   const item = await plaid.getItem(accessToken);
   const institutionName = item.institution_id ? await plaid.getInstitutionName(item.institution_id) : null;
   const consentExpiresAt = item.consent_expiration_time ? Date.parse(item.consent_expiration_time) : null;
+  // Plaid lists the Item's products; without them, assume what was asked for.
+  const products = item.products ? itemProducts(item) : { investments: kind === 'investments', assets: kind === 'account' };
 
   const now = deps.now().getTime();
   if (existing) {
@@ -96,7 +98,17 @@ export async function linkConnection(
       tenant.db
         .update(connections)
         // Re-authenticating resolves login problems and consent warnings.
-        .set({ accessTokenEnc, status: 'ok', errorCode: null, statusObservedAt: now, consentExpiresAt, consentWarningAt: null })
+        .set({
+          accessTokenEnc,
+          status: 'ok',
+          errorCode: null,
+          statusObservedAt: now,
+          consentExpiresAt,
+          consentWarningAt: null,
+          // Only ever gained: a product isn't removed from an Item.
+          ...(products.investments ? { hasInvestments: true } : {}),
+          ...(products.assets ? { hasBalanceHistory: true } : {}),
+        })
         .where(tenant.scope(connections, eq(connections.id, id), ne(connections.status, 'removed'))),
       run.statement(),
     ]);
@@ -115,6 +127,8 @@ export async function linkConnection(
       institutionId: item.institution_id ?? null,
       institutionName,
       kind,
+      hasInvestments: products.investments,
+      hasBalanceHistory: products.assets,
       consentExpiresAt,
       createdAt: now,
     }),
@@ -281,7 +295,7 @@ export async function underConnectionLease<T>(
 function historyDue(connection: ConnectionRow): boolean {
   if (connection.backfillStatus === 'pending') return true;
   if (connection.backfillStatus === 'running') return connection.assetReportTokenEnc === null;
-  return connection.kind === 'investments' && connection.historyStaleAt !== null;
+  return connection.hasInvestments && connection.historyStaleAt !== null;
 }
 
 /** One fetch-then-write pass. Logs itself; throws (after logging) on unexpected errors. */
@@ -356,7 +370,7 @@ interface Fetched {
 async function fetchFromPlaid(deps: Deps, plaid: PlaidApi, connection: ConnectionRow): Promise<Fetched> {
   const accessToken = await accessTokenFor(deps, connection);
   const plaidAccounts = await plaid.getAccounts(accessToken);
-  if (connection.kind !== 'investments') return { accounts: plaidAccounts, investments: null };
+  if (!connection.hasInvestments) return { accounts: plaidAccounts, investments: null };
 
   const holdingsResult = await plaid.getHoldings(accessToken);
   const allSecurities = new Map(holdingsResult.securities.map((security) => [security.security_id, security]));
