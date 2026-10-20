@@ -106,8 +106,12 @@ export const connections = sqliteTable(
     accessTokenEnc: text('access_token_enc').notNull(),
     institutionId: text('institution_id'),
     institutionName: text('institution_name'),
-    /** investments | banking — which Link flow created it. */
-    kind: text('kind', { enum: ['investments', 'banking'] }).notNull(),
+    /** Which Link button created it: account (Assets first) or investments (Investments only). */
+    kind: text('kind', { enum: ['investments', 'account'] }).notNull(),
+    /** The login has Plaid Investments: holdings, investment transactions, rebuilt history. */
+    hasInvestments: integer('has_investments', { mode: 'boolean' }).notNull().default(false),
+    /** The login has Plaid Assets: daily balance history from an asset report. */
+    hasBalanceHistory: integer('has_balance_history', { mode: 'boolean' }).notNull().default(false),
     status: text('status', { enum: ['ok', 'login_required', 'pending_expiration', 'error', 'removed'] })
       .notNull()
       .default('ok'),

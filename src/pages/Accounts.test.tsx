@@ -49,13 +49,22 @@ describe('Accounts page', () => {
   it('links a new institution through Plaid Link', async () => {
     server.use(http.post('*/api/plaid/link-token', () => HttpResponse.json({ linkToken: 'link-sandbox-abc' })));
     const { user } = renderPage(<Accounts />);
-    await user.click(await screen.findByRole('button', { name: 'Link investments' }));
+    await user.click(await screen.findByRole('button', { name: 'Link account' }));
     await expect.poll(() => plaidLink.open.mock.calls.length).toBe(1);
     expect(plaidLink.token).toBe('link-sandbox-abc');
-    expect(sent('POST /api/plaid/link-token')[0].body).toEqual({ kind: 'investments' });
+    expect(sent('POST /api/plaid/link-token')[0].body).toEqual({ kind: 'account' });
 
     plaidLink.onSuccess!('public-sandbox-xyz');
-    await expect.poll(() => sent('POST /api/plaid/exchange')[0]?.body).toEqual({ publicToken: 'public-sandbox-xyz', kind: 'investments' });
+    await expect.poll(() => sent('POST /api/plaid/exchange')[0]?.body).toEqual({ publicToken: 'public-sandbox-xyz', kind: 'account' });
+    // What each login brings in.
+    expect(screen.getByText(/· Balance history ·/)).toBeInTheDocument();
+    expect(screen.getByText(/· Holdings ·/)).toBeInTheDocument();
+  });
+
+  it('links investments only, for institutions without balance history', async () => {
+    const { user } = renderPage(<Accounts />);
+    await user.click(await screen.findByRole('button', { name: 'Link investments only' }));
+    await expect.poll(() => sent('POST /api/plaid/link-token')[0]?.body).toEqual({ kind: 'investments' });
   });
 
   it('re-authenticates a broken connection in update mode', async () => {
@@ -72,7 +81,7 @@ describe('Accounts page', () => {
 
   it("disables the button while Link is open and shows Plaid's exit error", async () => {
     const { user } = renderPage(<Accounts />);
-    const button = await screen.findByRole('button', { name: 'Link investments' });
+    const button = await screen.findByRole('button', { name: 'Link account' });
     await user.click(button);
     await expect.poll(() => plaidLink.open.mock.calls.length).toBe(1);
     expect(button).toBeDisabled();
@@ -148,7 +157,7 @@ describe('Accounts page', () => {
   it('shows Plaid errors', async () => {
     server.use(http.post('*/api/plaid/link-token', () => HttpResponse.json({ error: 'Plaid is not configured on the server.' }, { status: 503 })));
     const { user } = renderPage(<Accounts />);
-    await user.click(await screen.findByRole('button', { name: 'Link bank / card' }));
+    await user.click(await screen.findByRole('button', { name: 'Link account' }));
     expect(await screen.findByText('Plaid is not configured on the server.')).toBeInTheDocument();
   });
 
@@ -156,7 +165,7 @@ describe('Accounts page', () => {
     server.use(http.get('*/api/connections', () => HttpResponse.json({ ...CONNECTIONS, plaidEnv: null, connections: [] })));
     renderPage(<Accounts />);
     expect(await screen.findByText(/only manual accounts are available/)).toBeInTheDocument();
-    expect(screen.queryByRole('button', { name: 'Link investments' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /^Link / })).not.toBeInTheDocument();
   });
 
   it('counts used Plaid Items in production', async () => {

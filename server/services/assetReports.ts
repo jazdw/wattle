@@ -71,6 +71,8 @@ export async function collectPendingReport(
       for (const reportAccount of item.accounts) {
         const account = byExternal.get(reportAccount.account_id);
         if (!account) continue;
+        // Investment accounts' history is rebuilt from their transactions.
+        if (connection.hasInvestments && account.type === 'investment') continue;
         const liability = account.type === 'credit' || account.type === 'loan';
         for (const balance of reportAccount.historical_balances ?? []) {
           const minor = toMinor(balance.current);

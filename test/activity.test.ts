@@ -94,7 +94,7 @@ describe('sync log', () => {
     const deps = await createTestDeps({ plaid });
     const home = await createHousehold(deps, 'Home', 'me@example.com');
     const api = client(deps, home.cookie);
-    await api('/api/plaid/exchange', { method: 'POST', json: { publicToken: 'p', kind: 'banking' } });
+    await api('/api/plaid/exchange', { method: 'POST', json: { publicToken: 'p', kind: 'account' } });
     await flush(deps);
     const [connection] = await deps.db.select().from(schema.connections);
     const runs = async () => (await api(`/api/connections/${connection.id}/activity`)).body.runs as SyncRunSummary[];
