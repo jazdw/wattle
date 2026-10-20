@@ -90,7 +90,7 @@ export function Holdings() {
           <div className="mb-4 grid gap-4 sm:grid-cols-3">
             <Card>
               <CardContent className="pt-4">
-                <p className="text-sm text-muted-foreground">Holdings value{live ? ' (live)' : ''}</p>
+                <p className="text-sm text-muted-foreground">Holdings value</p>
                 <p className="text-2xl font-semibold">{money(liveTotal, currency, { cents: true })}</p>
               </CardContent>
             </Card>
