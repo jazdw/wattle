@@ -356,3 +356,22 @@ describe('security type', () => {
   });
 });
 
+describe('nightly type lookup', () => {
+  it('fills in the type of hand-entered securities that still have none', async () => {
+    const prices = fakePrices({ VEA: closes('2026-10-01', 8, 55) }, undefined, { VEA: { type: 'etf', name: 'Vanguard FTSE Developed Markets ETF' } });
+    const { deps, api, create } = await household({ prices });
+    const id = await create({ name: 'IRA', type: 'investment' });
+    // Saved while lookups were unavailable (and it doesn't look like a fund): no type yet.
+    const describe = prices.describe;
+    prices.describe = undefined;
+    await api(`/api/accounts/${id}/holdings`, { method: 'PUT', json: { holdings: [{ ticker: 'VEA', quantity: 1 }], version: 0 } });
+    expect((await deps.db.select({ type: schema.securities.type }).from(schema.securities))[0].type).toBeNull();
+
+    prices.describe = describe;
+    const { runDaily } = await import('../server/services/jobs');
+    await runDaily(deps);
+    const [row] = await deps.db.select({ type: schema.securities.type, name: schema.securities.name }).from(schema.securities);
+    expect(row).toEqual({ type: 'etf', name: 'Vanguard FTSE Developed Markets ETF' });
+  });
+});
+
