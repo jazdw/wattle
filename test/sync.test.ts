@@ -423,6 +423,25 @@ describe('history backfill', () => {
     expect((await backfilled(brk.id)).find((row) => row.date === '2026-10-01')?.balance).not.toBe(1_00);
   });
 
+  it("a failed bank report doesn't mark a login's loaded investment history unavailable", async () => {
+    const plaid = fakePlaid({
+      accounts: [account('brk', 'investment', 1000), account('cash', 'depository', 300)],
+      securities: [security('s-vti', 'VTI', 'etf', 100)],
+      holdings: [holding('brk', 's-vti', 10, 100)],
+      itemProducts: ['assets', 'investments'],
+      assetReportGetError: 'ASSET_REPORT_GENERATION_FAILED',
+    });
+    const deps = await createTestDeps({ plaid, prices: fakePrices({ VTI: closes('2026-09-20', 30, 100) }) });
+    const home = await createHousehold(deps, 'Home', 'me@example.com');
+    const api = client(deps, home.cookie);
+    await api('/api/plaid/exchange', { method: 'POST', json: { publicToken: 'p', kind: 'account' } });
+    await flush(deps);
+    const [connection] = await deps.db.select().from(schema.connections);
+    await api(`/api/connections/${connection.id}/sync`, { method: 'POST' });
+    const [after] = await deps.db.select().from(schema.connections);
+    expect(after).toMatchObject({ backfillStatus: 'done', assetReportTokenEnc: null });
+  });
+
   it('a login linked with Link account but no investment accounts has balance history only', async () => {
     const plaid = fakePlaid({ accounts: [account('chk', 'depository', 1000)], historicalBalances: { chk: [{ date: '2026-10-01', current: 900 }] }, itemProducts: ['assets'] });
     const deps = await createTestDeps({ plaid });
