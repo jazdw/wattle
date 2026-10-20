@@ -61,27 +61,27 @@ export function useSecurities() {
 }
 
 /** True during regular US market hours (9:30–16:00 New York, weekdays). */
-export function isMarketOpen(now = new Date()): boolean {
-  const parts = new Intl.DateTimeFormat('en-US', {
-    timeZone: 'America/New_York',
-    weekday: 'short',
-    hour: 'numeric',
-    minute: 'numeric',
-    hour12: false,
-  }).formatToParts(now);
-  const get = (type: string) => parts.find((part) => part.type === type)?.value ?? '';
-  if (get('weekday') === 'Sat' || get('weekday') === 'Sun') return false;
-  const minutes = Number(get('hour')) * 60 + Number(get('minute'));
-  return minutes >= 9 * 60 + 30 && minutes < 16 * 60;
+/**
+ * A quote is live if it was updated in the last 15 minutes. Prices stop
+ * updating when the market closes (weekends, holidays, early closes
+ * included), so no market calendar is needed: the data says when it's live.
+ */
+export const LIVE_WINDOW_MS = 15 * 60_000;
+
+export function isLiveQuote(quote: { time: number }, now = Date.now()): boolean {
+  return now - quote.time < LIVE_WINDOW_MS;
 }
 
-/** Live quotes; polls every minute while the market is open. */
+/**
+ * Live quotes. Polls every minute while any quote is live, otherwise every
+ * 15 minutes (which is how it notices the market has opened).
+ */
 export function useQuotes(enabled = true) {
   return useQuery({
     queryKey: ['quotes'],
     queryFn: () => api<QuotesResponse>('/api/quotes'),
     enabled,
-    refetchInterval: () => (isMarketOpen() ? 60_000 : false),
+    refetchInterval: (query) => (query.state.data?.quotes.some((quote) => isLiveQuote(quote)) ? 60_000 : LIVE_WINDOW_MS),
     staleTime: 30_000,
   });
 }
