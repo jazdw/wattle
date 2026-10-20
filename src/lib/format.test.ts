@@ -1,8 +1,22 @@
 import { describe, expect, it } from 'vitest';
-import { changeClass, longDate, money, quantity, relativeTime, shortDate } from './format';
+import { accountKind, changeClass, longDate, money, quantity, relativeTime, shortDate } from './format';
 import { foldSeries } from './series';
 
 describe('format helpers', () => {
+  it('names account kinds readably', () => {
+    expect(accountKind('depository', 'checking')).toBe('Checking');
+    expect(accountKind('depository', 'money market')).toBe('Money market');
+    expect(accountKind('depository', 'cd')).toBe('CD');
+    expect(accountKind('depository', 'hsa')).toBe('HSA');
+    expect(accountKind('investment', '401k')).toBe('401(k)');
+    expect(accountKind('investment', 'roth')).toBe('Roth IRA');
+    expect(accountKind('investment', 'sep ira')).toBe('SEP IRA');
+    expect(accountKind('credit', 'credit card')).toBe('Credit card');
+    expect(accountKind('loan', 'student')).toBe('Student loan');
+    expect(accountKind('depository', null)).toBe('Bank account');
+    expect(accountKind('property', null)).toBe('Property');
+  });
+
   it('formats values for display', () => {
     expect(money(null, 'USD')).toBe('—');
     expect(money(1_00, 'USD')).toBe('$1');
