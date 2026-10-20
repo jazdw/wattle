@@ -121,7 +121,7 @@ describe('Accounts page', () => {
     expect(within(dialog).getByText(/it will sync again when it finishes/)).toBeInTheDocument();
   });
 
-  it('flags a likely duplicate and hides it in one click', async () => {
+  it('flags a likely duplicate, naming the original in the edit dialog', async () => {
     server.use(
       http.get('*/api/accounts', () =>
         HttpResponse.json({
@@ -133,10 +133,16 @@ describe('Accounts page', () => {
       ),
     );
     const { user } = renderPage(<Accounts />);
-    const badge = await screen.findByText('Possible duplicate of Joint Checking at Chase');
+    const badge = await screen.findByText('Possible duplicate');
+    expect(screen.getAllByText('Possible duplicate')).toHaveLength(1); // only the later copy
     const row = badge.closest('li') as HTMLElement;
-    await user.click(within(row).getByRole('button', { name: 'Hide this copy' }));
-    await expect.poll(() => sent('PATCH /api/accounts/j2')[0]?.body).toEqual({ isHidden: true });
+    expect(within(row).queryByRole('button', { name: /hide/i })).not.toBeInTheDocument();
+    await user.click(within(row).getByRole('button', { name: 'Edit account' }));
+    const dialog = await screen.findByRole('dialog');
+    expect(within(dialog).getByText('Joint Checking at Chase')).toBeInTheDocument();
+    await user.click(within(dialog).getByRole('switch'));
+    await user.click(within(dialog).getByRole('button', { name: 'Save' }));
+    await expect.poll(() => (sent('PATCH /api/accounts/j2')[0]?.body as { isHidden?: boolean })?.isHidden).toBe(true);
   });
 
   it('shows Plaid errors', async () => {
