@@ -100,7 +100,7 @@ describe('Holdings page', () => {
     expect(within(vti).getByText('303.00')).toBeInTheDocument();
     expect(within(vti).getByTitle(/^Price, last updated /)).toBeInTheDocument();
     expect(screen.queryByLabelText('Live')).not.toBeInTheDocument();
-    expect(screen.getByText('Holdings value')).toBeInTheDocument(); // not "(live)"
+    expect(screen.getByText('Holdings value')).toBeInTheDocument();
     const todays = screen.getByText("Today's change").closest('div') as HTMLElement;
     expect(within(todays).getByText('$1,500.00')).toBeInTheDocument(); // today's change still shown
   });
