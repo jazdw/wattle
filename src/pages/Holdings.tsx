@@ -8,7 +8,7 @@ import { Badge } from '../components/ui/badge';
 import { Card, CardContent } from '../components/ui/card';
 import { Input } from '../components/ui/input';
 import { EmptyState, Skeleton, Td, Th } from '../components/ui/misc';
-import { isMarketOpen, usePortfolio, useQuotes } from '../hooks/queries';
+import { isLiveQuote, usePortfolio, useQuotes } from '../hooks/queries';
 import { useAuth } from '../hooks/useAuth';
 import { changeClass, formatPercent, longDate, money, quantity, shortDate } from '../lib/format';
 
@@ -55,7 +55,10 @@ export function Holdings() {
   // Against the holdings' value at the previous close, as brokerages show it.
   const previousTotal = liveTotal - dayChange;
   const dayChangePercent = previousTotal ? dayChange / previousTotal : 0;
-  const open = isMarketOpen();
+  // Live: at least one quote updated in the last 15 minutes (the same test as
+  // the ((o)) on each row). After the close, today's prices and change still
+  // show, just not as live.
+  const live = quotes.data?.quotes.some((quote) => isLiveQuote(quote)) ?? false;
 
   const toggle = (id: string) => {
     const next = new Set(expanded);
@@ -76,7 +79,7 @@ export function Holdings() {
           <div className="mb-4 grid gap-4 sm:grid-cols-3">
             <Card>
               <CardContent className="pt-4">
-                <p className="text-sm text-muted-foreground">Holdings value{quotes.data?.quotes.length ? ' (live)' : ''}</p>
+                <p className="text-sm text-muted-foreground">Holdings value{live ? ' (live)' : ''}</p>
                 <p className="text-2xl font-semibold">{money(liveTotal, currency, { cents: true })}</p>
               </CardContent>
             </Card>
@@ -84,7 +87,7 @@ export function Holdings() {
               <CardContent className="pt-4">
                 <p className="flex items-center gap-1.5 text-sm text-muted-foreground">
                   Today's change
-                  {open && <Radio className="size-3.5 text-positive" aria-label="Market open" />}
+                  {live && <Radio className="size-3.5 text-positive" aria-label="Live" />}
                 </p>
                 <p className={`text-2xl font-semibold ${changeClass(dayChange)}`}>
                   {quotes.data?.quotes.length ? (
@@ -157,7 +160,11 @@ export function Holdings() {
                           {quote ? quote.price.toFixed(2) : close ? close.close.toFixed(2) : holding.price?.toFixed(2) ?? '—'}
                           {quote && (
                             // When this quote was last updated (quotes refresh separately, so times differ).
-                            <p className="text-xs text-muted-foreground" title={`Last updated ${new Date(quote.time).toLocaleString()}`}>
+                            <p
+                              className="flex items-center justify-end gap-1 whitespace-nowrap text-xs text-muted-foreground"
+                              title={`${isLiveQuote(quote) ? 'Live price' : 'Price'}, last updated ${new Date(quote.time).toLocaleString()}`}
+                            >
+                              {isLiveQuote(quote) && <Radio className="size-3 text-positive" aria-label="Live" />}
                               {new Date(quote.time).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })}
                             </p>
                           )}

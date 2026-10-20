@@ -167,6 +167,7 @@ export const TARGET: TargetResponse = {
 };
 
 export const QUOTES: QuotesResponse = {
-  quotes: [{ ticker: 'VTI', price: 303, change: 3, changePercent: 0.01, previousClose: 300, time: 0 }],
+  // Updated a minute ago: live.
+  quotes: [{ ticker: 'VTI', price: 303, change: 3, changePercent: 0.01, previousClose: 300, time: Date.now() - 60_000 }],
   closes: [{ ticker: 'VTIAX', close: 35.2, date: '2026-10-07' }],
 };
