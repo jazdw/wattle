@@ -146,7 +146,16 @@ export function NewAccountDialog({ open, onOpenChange }: { open: boolean; onOpen
 /* Edit account                                                        */
 /* ------------------------------------------------------------------ */
 
-export function EditAccountDialog({ account, onClose }: { account: AccountSummary | null; onClose: () => void }) {
+export function EditAccountDialog({
+  account,
+  duplicateOf,
+  onClose,
+}: {
+  account: AccountSummary | null;
+  /** "Name at Institution" of the account this one looks like a copy of. */
+  duplicateOf?: string | null;
+  onClose: () => void;
+}) {
   const invalidate = useInvalidate();
   const [form, setForm] = useState<{ id: string; name: string; ownerUserId: string | null; category: string; isHidden: boolean; purge: boolean } | null>(null);
   const [balance, setBalance] = useState(() => ({ amount: '', date: marketDate(new Date()) }));
@@ -229,6 +238,14 @@ export function EditAccountDialog({ account, onClose }: { account: AccountSummar
         </div>
 
         <div className="rounded-md border p-3">
+          {duplicateOf && (
+            <div className="mb-3">
+              <Alert variant="warning">
+                Possibly a duplicate of <span className="font-medium">{duplicateOf}</span>: same type, balance and last four digits, from
+                another login. If it's the same account (e.g. a joint account you've both linked), hide this copy so it isn't counted twice.
+              </Alert>
+            </div>
+          )}
           <label className="flex items-center justify-between gap-3 text-sm">
             <span>
               <span className="font-medium">Hide this account</span>
