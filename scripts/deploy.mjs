@@ -26,7 +26,7 @@ function run(command, args, env = {}) {
  * replaces all variables, so the Worker always has exactly these; secrets
  * (API keys) are set separately with `wrangler secret put` and never touched.
  */
-const SETTINGS = ['PLAID_ENV', 'QUOTE_PROVIDER', 'QUOTE_CACHE_SECONDS', 'FX_PROVIDER', 'ACCESS_TEAM_DOMAIN', 'ACCESS_AUD'];
+const SETTINGS = ['PLAID_ENV', 'PLAID_ALLOW_REMOVE', 'QUOTE_PROVIDER', 'QUOTE_CACHE_SECONDS', 'FX_PROVIDER', 'ACCESS_TEAM_DOMAIN', 'ACCESS_AUD'];
 const vars = SETTINGS.filter((name) => process.env[name]).flatMap((name) => ['--var', `${name}:${process.env[name]}`]);
 
 const id = databaseId();

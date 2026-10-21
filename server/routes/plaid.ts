@@ -2,7 +2,7 @@
  * Plaid Link and webhooks. Linking requires a signed-in user; the webhook is
  * called by Plaid (no cookie) and is authenticated by its signed JWT instead.
  */
-import { and, eq, ne } from 'drizzle-orm';
+import { and, eq, notInArray } from 'drizzle-orm';
 import type { BatchItem } from 'drizzle-orm/batch';
 import { Hono } from 'hono';
 import { exchangeSchema, linkTokenSchema } from '../../shared/schemas';
@@ -17,7 +17,7 @@ import { SyncRun } from '../services/activity';
 import { backfillConnection } from '../services/backfill';
 import { verifyPlaidWebhook } from '../services/plaidWebhook';
 import { snapshotHousehold } from '../services/snapshots';
-import { accessTokenFor, getConnection, linkConnection, statusStatement, syncConnection } from '../services/sync';
+import { accessTokenFor, getConnection, INACTIVE, linkConnection, statusStatement, syncConnection } from '../services/sync';
 import { marketDate } from '../../shared/dates';
 
 export const plaidRoutes = new Hono<AppEnv>();
@@ -155,7 +155,7 @@ plaidRoutes.post('/webhook', async (c) => {
         tenant.db
           .update(connections)
           .set({ consentWarningAt: observedAt, ...(consentExpiresAt ? { consentExpiresAt } : {}) })
-          .where(tenant.scope(connections, eq(connections.id, connection.id), ne(connections.status, 'removed'))),
+          .where(tenant.scope(connections, eq(connections.id, connection.id), notInArray(connections.status, INACTIVE))),
       );
       break;
     }

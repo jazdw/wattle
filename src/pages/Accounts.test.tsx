@@ -55,11 +55,35 @@ describe('Accounts page', () => {
     await expect.poll(() => screen.queryByRole('dialog')).toBeNull();
   });
 
+  it('lists disconnected logins apart, with their accounts under manual ones, and reconnects', async () => {
+    server.use(
+      http.get('*/api/connections', () =>
+        HttpResponse.json({ ...CONNECTIONS, connections: CONNECTIONS.connections.map((row) => (row.id === 'c-chase' ? { ...row, status: 'disconnected' } : row)) }),
+      ),
+      http.get('*/api/accounts', () =>
+        HttpResponse.json({ accounts: [account({ id: 'old', name: 'Old Checking', source: 'manual', connectionId: 'c-chase', institutionName: 'Chase' })] }),
+      ),
+    );
+    const { user } = renderPage(<Accounts />);
+    await screen.findByText('Disconnected', { selector: 'h3' });
+    const section = card('Disconnected');
+    expect(within(section).getByText('Chase')).toBeInTheDocument();
+    expect(screen.queryByText('Chase', { selector: 'h3' })).toBeNull(); // no connection card of its own
+    expect(within(card('Manual accounts')).getByText('Old Checking')).toBeInTheDocument();
+    await user.click(within(section).getByRole('button', { name: /Reconnect/ }));
+    await expect.poll(() => sent('POST /api/connections/c-chase/reconnect').length).toBe(1);
+  });
+
   it('links a new institution through Plaid Link', async () => {
     server.use(http.post('*/api/plaid/link-token', () => HttpResponse.json({ linkToken: 'link-sandbox-abc' })));
     const { user } = renderPage(<Accounts />);
     await user.click(await screen.findByRole('button', { name: 'Link account' }));
+    // A chooser explains the options; it closes as Plaid Link opens.
+    const chooser = await screen.findByRole('dialog', { name: 'Link an account' });
+    expect(within(chooser).getByText(/up to two years of history/)).toBeInTheDocument();
+    await user.click(within(chooser).getByRole('button', { name: 'Link account' }));
     await expect.poll(() => plaidLink.open.mock.calls.length).toBe(1);
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
     expect(plaidLink.token).toBe('link-sandbox-abc');
     expect(sent('POST /api/plaid/link-token')[0].body).toEqual({ kind: 'account' });
 
@@ -72,7 +96,8 @@ describe('Accounts page', () => {
 
   it('links investments only, for institutions without balance history', async () => {
     const { user } = renderPage(<Accounts />);
-    await user.click(await screen.findByRole('button', { name: 'Link investments only' }));
+    await user.click(await screen.findByRole('button', { name: 'Link account' }));
+    await user.click(within(await screen.findByRole('dialog')).getByRole('button', { name: 'Link investments only' }));
     await expect.poll(() => sent('POST /api/plaid/link-token')[0]?.body).toEqual({ kind: 'investments' });
   });
 
@@ -92,6 +117,7 @@ describe('Accounts page', () => {
     const { user } = renderPage(<Accounts />);
     const button = await screen.findByRole('button', { name: 'Link account' });
     await user.click(button);
+    await user.click(within(await screen.findByRole('dialog')).getByRole('button', { name: 'Link account' }));
     await expect.poll(() => plaidLink.open.mock.calls.length).toBe(1);
     expect(button).toBeDisabled();
     act(() => plaidLink.onExit!({ display_message: 'The institution is unavailable.' }));
@@ -167,6 +193,7 @@ describe('Accounts page', () => {
     server.use(http.post('*/api/plaid/link-token', () => HttpResponse.json({ error: 'Plaid is not configured on the server.' }, { status: 503 })));
     const { user } = renderPage(<Accounts />);
     await user.click(await screen.findByRole('button', { name: 'Link account' }));
+    await user.click(within(await screen.findByRole('dialog')).getByRole('button', { name: 'Link account' }));
     expect(await screen.findByText('Plaid is not configured on the server.')).toBeInTheDocument();
   });
 

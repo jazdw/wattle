@@ -6,6 +6,7 @@ import type { Deps } from '../server/ports';
 import { collectPendingReport } from '../server/services/assetReports';
 import { connectionLease, Lease } from '../server/services/lease';
 import { backfillConnection } from '../server/services/backfill';
+import { syncConnection } from '../server/services/sync';
 import { account, closes, fakePlaid, fakePrices, holding, security } from './fakes';
 import { client, createHousehold, createTestDeps, flush, TODAY } from './helpers';
 
@@ -268,8 +269,39 @@ describe('cash positions', () => {
 });
 
 describe('disconnecting', () => {
-  it('keeps accounts as manual ones by default', async () => {
+  it('keeps accounts as manual ones, and the Plaid login so it can be reconnected', async () => {
+    const { deps, api, plaid, connection, tenant } = await linked();
+    const before = await deps.db.select().from(schema.accounts);
+    expect((await api(`/api/connections/${connection.id}`, { method: 'DELETE' })).status).toBe(200);
+    expect(plaid.state.removed).toEqual([]); // not removed at Plaid
+    const accounts = await deps.db.select().from(schema.accounts);
+    expect(accounts.every((row) => row.source === 'manual' && row.connectionId === connection.id)).toBe(true);
+    const [kept] = await deps.db.select().from(schema.connections);
+    expect(kept.status).toBe('disconnected');
+    expect(kept.accessTokenEnc).not.toBe('');
+    expect((await api('/api/connections')).body).toMatchObject({ connections: [{ id: connection.id, status: 'disconnected' }], itemsUsed: 1 });
+    // Not synced meanwhile.
+    expect(await syncConnection(deps, tenant, connection.id, 'nightly')).toMatchObject({ status: 'disconnected', accounts: 0 });
+
+    // While disconnected it's a manual account: a recorded balance is kept after reconnecting.
+    const id = before[0].id;
+    expect((await api(`/api/accounts/${id}/balances`, { method: 'POST', json: { date: '2026-09-15', balance: 42 } })).status).toBe(200);
+
+    expect((await api(`/api/connections/${connection.id}/reconnect`, { method: 'POST' })).status).toBe(200);
+    expect((await deps.db.select().from(schema.connections))[0].status).toBe('ok');
+    const after = await deps.db.select().from(schema.accounts);
+    expect(after.map((row) => [row.id, row.source]).sort()).toEqual(before.map((row) => [row.id, 'plaid']).sort()); // same accounts, linked again
+    const [recorded] = await deps.db
+      .select()
+      .from(schema.accountDaily)
+      .where(and(eq(schema.accountDaily.accountId, id), eq(schema.accountDaily.date, '2026-09-15')));
+    expect(recorded).toMatchObject({ balance: 42_00, source: 'manual' });
+    expect((await api(`/api/connections/${connection.id}/reconnect`, { method: 'POST' })).status).toBe(409); // already connected
+  });
+
+  it('removes the login at Plaid only when PLAID_ALLOW_REMOVE is on', async () => {
     const { deps, api, plaid, connection } = await linked();
+    deps.config.plaidAllowRemove = true;
     expect((await api(`/api/connections/${connection.id}`, { method: 'DELETE' })).status).toBe(200);
     expect(plaid.state.removed).toEqual(['access-sandbox-item-1']);
     const accounts = await deps.db.select().from(schema.accounts);

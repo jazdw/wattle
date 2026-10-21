@@ -1,5 +1,5 @@
 import { useMutation, useQueryClient } from '@tanstack/react-query';
-import { EyeOff, History, Layers, Pencil, Plus, RefreshCw, Unplug, Upload } from 'lucide-react';
+import { EyeOff, History, Layers, Link2, Pencil, Plus, RefreshCw, Unplug, Upload } from 'lucide-react';
 import { useState } from 'react';
 import type { AccountSummary, ConnectionSummary } from '../../shared/types';
 import { api } from '../api';
@@ -7,6 +7,7 @@ import { ActivityDialog } from '../components/ActivityDialog';
 import { EditAccountDialog, HoldingsDialog, ImportDialog, NewAccountDialog } from '../components/AccountDialogs';
 import { PageHeader } from '../components/Layout';
 import { PlaidLinkButton } from '../components/PlaidLinkButton';
+import { usePlaidLink, type LinkKind } from '../hooks/usePlaidLink';
 import { Badge } from '../components/ui/badge';
 import { Button } from '../components/ui/button';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '../components/ui/card';
@@ -21,6 +22,7 @@ const STATUS_TEXT: Record<ConnectionSummary['status'], string> = {
   login_required: 'Sign-in needed',
   pending_expiration: 'Consent expiring',
   error: 'Error',
+  disconnected: 'Disconnected',
   removed: 'Removed',
 };
 
@@ -56,6 +58,13 @@ export function Accounts() {
   const [holdingsFor, setHoldingsFor] = useState<AccountSummary | null>(null);
   const [removing, setRemoving] = useState<ConnectionSummary | null>(null);
   const [activityFor, setActivityFor] = useState<ConnectionSummary | null>(null);
+  const [choosingLink, setChoosingLink] = useState(false);
+  // Held by the page: the chooser dialog closes as Plaid Link opens.
+  const link = usePlaidLink({ onError: setError });
+  const startLink = (kind: LinkKind) => {
+    setChoosingLink(false);
+    link.start(kind);
+  };
 
   const sync = useMutation({
     mutationFn: (id: string) => api(`/api/connections/${id}/sync`, { method: 'POST' }),
@@ -66,6 +75,11 @@ export function Accounts() {
     const found = accounts.data?.accounts.find((row) => row.id === id);
     return found ? `${found.name}${found.institutionName ? ` at ${found.institutionName}` : ''}` : 'another account';
   };
+  const reconnect = useMutation({
+    mutationFn: (id: string) => api(`/api/connections/${id}/reconnect`, { method: 'POST' }),
+    onSuccess: () => void queryClient.invalidateQueries(),
+    onError: (caught) => setError(caught.message),
+  });
   const remove = useMutation({
     mutationFn: (id: string) => api(`/api/connections/${id}`, { method: 'DELETE' }),
     onSuccess: () => {
@@ -76,7 +90,9 @@ export function Accounts() {
   });
 
   const accountsBy = (connectionId: string | null) =>
-    (accounts.data?.accounts ?? []).filter((account) => account.connectionId === connectionId);
+    (accounts.data?.accounts ?? []).filter((account) => account.source === 'plaid' && account.connectionId === connectionId);
+  const linked = (connections.data?.connections ?? []).filter((connection) => connection.status !== 'disconnected');
+  const disconnected = (connections.data?.connections ?? []).filter((connection) => connection.status === 'disconnected');
   const manual = (accounts.data?.accounts ?? []).filter((account) => account.source === 'manual');
   const production = connections.data?.plaidEnv === 'production';
 
@@ -88,7 +104,9 @@ export function Accounts() {
         actions={
           <>
             {connections.data?.plaidEnv && (
-              <PlaidLinkButton kind="account" label="Link account" onError={setError} />
+              <Button onClick={() => setChoosingLink(true)} disabled={link.busy}>
+                <Link2 /> {link.importing ? 'Importing…' : 'Link account'}
+              </Button>
             )}
             <Button variant="outline" onClick={() => setCreating(true)}>
               <Plus /> Manual account
@@ -110,13 +128,6 @@ export function Accounts() {
           <Alert variant="warning">Plaid isn't configured on the server; only manual accounts are available.</Alert>
         </div>
       )}
-      {connections.data?.plaidEnv && (
-        <p className="-mt-2 mb-4 flex flex-wrap items-center gap-x-1 text-xs text-muted-foreground">
-          Link account brings in balances with up to two years of history, plus holdings for investment accounts. Can't find your institution
-          (some 401(k) providers)?
-          <PlaidLinkButton kind="investments" label="Link investments only" variant="link" size="sm" onError={setError} />
-        </p>
-      )}
       {connections.data?.plaidEnv === 'sandbox' && (
         <div className="mb-4">
           <Alert>
@@ -129,7 +140,7 @@ export function Accounts() {
         {connections.isPending || accounts.isPending ? (
           <Skeleton className="h-40 w-full" />
         ) : (
-          connections.data?.connections.map((connection) => (
+          linked.map((connection) => (
             <Card key={connection.id}>
               <CardHeader className="flex-row flex-wrap items-start justify-between gap-2">
                 <div>
@@ -170,6 +181,36 @@ export function Accounts() {
           ))
         )}
 
+        {disconnected.length > 0 && (
+          <Card>
+            <CardHeader>
+              <CardTitle>Disconnected</CardTitle>
+              <CardDescription>
+                Not syncing. Their accounts are under Manual accounts until you reconnect, which picks up the same login (no new Plaid
+                Item).
+              </CardDescription>
+            </CardHeader>
+            <CardContent className="grid gap-2">
+              {disconnected.map((connection) => (
+                <div key={connection.id} className="flex flex-wrap items-center justify-between gap-2 text-sm">
+                  <span>
+                    <span className="font-medium">{connection.institutionName ?? 'Institution'}</span>
+                    <span className="text-muted-foreground"> · linked by {ownerName(connection.ownerUserId)}</span>
+                  </span>
+                  <span className="flex gap-2">
+                    <Button variant="ghost" size="sm" onClick={() => setActivityFor(connection)}>
+                      <History /> Activity
+                    </Button>
+                    <Button variant="outline" size="sm" onClick={() => reconnect.mutate(connection.id)} disabled={reconnect.isPending}>
+                      <RefreshCw className={reconnect.isPending && reconnect.variables === connection.id ? 'animate-spin' : undefined} /> Reconnect
+                    </Button>
+                  </span>
+                </div>
+              ))}
+            </CardContent>
+          </Card>
+        )}
+
         {manual.length > 0 && (
           <Card>
             <CardHeader>
@@ -196,6 +237,30 @@ export function Accounts() {
       </div>
 
       <NewAccountDialog open={creating} onOpenChange={setCreating} />
+      <Dialog open={choosingLink} onOpenChange={setChoosingLink}>
+        <DialogContent
+          title="Link an account"
+          description="Sign in to your bank or brokerage through Plaid. Each login you link uses one Plaid Item."
+        >
+          <div className="grid gap-3 text-sm">
+            <div className="grid gap-2 rounded-md border p-3">
+              <p>Balances with up to two years of history, plus holdings for investment accounts. Use this for banks, cards and brokerages.</p>
+              <Button className="justify-self-start" onClick={() => startLink('account')}>
+                Link account
+              </Button>
+            </div>
+            <div className="grid gap-2 rounded-md border p-3">
+              <p className="text-muted-foreground">
+                Can't find your institution (some 401(k) providers)? Try linking holdings only; it lists institutions that don't offer balance
+                history.
+              </p>
+              <Button variant="outline" className="justify-self-start" onClick={() => startLink('investments')}>
+                Link investments only
+              </Button>
+            </div>
+          </div>
+        </DialogContent>
+      </Dialog>
       <Dialog open={removing !== null} onOpenChange={(open) => !open && setRemoving(null)}>
         <DialogContent
           title={`Disconnect ${removing?.institutionName ?? 'this institution'}?`}

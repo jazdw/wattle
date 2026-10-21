@@ -32,7 +32,8 @@ export interface MeResponse {
   household: Household;
 }
 
-export type ConnectionStatus = 'ok' | 'login_required' | 'pending_expiration' | 'error' | 'removed';
+/** 'disconnected': not synced, but the Plaid login is kept so it can be reconnected. 'removed': removed at Plaid too. */
+export type ConnectionStatus = 'ok' | 'login_required' | 'pending_expiration' | 'error' | 'disconnected' | 'removed';
 
 export interface ConnectionSummary {
   id: string;

@@ -23,6 +23,8 @@ TOKEN_ENC_KEY=""
 PLAID_CLIENT_ID=""
 PLAID_SECRET=""
 PLAID_ENV="sandbox"
+# "true" lets Disconnect remove the login at Plaid (permanent). Off: it's kept, so it can be reconnected.
+PLAID_ALLOW_REMOVE="false"
 
 # Market data (free tiers): https://www.tiingo.com, https://finnhub.io
 TIINGO_API_KEY=""
