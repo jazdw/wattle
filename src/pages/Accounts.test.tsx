@@ -40,10 +40,19 @@ describe('Accounts page', () => {
     await user.click(within(northwind).getByRole('button', { name: /Sync/ }));
     await expect.poll(() => sent('POST /api/connections/c-northwind/sync').length).toBe(1);
 
+    // Cancelling leaves it connected.
     await user.click(within(northwind).getByRole('button', { name: 'Disconnect' }));
-    expect(within(northwind).getByText(/kept as manual accounts/)).toBeInTheDocument();
-    await user.click(within(northwind).getByRole('button', { name: 'Confirm disconnect' }));
+    let dialog = await screen.findByRole('dialog', { name: 'Disconnect Northwind?' });
+    expect(within(dialog).getByText(/kept as manual accounts/)).toBeInTheDocument();
+    await user.click(within(dialog).getByRole('button', { name: 'Cancel' }));
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
+    expect(sent('DELETE /api/connections/c-northwind')).toHaveLength(0);
+
+    await user.click(within(northwind).getByRole('button', { name: 'Disconnect' }));
+    dialog = await screen.findByRole('dialog', { name: 'Disconnect Northwind?' });
+    await user.click(within(dialog).getByRole('button', { name: 'Disconnect' }));
     await expect.poll(() => sent('DELETE /api/connections/c-northwind').length).toBe(1);
+    await expect.poll(() => screen.queryByRole('dialog')).toBeNull();
   });
 
   it('links a new institution through Plaid Link', async () => {

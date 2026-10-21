@@ -36,7 +36,8 @@ const REVIEWED: Record<string, Record<string, string>> = {
     securities: 'manual holdings: account lease; never modifies Plaid-owned rows; derived ids',
   },
   'server/routes/portfolio.ts': {
-    accountDaily: 'CSV import: one atomic batch; never overwrites unless asked',
+    accountDaily: 'CSV import: one atomic batch; never overwrites unless asked; manual accounts under the account lease',
+    accounts: "CSV import into a manual account: current balance from its latest entry, account lease",
     holdingDaily: 'CSV import: one atomic batch',
     securities: 'classification edit: single update (syncs never touch classification); import: derived ids',
     targets: 'targets lease + version',

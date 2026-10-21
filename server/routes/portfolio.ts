@@ -1,5 +1,5 @@
 /** Portfolio views: summary, history, securities, targets, quotes, imports, settings. */
-import { and, eq, inArray, sql } from 'drizzle-orm';
+import { and, desc, eq, inArray, sql } from 'drizzle-orm';
 import { Hono } from 'hono';
 import { suggestClassification } from '../../shared/classify';
 import { marketDate, newYorkClock } from '../../shared/dates';
@@ -24,7 +24,7 @@ import { cacheGetMany, cacheSetMany } from '../services/cache';
 import { loadHistory, RANGES, type Range } from '../services/history';
 import { activeTarget, loadPortfolio } from '../services/portfolio';
 import { stableId } from '../services/ids';
-import { Lease, targetsLease } from '../services/lease';
+import { accountLease, Lease, targetsLease } from '../services/lease';
 import { describeTickers } from '../services/pricing';
 import { snapshotHousehold } from '../services/snapshots';
 import { activeConnections, MANUAL_SYNC_INTERVAL_MS, syncConnection } from '../services/sync';
@@ -276,6 +276,7 @@ async function importTarget(tenant: Tenant, accountId: string) {
 }
 
 portfolioRoutes.post('/imports/balances', async (c) => {
+  const deps = c.env.deps;
   const tenant = c.get('tenant');
   const body = await readBody(c, importBalancesSchema);
   const account = await importTarget(tenant, body.accountId);
@@ -290,23 +291,54 @@ portfolioRoutes.post('/imports/balances', async (c) => {
     currency: account.currency,
     source: 'import' as const,
   }));
-  // The whole file or none of it.
-  await runAtomic(
-    tenant.db,
-    chunkRows(accountDaily, rows).map((chunk) =>
-      tenant.db
-        .insert(accountDaily)
-        .values(chunk)
-        .onConflictDoUpdate({
-          target: [accountDaily.accountId, accountDaily.date],
-          set: { balance: sql`excluded.balance`, source: sql`excluded.source`, estimated: sql`0` },
-          // Imports fill gaps and replace estimates; with overwrite they replace synced values too.
-          setWhere: body.overwrite
-            ? sql`1 = 1`
-            : sql`${accountDaily.source} = 'backfill' or ${accountDaily.source} = 'import'`,
-        }),
-    ),
-  );
+  const manual = account.source === 'manual';
+  // A manual account's current balance follows its entries: one change to it at a time.
+  const lease = manual
+    ? await Lease.acquireOrBusy(deps, tenant, accountLease(account.id), 'Someone else is updating this account. Try again in a moment.')
+    : null;
+  let balanceChanged = false;
+  try {
+    // The whole file or none of it.
+    await runAtomic(
+      tenant.db,
+      chunkRows(accountDaily, rows).map((chunk) =>
+        tenant.db
+          .insert(accountDaily)
+          .values(chunk)
+          .onConflictDoUpdate({
+            target: [accountDaily.accountId, accountDaily.date],
+            set: { balance: sql`excluded.balance`, source: sql`excluded.source`, estimated: sql`0` },
+            // Imports fill gaps and replace estimates; with overwrite they replace synced values too.
+            setWhere: body.overwrite
+              ? sql`1 = 1`
+              : sql`${accountDaily.source} = 'backfill' or ${accountDaily.source} = 'import'`,
+          }),
+      ),
+    );
+    if (lease) {
+      // The most recent entry (recorded or imported) is the current balance.
+      const [latest] = await tenant.db
+        .select({ date: accountDaily.date, balance: accountDaily.balance })
+        .from(accountDaily)
+        .where(tenant.scope(accountDaily, eq(accountDaily.accountId, account.id), inArray(accountDaily.source, ['manual', 'import'])))
+        .orderBy(desc(accountDaily.date))
+        .limit(1);
+      if (latest && latest.balance !== account.balance) {
+        balanceChanged = true;
+        await lease.renew();
+        await runAtomic(tenant.db, [
+          tenant.db.update(accounts).set({ balance: latest.balance, balanceAsOf: deps.now().getTime() }).where(tenant.scope(accounts, eq(accounts.id, account.id))),
+          // Carried-forward snapshot copies after it are stale now.
+          tenant.db
+            .delete(accountDaily)
+            .where(tenant.scope(accountDaily, eq(accountDaily.accountId, account.id), eq(accountDaily.source, 'sync'), sql`${accountDaily.date} > ${latest.date}`)),
+        ]);
+      }
+    }
+  } finally {
+    await lease?.forceRelease();
+  }
+  if (balanceChanged) await snapshotHousehold(deps, tenant, marketDate(deps.now()));
   return c.json({ imported: rows.length });
 });
 

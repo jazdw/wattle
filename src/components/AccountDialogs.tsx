@@ -473,6 +473,17 @@ export function ImportDialog({ accounts, open, onOpenChange }: { accounts: Accou
     onSuccess: () => invalidate(),
   });
 
+  // Closing starts the next import afresh.
+  function close() {
+    setAccountId('');
+    setTable(null);
+    setMapping(null);
+    setPresetLabel(null);
+    setOverwrite(false);
+    commit.reset();
+    onOpenChange(false);
+  }
+
   const header = table?.[0] ?? [];
   const columnOptions = header.map((cell, index) => (
     <option key={index} value={index}>
@@ -481,16 +492,7 @@ export function ImportDialog({ accounts, open, onOpenChange }: { accounts: Accou
   ));
 
   return (
-    <Dialog
-      open={open}
-      onOpenChange={(next) => {
-        if (!next) {
-          setTable(null);
-          commit.reset();
-        }
-        onOpenChange(next);
-      }}
-    >
+    <Dialog open={open} onOpenChange={(next) => (next ? onOpenChange(true) : close())}>
       <DialogContent
         className="max-w-2xl"
         title="Import balance history"
@@ -564,7 +566,7 @@ export function ImportDialog({ accounts, open, onOpenChange }: { accounts: Accou
         {commit.error && <Alert variant="error">{commit.error.message}</Alert>}
         {commit.data && <Alert>Imported {commit.data.imported} days.</Alert>}
         <div className="flex justify-end gap-2">
-          <Button variant="outline" onClick={() => onOpenChange(false)}>
+          <Button variant="outline" onClick={close}>
             Close
           </Button>
           <Button onClick={() => commit.mutate()} disabled={!accountId || !preview?.rows.length || commit.isPending}>
