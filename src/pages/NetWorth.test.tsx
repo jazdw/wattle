@@ -1,6 +1,7 @@
 import { screen, within } from '@testing-library/react';
 import { http, HttpResponse } from 'msw';
 import { describe, expect, it } from 'vitest';
+import { CONNECTIONS } from '../test/fixtures';
 import { renderPage } from '../test/render';
 import { sent, server } from '../test/server';
 import { NetWorth } from './NetWorth';
@@ -35,6 +36,17 @@ describe('Net worth page', () => {
     renderPage(<NetWorth />);
     expect(await screen.findByText(/Vanguard needs attention/)).toBeInTheDocument();
     expect(screen.getByRole('link', { name: 'Fix in Accounts' })).toHaveAttribute('href', '/accounts');
+  });
+
+  it("doesn't count a login you disconnected as needing attention", async () => {
+    server.use(
+      http.get('*/api/connections', () =>
+        HttpResponse.json({ ...CONNECTIONS, connections: CONNECTIONS.connections.map((row) => ({ ...row, status: row.id === 'c-vg' ? 'disconnected' : 'ok' })) }),
+      ),
+    );
+    renderPage(<NetWorth />);
+    await screen.findByText('$1,366,200');
+    expect(screen.queryByText(/needs attention/)).not.toBeInTheDocument();
   });
 
   it('changes the range and refreshes', async () => {
