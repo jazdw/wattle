@@ -27,6 +27,7 @@ import { leases } from '../db/schema';
 import { HttpError } from '../lib/http';
 import type { Tenant } from '../db/tenant';
 import type { Deps } from '../ports';
+import { describeError } from '../lib/errors';
 
 /** Far longer than any write takes; long work renews as it goes. */
 export const LEASE_MS = 2 * 60 * 1000;
@@ -196,7 +197,7 @@ export async function holdWhile<T>(lease: Lease, work: (run: number) => Promise<
     return result;
   } catch (error) {
     await lease.forceRelease().catch((releaseError: unknown) =>
-      console.error('Could not release the lease', releaseError instanceof Error ? releaseError.message : releaseError),
+      console.error('Could not release the lease', describeError(releaseError)),
     );
     throw error;
   }

@@ -200,6 +200,22 @@ describe('sessions', () => {
     expect(response.headers.get('set-cookie')).toMatch(/wt_session=;/);
   });
 
+  it('signs someone out once they leave the allow-list', async () => {
+    const deps = await createTestDeps();
+    const home = await createHousehold(deps, 'Home', 'Me@Example.com');
+    const api = client(deps, home.cookie);
+    expect((await api('/api/accounts')).status).toBe(200);
+    await deps.db.delete(schema.allowedEmails).where(eq(schema.allowedEmails.email, 'Me@Example.com'));
+    expect((await api('/api/accounts')).status).toBe(401);
+  });
+
+  it('tells the browser to drop cached pages on sign-out', async () => {
+    const deps = await createTestDeps();
+    const home = await createHousehold(deps, 'Home', 'me@example.com');
+    const response = await client(deps, home.cookie)('/api/auth/logout', { method: 'POST' });
+    expect(response.headers.get('clear-site-data')).toBe('"cache"');
+  });
+
   it('rejects unknown session tokens', async () => {
     const deps = await createTestDeps();
     expect((await client(deps, 'wt_session=nonsense')('/api/accounts')).status).toBe(401);

@@ -6,6 +6,7 @@ import type { Deps } from '../server/ports';
 import { collectPendingReport } from '../server/services/assetReports';
 import { connectionLease, Lease } from '../server/services/lease';
 import { backfillConnection } from '../server/services/backfill';
+import { saveCloses } from '../server/services/pricing';
 import { snapshotHousehold } from '../server/services/snapshots';
 import { syncConnection } from '../server/services/sync';
 import { account, closes, fakePlaid, fakePrices, holding, security } from './fakes';
@@ -66,9 +67,9 @@ describe('linking', () => {
     expect(portfolio.allCategories.us_stock).toBe(1500_00);
     expect(portfolio.allCategories.cash).toBe(500_00);
 
-    // Plaid's previous closes land in the shared price table for the snapshot.
+    // The price provider doesn't know VTI yet, so Plaid's close isn't shared.
     const plaidCloses = await deps.db.select().from(schema.pricesDaily).where(eq(schema.pricesDaily.source, 'plaid'));
-    expect(plaidCloses).toEqual([expect.objectContaining({ ticker: 'VTI', date: '2026-10-08', close: 100 })]);
+    expect(plaidCloses).toEqual([]);
 
     // Securities are classified on arrival from the seeded profiles.
     const [vti] = await deps.db.select().from(schema.securities).where(eq(schema.securities.ticker, 'VTI'));
@@ -233,6 +234,32 @@ describe('market pricing', () => {
     expect(byTicker.get('CUR:USD')?.isPublic).toBe(false);
     // Without a close from Plaid, the institution's price is kept as the fallback.
     expect(byTicker.get('SBSI')?.lastPrice).toBe(34);
+  });
+
+  it("shares Plaid's closes with other households only for known tickers, recent days and plausible prices", async () => {
+    const deps = await createTestDeps();
+    await saveCloses(
+      deps,
+      ['VTI', 'BND', 'VXUS'].map((ticker) => ({ ticker, date: '2026-10-07', close: 100, currency: 'USD', source: 'tiingo' })),
+      { replace: true },
+    );
+    const plaid = fakePlaid({
+      accounts: [account('brk', 'investment', 1000)],
+      securities: [
+        security('s-vti', 'VTI', 'etf', 101), // shared
+        security('s-bnd', 'BND', 'etf', 500), // too far from the provider's close
+        { ...security('s-vxus', 'VXUS', 'etf', 100), close_price_as_of: '2026-10-20' }, // dated after today
+        security('s-own', 'MYPLAN', 'equity', 10), // a code the provider doesn't know
+      ],
+      holdings: ['s-vti', 's-bnd', 's-vxus', 's-own'].map((id) => holding('brk', id, 1, 10)),
+    });
+    const { api } = await linked(plaid, { db: deps.db });
+    const shared = await deps.db.select().from(schema.pricesDaily).where(eq(schema.pricesDaily.source, 'plaid'));
+    expect(shared.map((row) => [row.ticker, row.date, row.close])).toEqual([['VTI', '2026-10-08', 101]]);
+
+    // The household still sees its institution's prices for the rest.
+    const closes = (await api('/api/quotes')).body.closes as { ticker: string; close: number }[];
+    expect(Object.fromEntries(closes.map((row) => [row.ticker, row.close]))).toEqual({ VTI: 101, BND: 500, VXUS: 100, MYPLAN: 10 });
   });
 });
 

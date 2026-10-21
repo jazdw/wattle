@@ -20,7 +20,8 @@ import { fillMissedDays, runHistoryLoad } from './backfill';
 import { BusyError, connectionLease, holdWhile, Lease, snapshotLease } from './lease';
 import { decryptToken, encryptToken, loadTokenKeys, tokenAad } from './crypto';
 import { stableId } from './ids';
-import { closeStatements } from './pricing';
+import { sharedCloseStatements } from './pricing';
+import { describeError } from '../lib/errors';
 
 export type ConnectionRow = typeof connections.$inferSelect;
 
@@ -559,8 +560,8 @@ async function planSecurities(
   }
 
   const inserts: (typeof securities.$inferInsert)[] = [];
-  // Plaid's previous close is public market data: store it in the shared
-  // price table so the nightly snapshot needn't ask Tiingo for these tickers.
+  // Plaid's previous close for a public ticker can go in the shared price
+  // table (after checks), so the nightly snapshot needn't ask Tiingo for it.
   const closes: (typeof pricesDaily.$inferInsert)[] = [];
 
   for (const security of plaidSecurities) {
@@ -623,8 +624,9 @@ async function planSecurities(
     writes.push(tenant.db.insert(securities).values(chunk).onConflictDoNothing({ target: [securities.householdId, securities.externalId] }));
   }
   // Tiingo's official closes win over Plaid's for the same day.
-  writes.push(...closeStatements(deps, closes, { replace: false }));
-  run.count('pricesFromPlaid', closes.length);
+  const shared = await sharedCloseStatements(deps, closes, today);
+  writes.push(...shared.statements);
+  run.count('pricesFromPlaid', shared.shared);
   return ids;
 }
 
@@ -846,7 +848,7 @@ export async function removeConnection(
       try {
         await run.plaid().removeItem(await accessTokenFor(deps, connection));
       } catch (error) {
-        console.warn('Plaid item removal failed', error instanceof Error ? error.message : error);
+        console.warn('Plaid item removal failed', describeError(error));
       }
     }
     await lease.renew();
