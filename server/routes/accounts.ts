@@ -378,11 +378,11 @@ accountRoutes.post('/:id/balances', async (c) => {
   const lease = await Lease.acquireOrBusy(deps, tenant, accountLease(account.id), 'Someone else is updating this account. Try again in a moment.');
   let isLatest = false;
   try {
-    // The account's current balance is its most recent entry.
+    // The account's current balance is its most recent entry (recorded or imported).
     const [latest] = await tenant.db
       .select({ date: accountDaily.date })
       .from(accountDaily)
-      .where(tenant.scope(accountDaily, eq(accountDaily.accountId, account.id), eq(accountDaily.source, 'manual')))
+      .where(tenant.scope(accountDaily, eq(accountDaily.accountId, account.id), inArray(accountDaily.source, ['manual', 'import'])))
       .orderBy(desc(accountDaily.date))
       .limit(1);
     isLatest = !latest || body.date >= latest.date;

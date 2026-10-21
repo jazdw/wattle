@@ -1,5 +1,5 @@
 import { useMutation, useQueryClient } from '@tanstack/react-query';
-import { EyeOff, History, Layers, Pencil, Plus, RefreshCw, Upload } from 'lucide-react';
+import { EyeOff, History, Layers, Pencil, Plus, RefreshCw, Unplug, Upload } from 'lucide-react';
 import { useState } from 'react';
 import type { AccountSummary, ConnectionSummary } from '../../shared/types';
 import { api } from '../api';
@@ -10,6 +10,7 @@ import { PlaidLinkButton } from '../components/PlaidLinkButton';
 import { Badge } from '../components/ui/badge';
 import { Button } from '../components/ui/button';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '../components/ui/card';
+import { Dialog, DialogContent } from '../components/ui/dialog';
 import { Alert, Skeleton } from '../components/ui/misc';
 import { useAccounts, useConnections } from '../hooks/queries';
 import { useAuth, useOwnerName } from '../hooks/useAuth';
@@ -53,7 +54,7 @@ export function Accounts() {
   const [importing, setImporting] = useState(false);
   const [editing, setEditing] = useState<AccountSummary | null>(null);
   const [holdingsFor, setHoldingsFor] = useState<AccountSummary | null>(null);
-  const [removing, setRemoving] = useState<string | null>(null);
+  const [removing, setRemoving] = useState<ConnectionSummary | null>(null);
   const [activityFor, setActivityFor] = useState<ConnectionSummary | null>(null);
 
   const sync = useMutation({
@@ -152,24 +153,12 @@ export function Accounts() {
                   <Button variant="ghost" size="sm" onClick={() => setActivityFor(connection)}>
                     <History /> Activity
                   </Button>
-                  {removing === connection.id ? (
-                    <Button variant="destructive" size="sm" onClick={() => remove.mutate(connection.id)} disabled={remove.isPending}>
-                      Confirm disconnect
-                    </Button>
-                  ) : (
-                    <Button variant="ghost" size="sm" onClick={() => setRemoving(connection.id)}>
-                      Disconnect
-                    </Button>
-                  )}
+                  <Button variant="ghost" size="sm" onClick={() => setRemoving(connection)}>
+                    <Unplug /> Disconnect
+                  </Button>
                 </div>
               </CardHeader>
               <CardContent>
-                {removing === connection.id && (
-                  <p className="mb-2 text-xs text-muted-foreground">
-                    Disconnecting stops syncing. Its accounts and history are kept as manual accounts.
-                    {production && ' On the Plaid Trial plan the slot is not freed.'}
-                  </p>
-                )}
                 <AccountList
                   accounts={accountsBy(connection.id)}
                   currency={currency}
@@ -207,6 +196,22 @@ export function Accounts() {
       </div>
 
       <NewAccountDialog open={creating} onOpenChange={setCreating} />
+      <Dialog open={removing !== null} onOpenChange={(open) => !open && setRemoving(null)}>
+        <DialogContent
+          title={`Disconnect ${removing?.institutionName ?? 'this institution'}?`}
+          description="Syncing stops. Its accounts and their history are kept as manual accounts, which you can update by hand or delete."
+        >
+          {production && <Alert variant="warning">On the Plaid Trial plan this doesn't free up the login's slot.</Alert>}
+          <div className="flex justify-end gap-2">
+            <Button variant="outline" onClick={() => setRemoving(null)}>
+              Cancel
+            </Button>
+            <Button variant="destructive" onClick={() => removing && remove.mutate(removing.id)} disabled={remove.isPending}>
+              Disconnect
+            </Button>
+          </div>
+        </DialogContent>
+      </Dialog>
       <ImportDialog accounts={accounts.data?.accounts ?? []} open={importing} onOpenChange={setImporting} />
       <EditAccountDialog
         account={editing}

@@ -144,6 +144,14 @@ describe('CSV import', () => {
       ],
     });
     expect(await within(dialog).findByText('Imported 2 days.')).toBeInTheDocument();
+
+    // Closing clears it for the next import.
+    await user.click(within(dialog).getByText('Close', { selector: 'button' })); // the footer button, not the ×
+    await user.click(screen.getByRole('button', { name: /Import CSV/ }));
+    const reopened = await screen.findByRole('dialog', { name: 'Import balance history' });
+    expect(within(reopened).getByLabelText('Account')).toHaveValue('');
+    expect(within(reopened).queryByText(/Recognised/)).not.toBeInTheDocument();
+    expect(within(reopened).queryByText(/Imported/)).not.toBeInTheDocument();
   });
 
   it('lets you map columns for other files', async () => {

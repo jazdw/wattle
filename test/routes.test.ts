@@ -252,6 +252,25 @@ describe('imports', () => {
     expect(await balance('2026-10-01')).toBe(999_00);
   });
 
+  it("makes a manual account's latest imported day its current balance", async () => {
+    const { api, create } = await household();
+    const id = await create({ name: 'Savings', type: 'depository' });
+    const current = async () => (await api('/api/accounts')).body.accounts.find((row: { id: string }) => row.id === id).balance;
+    expect(await current()).toBeNull();
+    const rows = [
+      { date: '2026-09-01', balance: 50 },
+      { date: '2026-10-01', balance: 120.5 },
+    ];
+    await api('/api/imports/balances', { method: 'POST', json: { accountId: id, rows } });
+    expect(await current()).toBe(120_50);
+
+    // An older file doesn't replace it; a later recorded balance does.
+    await api('/api/imports/balances', { method: 'POST', json: { accountId: id, rows: [{ date: '2026-08-01', balance: 1 }] } });
+    expect(await current()).toBe(120_50);
+    await api(`/api/accounts/${id}/balances`, { method: 'POST', json: { date: '2026-09-15', balance: 7 } });
+    expect(await current()).toBe(120_50); // older than the imported 1 Oct
+  });
+
   it('imports holdings history and creates unknown securities', async () => {
     const { deps, api, create } = await household();
     const id = await create({ name: 'IRA', type: 'investment' });

@@ -40,10 +40,19 @@ describe('Accounts page', () => {
     await user.click(within(chase).getByRole('button', { name: /Sync/ }));
     await expect.poll(() => sent('POST /api/connections/c-chase/sync').length).toBe(1);
 
+    // Cancelling leaves it connected.
     await user.click(within(chase).getByRole('button', { name: 'Disconnect' }));
-    expect(within(chase).getByText(/kept as manual accounts/)).toBeInTheDocument();
-    await user.click(within(chase).getByRole('button', { name: 'Confirm disconnect' }));
+    let dialog = await screen.findByRole('dialog', { name: 'Disconnect Chase?' });
+    expect(within(dialog).getByText(/kept as manual accounts/)).toBeInTheDocument();
+    await user.click(within(dialog).getByRole('button', { name: 'Cancel' }));
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
+    expect(sent('DELETE /api/connections/c-chase')).toHaveLength(0);
+
+    await user.click(within(chase).getByRole('button', { name: 'Disconnect' }));
+    dialog = await screen.findByRole('dialog', { name: 'Disconnect Chase?' });
+    await user.click(within(dialog).getByRole('button', { name: 'Disconnect' }));
     await expect.poll(() => sent('DELETE /api/connections/c-chase').length).toBe(1);
+    await expect.poll(() => screen.queryByRole('dialog')).toBeNull();
   });
 
   it('links a new institution through Plaid Link', async () => {
