@@ -75,3 +75,52 @@ describe('verification key cache', () => {
     expect(await verifyPlaidWebhook(failing, jwt, '{}', now)).toBe(false);
   });
 });
+
+describe('key lookups from unverified requests', () => {
+  const counter = () => {
+    const calls: string[] = [];
+    const plaid = {
+      getWebhookVerificationKey: async (kid: string) => {
+        calls.push(kid);
+        throw new Error('INVALID_WEBHOOK_VERIFICATION_KEY_ID');
+      },
+    };
+    return { calls, plaid };
+  };
+  const forged = async (sign: (payload: unknown, kid: string) => Promise<string>, kid: string, at: Date) =>
+    sign({ iat: at.getTime() / 1000, request_body_sha256: await sha256Hex('{}') }, kid);
+
+  it("doesn't ask Plaid about malformed key ids", async () => {
+    const { sign } = await setup();
+    const { calls, plaid } = counter();
+    const at = new Date('2026-11-01T00:00:00Z');
+    expect(await verifyPlaidWebhook(plaid, await forged(sign, '../../etc', at), '{}', at)).toBe(false);
+    expect(await verifyPlaidWebhook(plaid, await forged(sign, 'x'.repeat(65), at), '{}', at)).toBe(false);
+    expect(calls).toEqual([]);
+  });
+
+  it('asks about an unknown key id once every five minutes', async () => {
+    const { sign } = await setup();
+    const { calls, plaid } = counter();
+    const at = new Date('2026-11-02T00:00:00Z');
+    for (let i = 0; i < 5; i += 1) expect(await verifyPlaidWebhook(plaid, await forged(sign, 'made-up', at), '{}', at)).toBe(false);
+    expect(calls).toEqual(['made-up']);
+    const later = new Date(at.getTime() + 6 * 60_000);
+    await verifyPlaidWebhook(plaid, await forged(sign, 'made-up', later), '{}', later);
+    expect(calls).toEqual(['made-up', 'made-up']);
+  });
+
+  it('makes only a few lookups a minute, and still verifies with a cached key', async () => {
+    const { sign, plaid: real } = await setup();
+    const { calls, plaid: failing } = counter();
+    const at = new Date('2026-11-03T00:00:00Z');
+    // Plaid's real key, already cached.
+    const body = '{"webhook_type":"HOLDINGS"}';
+    const genuine = async () => sign({ iat: at.getTime() / 1000, request_body_sha256: await sha256Hex(body) }, 'real-key');
+    expect(await verifyPlaidWebhook(real, await genuine(), body, at)).toBe(true);
+
+    for (let i = 0; i < 30; i += 1) await verifyPlaidWebhook(failing, await forged(sign, `flood-${i}`, at), '{}', at);
+    expect(calls.length).toBeLessThan(10);
+    expect(await verifyPlaidWebhook(failing, await genuine(), body, at)).toBe(true);
+  });
+});

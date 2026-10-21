@@ -26,6 +26,7 @@ import { closeLookup, ensureCloses, ensureFx } from './pricing';
 import { connectionLease, Lease, LeaseLostError } from './lease';
 import { accessTokenFor, getConnection, HISTORY_DAYS, isActive, underConnectionLease, type ConnectionRow } from './sync';
 import { isCashSecurity, priceOn } from './valuation';
+import { describeError } from '../lib/errors';
 
 function backfillStatusStatement(tenant: Tenant, connectionId: string, status: ConnectionRow['backfillStatus']) {
   return tenant.db
@@ -137,7 +138,7 @@ export async function runHistoryLoad(
     await lease.renew();
     await runAtomic(tenant.db, [...outcome, run.statement()]);
   } catch (error) {
-    console.error('History load failed', error instanceof Error ? error.message : error);
+    console.error('History load failed', describeError(error));
     await run.failed(error);
     if (error instanceof LeaseLostError) throw error;
     await backfillStatusStatement(tenant, connection.id, 'failed');
@@ -378,7 +379,7 @@ export async function fillMissedDays(deps: Deps, tenant: Tenant, connectionId: s
   } catch (error) {
     await run.failed(error);
     if (error instanceof LeaseLostError) throw error;
-    console.error('Filling missed days failed', error instanceof Error ? error.message : error);
+    console.error('Filling missed days failed', describeError(error));
   }
 }
 

@@ -3,7 +3,7 @@
  * sessions. Every user belongs to one household, chosen by the allow-list
  * entry they signed in with.
  */
-import { and, asc, eq, gt, sql } from 'drizzle-orm';
+import { and, asc, eq, gt, isNotNull, like, or, sql } from 'drizzle-orm';
 import { Hono } from 'hono';
 import { deleteCookie, getCookie, setCookie } from 'hono/cookie';
 import type { Context, MiddlewareHandler } from 'hono';
@@ -15,6 +15,7 @@ import { finishSignIn, startSignIn, type PendingSignIn } from './google';
 import { base64ToBytes, bytesToBase64Url, randomToken, sha256Hex } from '../lib/encoding';
 import { stableId } from '../services/ids';
 import type { Db, Deps } from '../ports';
+import { describeError } from '../lib/errors';
 
 export const SESSION_COOKIE = 'wt_session';
 const OAUTH_COOKIE = 'wt_oauth';
@@ -71,7 +72,16 @@ async function getSessionUser(deps: Deps, token: string): Promise<AuthUser | nul
     .from(sessions)
     .innerJoin(users, eq(users.id, sessions.userId))
     .innerJoin(householdMembers, eq(householdMembers.userId, users.id))
-    .where(and(eq(sessions.id, await sha256Hex(token)), gt(sessions.expiresAt, deps.now().getTime())))
+    // Still on the allow-list: removing someone signs them out on their next
+    // request. Dev sign-ins (local only) aren't on it.
+    .leftJoin(allowedEmails, eq(sql`lower(${allowedEmails.email})`, sql`lower(${users.email})`))
+    .where(
+      and(
+        eq(sessions.id, await sha256Hex(token)),
+        gt(sessions.expiresAt, deps.now().getTime()),
+        or(isNotNull(allowedEmails.email), like(users.googleSub, 'dev:%')),
+      ),
+    )
     .limit(1);
   return row ?? null;
 }
@@ -252,7 +262,7 @@ authRoutes.get('/google/callback', async (c) => {
   try {
     profile = await finishSignIn(googleClientId, googleClientSecret, c.req.url, pending);
   } catch (error) {
-    console.warn('Google sign-in failed', error instanceof Error ? error.message : error);
+    console.warn('Google sign-in failed', describeError(error));
     return c.redirect('/login?auth=token_error');
   }
 
@@ -265,7 +275,7 @@ authRoutes.get('/google/callback', async (c) => {
     return c.redirect('/');
   } catch (error) {
     if (error instanceof AmbiguousHouseholdError) return c.redirect('/login?auth=not_allowed');
-    console.error('OAuth callback failed', error instanceof Error ? error.message : error);
+    console.error('OAuth callback failed', describeError(error));
     return c.redirect('/login?auth=oauth_failed');
   }
 });
@@ -289,6 +299,9 @@ authRoutes.post('/logout', async (c) => {
   const token = getCookie(c, SESSION_COOKIE);
   if (token) await destroySession(c.env.deps.db, token);
   deleteCookie(c, SESSION_COOKIE, { path: '/' });
+  // Drop this site's cached pages, including signed-in pages the back button
+  // could restore. Not "storage": that would also wipe the offline app shell.
+  c.header('Clear-Site-Data', '"cache"');
   return c.json({ ok: true });
 });
 

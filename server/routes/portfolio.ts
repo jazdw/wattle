@@ -1,5 +1,5 @@
 /** Portfolio views: summary, history, securities, targets, quotes, imports, settings. */
-import { and, eq, inArray, sql } from 'drizzle-orm';
+import { and, eq, inArray, lte, sql } from 'drizzle-orm';
 import { Hono } from 'hono';
 import { suggestClassification } from '../../shared/classify';
 import { marketDate, newYorkClock } from '../../shared/dates';
@@ -28,6 +28,7 @@ import { writeBalances } from '../services/balances';
 import { describeTickers } from '../services/pricing';
 import { snapshotHousehold } from '../services/snapshots';
 import { activeConnections, MANUAL_SYNC_INTERVAL_MS, syncConnection } from '../services/sync';
+import { describeError } from '../lib/errors';
 
 export const portfolioRoutes = new Hono<AppEnv>();
 portfolioRoutes.use('*', requireAuth);
@@ -68,7 +69,7 @@ portfolioRoutes.post('/refresh', async (c) => {
       const result = await syncConnection(deps, tenant, connection.id, 'refresh', { minIntervalMs: MANUAL_SYNC_INTERVAL_MS });
       if (!result.skipped) synced += 1;
     } catch (error) {
-      console.error('Refresh sync failed', error instanceof Error ? error.message : error);
+      console.error('Refresh sync failed', describeError(error));
     }
   }
   await snapshotHousehold(deps, tenant, marketDate(deps.now()));
@@ -204,14 +205,14 @@ portfolioRoutes.get('/quotes', async (c) => {
   const deps = c.env.deps;
   const tenant = c.get('tenant');
   const rows = await tenant.db
-    .selectDistinct({ ticker: securities.ticker, type: securities.type })
+    .selectDistinct({ ticker: securities.ticker, type: securities.type, lastPrice: securities.lastPrice, lastPriceDate: securities.lastPriceDate })
     .from(securities)
     .innerJoin(holdings, and(eq(holdings.securityId, securities.id), eq(holdings.householdId, securities.householdId)))
     .innerJoin(accounts, and(eq(accounts.id, holdings.accountId), eq(accounts.isHidden, false)))
     .where(tenant.scope(securities, eq(securities.isPublic, true)));
 
   const response: QuotesResponse = { quotes: [], closes: [] };
-  const tickers = rows.flatMap((row) => (row.ticker ? [{ ticker: row.ticker, live: Boolean(deps.quotes) && wantsLiveQuote(row.type) }] : []));
+  const tickers = [...new Map(rows.flatMap((row) => (row.ticker ? [[row.ticker, { ticker: row.ticker, live: Boolean(deps.quotes) && wantsLiveQuote(row.type) }] as const] : []))).values()];
   // A quote is "live" only if it's from today's session (New York); otherwise
   // (weekends, holidays, a fund's last NAV) the last close is shown.
   const today = newYorkClock(deps.now()).date;
@@ -241,7 +242,7 @@ portfolioRoutes.get('/quotes', async (c) => {
         }
       }
     } catch (error) {
-      console.warn('Quotes failed', error instanceof Error ? error.message : error);
+      console.warn('Quotes failed', describeError(error));
     }
   }
   for (const ticker of live) {
@@ -251,15 +252,31 @@ portfolioRoutes.get('/quotes', async (c) => {
   }
   await cacheSetMany(deps, [...fetched].map(([ticker, quote]) => [`quote:${ticker}`, quote]), deps.config.quoteCacheSeconds);
 
-  // Latest close per ticker (mutual funds strike NAV once a day). SQLite
-  // returns the row that holds max(date) for the bare `close` column.
+  // Latest close per ticker (mutual funds strike NAV once a day): from the
+  // shared price table, or the institution's own last price for this
+  // household if that's newer (or the only one; see sharedCloseStatements).
+  // SQLite returns the row that holds max(date) for the bare `close` column.
+  const marketToday = marketDate(deps.now());
+  const latestClose = new Map<string, { ticker: string; date: string; close: number }>();
+  for (const row of rows) {
+    if (!row.ticker || row.lastPrice === null || !row.lastPriceDate || row.lastPriceDate > marketToday) continue;
+    const known = latestClose.get(row.ticker);
+    if (!known || row.lastPriceDate > known.date) latestClose.set(row.ticker, { ticker: row.ticker, date: row.lastPriceDate, close: row.lastPrice });
+  }
   for (const chunk of inChunks(closeTickers)) {
     const latest = await deps.db
       .select({ ticker: pricesDaily.ticker, date: sql<string>`max(${pricesDaily.date})`, close: pricesDaily.close })
       .from(pricesDaily)
-      .where(inArray(pricesDaily.ticker, chunk))
+      .where(and(inArray(pricesDaily.ticker, chunk), lte(pricesDaily.date, marketToday)))
       .groupBy(pricesDaily.ticker);
-    for (const row of latest) response.closes.push(row);
+    for (const row of latest) {
+      const own = latestClose.get(row.ticker);
+      if (!own || row.date >= own.date) latestClose.set(row.ticker, row);
+    }
+  }
+  for (const ticker of closeTickers) {
+    const close = latestClose.get(ticker);
+    if (close) response.closes.push(close);
   }
   return c.json(response);
 });

@@ -6,6 +6,7 @@ import { drizzle } from 'drizzle-orm/d1';
 import * as schema from '../server/db/schema';
 import { createApp } from '../server/app';
 import { depsFromEnv, type RawEnv } from '../server/config';
+import { describeError } from '../server/lib/errors';
 import type { Db } from '../server/ports';
 import { runDaily } from '../server/services/jobs';
 
@@ -27,6 +28,12 @@ export default {
     return app.fetch(request, { deps: deps(env, ctx) }, ctx);
   },
   async scheduled(_controller, env, ctx) {
-    await runDaily(deps(env, ctx));
+    try {
+      await runDaily(deps(env, ctx));
+    } catch (error) {
+      // Rethrown without the original, whose message can carry query values,
+      // so the run still shows as failed.
+      throw new Error(`Daily job failed: ${describeError(error)}`);
+    }
   },
 } satisfies ExportedHandler<Env>;

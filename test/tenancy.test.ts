@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import * as schema from '../server/db/schema';
-import { client, createHousehold, createTestDeps } from './helpers';
+import { account, fakePlaid, holding, security, signWebhook } from './fakes';
+import { client, createHousehold, createTestDeps, flush } from './helpers';
 
 async function setup() {
   const deps = await createTestDeps();
@@ -27,8 +28,22 @@ async function setup() {
 describe('tenant isolation', () => {
   it('rejects unauthenticated requests', async () => {
     const deps = await createTestDeps();
-    for (const path of ['/api/accounts', '/api/portfolio', '/api/history', '/api/securities', '/api/connections', '/api/auth/me']) {
+    for (const path of ['/api/accounts', '/api/portfolio', '/api/history', '/api/securities', '/api/connections', '/api/auth/me', '/api/quotes', '/api/targets']) {
       expect((await client(deps)(path)).status, path).toBe(401);
+    }
+    const writes: [string, string][] = [
+      ['POST', '/api/refresh'],
+      ['POST', '/api/imports/balances'],
+      ['POST', '/api/imports/holdings'],
+      ['POST', '/api/plaid/link-token'],
+      ['POST', '/api/plaid/exchange'],
+      ['PUT', '/api/targets'],
+      ['PATCH', '/api/household'],
+      ['POST', '/api/connections/x/sync'],
+      ['DELETE', '/api/connections/x'],
+    ];
+    for (const [method, path] of writes) {
+      expect((await client(deps)(path, { method, json: {} })).status, `${method} ${path}`).toBe(401);
     }
   });
 
@@ -80,6 +95,107 @@ describe('tenant isolation', () => {
     expect(response.headers.get('strict-transport-security')).toBe('max-age=31536000; includeSubDomains');
     expect(response.headers.get('referrer-policy')).toBe('strict-origin-when-cross-origin');
     expect(response.headers.get('cache-control')).toBe('no-store');
+  });
+});
+
+/** Household A with a linked Plaid login and a manual account; B signed in beside it. */
+async function withLogin() {
+  const plaid = fakePlaid({
+    accounts: [account('brk', 'investment', 1000)],
+    securities: [security('s-vti', 'VTI', 'etf', 100)],
+    holdings: [holding('brk', 's-vti', 10, 100)],
+  });
+  const deps = await createTestDeps({ plaid });
+  const a = await createHousehold(deps, 'A', 'a@example.com');
+  const b = await createHousehold(deps, 'B', 'b@example.com');
+  const asA = client(deps, a.cookie);
+  const asB = client(deps, b.cookie);
+  expect((await asA('/api/plaid/exchange', { method: 'POST', json: { publicToken: 'p', kind: 'investments' } })).status).toBe(200);
+  await flush(deps);
+  const manual = await asA('/api/accounts', { method: 'POST', json: { name: 'Brokerage', type: 'investment', currency: 'USD' } });
+  expect(manual.status).toBe(201);
+  const [connection] = await deps.db.select().from(schema.connections);
+  return { deps, plaid, a, b, asA, asB, connectionId: connection.id, manualId: manual.body.id as string };
+}
+
+describe('tenant isolation: logins, holdings, targets and settings', () => {
+  it("refuses another household's login by id, and leaves it untouched", async () => {
+    const { deps, plaid, asA, asB, connectionId } = await withLogin();
+    const callsBefore = plaid.state.calls.length;
+    const runsBefore = (await deps.db.select().from(schema.syncRuns)).length;
+
+    expect((await asB(`/api/connections/${connectionId}/sync`, { method: 'POST' })).status).toBe(404);
+    expect((await asB(`/api/connections/${connectionId}/backfill`, { method: 'POST' })).status).toBe(404);
+    expect((await asB(`/api/connections/${connectionId}/reconnect`, { method: 'POST' })).status).toBe(404);
+    expect((await asB(`/api/connections/${connectionId}/activity`)).status).toBe(404);
+    expect((await asB(`/api/connections/${connectionId}`, { method: 'DELETE' })).status).toBe(404);
+    // Update mode would open Link on A's login with A's access token.
+    expect((await asB('/api/plaid/link-token', { method: 'POST', json: { kind: 'investments', connectionId } })).status).toBe(404);
+    await flush(deps);
+
+    expect(plaid.state.calls.length).toBe(callsBefore);
+    expect((await deps.db.select().from(schema.syncRuns)).length).toBe(runsBefore);
+    expect((await asB('/api/connections')).body.connections).toEqual([]);
+    const [connection] = (await asA('/api/connections')).body.connections;
+    expect(connection).toMatchObject({ id: connectionId, status: 'ok' });
+    expect((await asA('/api/accounts')).body.accounts).toHaveLength(2);
+  });
+
+  it("refuses another household's holdings by account id", async () => {
+    const { asA, asB, manualId } = await withLogin();
+    expect((await asA(`/api/accounts/${manualId}/holdings`, { method: 'PUT', json: { holdings: [{ ticker: 'VTI', quantity: 3, price: 100 }], version: 0 } })).status).toBe(200);
+
+    expect((await asB(`/api/accounts/${manualId}/holdings`)).status).toBe(404);
+    expect((await asB(`/api/accounts/${manualId}/holdings`, { method: 'PUT', json: { holdings: [], version: 1 } })).status).toBe(404);
+    expect(
+      (await asB('/api/imports/holdings', { method: 'POST', json: { accountId: manualId, rows: [{ date: '2026-10-01', ticker: 'VTI', quantity: 99 }] } })).status,
+    ).toBe(404);
+
+    const holdings = (await asA(`/api/accounts/${manualId}/holdings`)).body.holdings as { ticker: string; quantity: number }[];
+    expect(holdings.map((row) => [row.ticker, row.quantity])).toEqual([['VTI', 3]]);
+  });
+
+  it('keeps targets, quotes and household settings to each household', async () => {
+    const { asA, asB, manualId } = await withLogin();
+    const target = { weights: { us_stock: 1 }, bandPct: 5, excludedAccountIds: [manualId], excludedCategories: [] };
+    expect((await asA('/api/targets', { method: 'PUT', json: target })).status).toBe(200);
+    expect((await asB('/api/targets')).body.target ?? null).toBeNull();
+    // B saving its own target doesn't touch A's.
+    expect((await asB('/api/targets', { method: 'PUT', json: { ...target, excludedAccountIds: [], weights: { cash: 1 } } })).status).toBe(200);
+    expect((await asB('/api/targets')).body.target).toMatchObject({ weights: { cash: 1 } });
+    expect((await asA('/api/targets')).body.target).toMatchObject({ weights: { us_stock: 1 }, excludedAccountIds: [manualId] });
+
+    expect((await asB('/api/quotes')).body).toEqual({ quotes: [], closes: [] });
+    expect((await asA('/api/quotes')).body.closes.map((row: { ticker: string }) => row.ticker)).toContain('VTI');
+
+    expect((await asB('/api/household', { method: 'PATCH', json: { name: 'Renamed', displayCurrency: 'AUD' } })).status).toBe(200);
+    expect((await asA('/api/auth/me')).body.household).toMatchObject({ name: 'A', displayCurrency: 'USD' });
+    expect((await asB('/api/auth/me')).body.household).toMatchObject({ name: 'Renamed', displayCurrency: 'AUD' });
+    expect((await asB('/api/auth/me')).body.household.members.map((member: { email: string }) => member.email)).toEqual(['b@example.com']);
+  });
+
+  it('a refresh syncs only your own logins', async () => {
+    const { deps, plaid, asB } = await withLogin();
+    const callsBefore = plaid.state.calls.length;
+    expect((await asB('/api/refresh', { method: 'POST' })).status).toBe(200);
+    await flush(deps);
+    expect(plaid.state.calls.length).toBe(callsBefore);
+  });
+
+  it("a webhook acts only on its login's household", async () => {
+    const { deps, a, b, asB } = await withLogin();
+    const before = await asB('/api/accounts');
+    const body = JSON.stringify({ webhook_type: 'ITEM', webhook_code: 'ERROR', item_id: 'item-1', error: { error_code: 'ITEM_LOGIN_REQUIRED' } });
+    const response = await client(deps)('/api/plaid/webhook', {
+      method: 'POST',
+      body,
+      headers: { 'plaid-verification': await signWebhook(body, deps.now()), 'content-type': 'application/json' },
+    });
+    expect(response.status).toBe(200);
+    const runs = await deps.db.select({ householdId: schema.syncRuns.householdId }).from(schema.syncRuns);
+    expect(new Set(runs.map((run) => run.householdId))).toEqual(new Set([a.householdId]));
+    expect(runs.some((run) => run.householdId === b.householdId)).toBe(false);
+    expect((await asB('/api/accounts')).body).toEqual(before.body);
   });
 });
 

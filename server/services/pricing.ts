@@ -3,7 +3,7 @@
  * reference data shared by all households). Lookups carry the last known
  * value forward over weekends and holidays.
  */
-import { and, desc, eq, gte, inArray, lte, max, min, sql } from 'drizzle-orm';
+import { and, desc, eq, gte, inArray, lte, max, min, ne, sql } from 'drizzle-orm';
 import { addDays, lastTradingDay, type IsoDate } from '../../shared/dates';
 import type { Currency, FxRates } from '../../shared/money';
 import type { BatchItem } from 'drizzle-orm/batch';
@@ -11,6 +11,7 @@ import { chunkRows, inChunks, runAtomic } from '../db/batch';
 import { fxDaily, priceRuns, pricesDaily, type PriceCall, type PriceChange } from '../db/schema';
 import type { DailyClose, Deps, SecurityDescription } from '../ports';
 import { cacheGet, cacheGetMany, cacheSet, cacheSetMany } from './cache';
+import { describeError } from '../lib/errors';
 
 /** Look back this far for the last close before a range starts. */
 const CARRY_DAYS = 10;
@@ -25,14 +26,14 @@ function normalise(tickers: string[]): string[] {
   return [...new Set(tickers.map((ticker) => ticker.toUpperCase()))];
 }
 
-/** First and last stored close per ticker. */
-async function coverage(deps: Deps, tickers: string[]) {
+/** First and last stored close per ticker, up to `upTo` (later ones can't be right). */
+async function coverage(deps: Deps, tickers: string[], upTo: IsoDate) {
   const byTicker = new Map<string, { first: IsoDate | null; last: IsoDate | null }>();
   for (const chunk of inChunks(tickers)) {
     const rows = await deps.db
       .select({ ticker: pricesDaily.ticker, first: min(pricesDaily.date), last: max(pricesDaily.date) })
       .from(pricesDaily)
-      .where(inArray(pricesDaily.ticker, chunk))
+      .where(and(inArray(pricesDaily.ticker, chunk), lte(pricesDaily.date, upTo)))
       .groupBy(pricesDaily.ticker);
     for (const row of rows) byTicker.set(row.ticker, { first: row.first, last: row.last });
   }
@@ -71,7 +72,7 @@ class PriceRun {
       this.calls.push({ ...call, returned: returned(result) });
       return result;
     } catch (error) {
-      this.calls.push({ ...call, returned: 0, error: (error instanceof Error ? error.message : String(error)).slice(0, 200) });
+      this.calls.push({ ...call, returned: 0, error: (describeError(error)).slice(0, 200) });
       throw error;
     }
   }
@@ -106,9 +107,9 @@ class PriceRun {
     } catch (error) {
       try {
         this.saved = 0;
-        await this.row('error', { error: (error instanceof Error ? error.message : String(error)).slice(0, 500) });
+        await this.row('error', { error: (describeError(error)).slice(0, 500) });
       } catch (logError) {
-        console.error('Could not write the price log', logError instanceof Error ? logError.message : logError);
+        console.error('Could not write the price log', describeError(logError));
       }
       throw error;
     }
@@ -145,6 +146,37 @@ export function closeStatements(deps: Deps, rows: PriceRow[], options: { replace
   });
 }
 
+/** How old an institution-reported close may be to be shared. */
+const SHARED_CLOSE_MAX_AGE_DAYS = 7;
+/** How far an institution-reported close may stray from the provider's latest. */
+const SHARED_CLOSE_TOLERANCE = 0.25;
+
+/**
+ * Statements sharing closes an institution reported (through Plaid) in the
+ * price table every household reads, keeping existing closes. Only recent
+ * closes, none after `today`, for tickers the price provider already knows
+ * and near its latest close for them. Anything else (a private fund's code, a
+ * made-up price from a Plaid sandbox user) stays with the household that holds
+ * it, as the security's own last price.
+ */
+export async function sharedCloseStatements(deps: Deps, rows: PriceRow[], today: IsoDate): Promise<{ statements: BatchItem<'sqlite'>[]; shared: number }> {
+  const recent = rows.filter((row) => row.date <= today && row.date >= addDays(today, -SHARED_CLOSE_MAX_AGE_DAYS));
+  const reference = new Map<string, number>();
+  for (const chunk of inChunks(normalise(recent.map((row) => row.ticker)))) {
+    const latest = await deps.db
+      .select({ ticker: pricesDaily.ticker, date: max(pricesDaily.date), close: pricesDaily.close })
+      .from(pricesDaily)
+      .where(and(inArray(pricesDaily.ticker, chunk), ne(pricesDaily.source, 'plaid'), lte(pricesDaily.date, today)))
+      .groupBy(pricesDaily.ticker);
+    for (const row of latest) reference.set(row.ticker, row.close);
+  }
+  const trusted = recent.filter((row) => {
+    const known = reference.get(row.ticker);
+    return known !== undefined && known > 0 && Math.abs(row.close - known) / known <= SHARED_CLOSE_TOLERANCE;
+  });
+  return { statements: closeStatements(deps, trusted, { replace: false }), shared: trusted.length };
+}
+
 /** Store closes now (manual entry, tests); see closeStatements. */
 export async function saveCloses(deps: Deps, rows: PriceRow[], options: { replace: boolean }): Promise<void> {
   await runAtomic(deps.db, closeStatements(deps, rows, options));
@@ -175,7 +207,7 @@ export async function ensureRecentCloses(deps: Deps, tickers: string[], date: Is
   if (!deps.prices || tickers.length === 0) return;
   const expected = lastTradingDay(date);
   const unique = normalise(tickers);
-  const have = await coverage(deps, unique);
+  const have = await coverage(deps, unique, date);
   const unknown = await knownUnknowns(deps, unique);
   const stale = unique.filter((ticker) => !unknown.has(ticker) && !((have.get(ticker)?.last ?? '') >= expected));
   const run = new PriceRun(deps, 'latest');
@@ -191,7 +223,7 @@ export async function ensureRecentCloses(deps: Deps, tickers: string[], date: Is
     try {
       bulk = await run.call({ provider: prices.name, endpoint: 'latest', tickers: stale }, () => prices.latestCloses!(stale), (result) => result.size);
     } catch (error) {
-      console.warn('Bulk price fetch failed', error instanceof Error ? error.message : error);
+      console.warn('Bulk price fetch failed', describeError(error));
     }
   }
   for (const [ticker, close] of bulk) rows.push({ ticker, date: close.date, close: close.close, currency: 'USD', source: 'tiingo' });
@@ -210,7 +242,7 @@ export async function ensureRecentCloses(deps: Deps, tickers: string[], date: Is
     try {
       closes = await run.call({ provider: prices.name, endpoint: 'daily', tickers: [ticker], from, to: date }, () => prices.dailyCloses(ticker, from, date), (result) => result.length);
     } catch (error) {
-      console.warn('Price fetch failed', ticker, error instanceof Error ? error.message : error);
+      console.warn('Price fetch failed', ticker, describeError(error));
       continue;
     }
     if (closes.length === 0 && !last && !fromBulk) newlyUnknown.push(ticker);
@@ -228,7 +260,7 @@ export async function ensureRecentCloses(deps: Deps, tickers: string[], date: Is
 export async function ensureCloses(deps: Deps, tickers: string[], start: IsoDate, end: IsoDate): Promise<void> {
   if (!deps.prices || tickers.length === 0) return;
   const unique = normalise(tickers);
-  const have = await coverage(deps, unique);
+  const have = await coverage(deps, unique, end);
   const unknown = await knownUnknowns(deps, unique);
   const prices = deps.prices;
   const run = new PriceRun(deps, 'history');
@@ -253,7 +285,7 @@ export async function ensureCloses(deps: Deps, tickers: string[], start: IsoDate
       try {
         closes = await run.call({ provider: prices.name, endpoint: 'daily', tickers: [ticker], from, to }, () => prices.dailyCloses(ticker, from, to), (result) => result.length);
       } catch (error) {
-        console.warn('Price fetch failed', ticker, error instanceof Error ? error.message : error);
+        console.warn('Price fetch failed', ticker, describeError(error));
         continue;
       }
       if (closes.length === 0 && !stored) {
@@ -294,7 +326,7 @@ export async function describeTickers(deps: Deps, tickers: string[]): Promise<Ma
         description = (await deps.prices.describe(ticker)) ?? false;
         learned.push([describeKey(ticker), description]);
       } catch (error) {
-        console.warn('Ticker lookup failed', ticker, error instanceof Error ? error.message : error);
+        console.warn('Ticker lookup failed', ticker, describeError(error));
       }
     }
     if (description) result.set(ticker, description);
@@ -372,7 +404,7 @@ export async function ensureFx(deps: Deps, start: IsoDate, end: IsoDate): Promis
       const rates = await run.call({ provider: fx.name, endpoint: 'rates', tickers: [`${base}/${quote}`], from, to }, () => fx.rates(base, quote, from, to), (result) => result.length);
       rows.push(...rates.filter((rate) => rate.rate > 0).map((rate) => ({ base, quote, date: rate.date, rate: rate.rate })));
     } catch (error) {
-      console.warn('FX fetch failed', error instanceof Error ? error.message : error);
+      console.warn('FX fetch failed', describeError(error));
     }
   }
   if (run.calls.length === 0) {

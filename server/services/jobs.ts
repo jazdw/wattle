@@ -15,6 +15,7 @@ import { ensureFx } from './pricing';
 import { typeHandEnteredSecurities } from './securityTypes';
 import { snapshotHousehold } from './snapshots';
 import { activeConnections, syncConnection } from './sync';
+import { describeError } from '../lib/errors';
 
 export interface DailyReport {
   date: string;
@@ -40,18 +41,18 @@ export async function runDaily(deps: Deps): Promise<DailyReport> {
         // (never run, abandoned, or invalidated by a late transaction).
         await syncConnection(deps, tenant, connection.id, 'nightly');
       } catch (error) {
-        errors.push(`sync ${connection.id}: ${error instanceof Error ? error.message : String(error)}`);
+        errors.push(`sync ${connection.id}: ${describeError(error)}`);
       }
     }
     try {
       await typeHandEnteredSecurities(deps, tenant);
     } catch (error) {
-      errors.push(`types ${id}: ${error instanceof Error ? error.message : String(error)}`);
+      errors.push(`types ${id}: ${describeError(error)}`);
     }
     try {
       await snapshotHousehold(deps, tenant, date);
     } catch (error) {
-      errors.push(`snapshot ${id}: ${error instanceof Error ? error.message : String(error)}`);
+      errors.push(`snapshot ${id}: ${describeError(error)}`);
     }
   }
   if (errors.length > 0) console.error('Daily job errors', errors);

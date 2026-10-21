@@ -15,6 +15,7 @@ import { runBatch } from '../db/batch';
 import { jobRuns, priceRuns, syncRuns, type SYNC_ACTIONS, type SYNC_TRIGGERS } from '../db/schema';
 import type { Tenant } from '../db/tenant';
 import type { Deps } from '../ports';
+import { describeError } from '../lib/errors';
 
 export type SyncAction = (typeof SYNC_ACTIONS)[number];
 export type SyncTrigger = (typeof SYNC_TRIGGERS)[number];
@@ -67,7 +68,7 @@ export class SyncRun {
   fail(error: unknown): void {
     this.error = {
       code: error instanceof PlaidApiError ? error.code : null,
-      message: (error instanceof Error ? error.message : String(error)).slice(0, 500),
+      message: (describeError(error)).slice(0, 500),
     };
   }
 
@@ -122,7 +123,7 @@ export class SyncRun {
     try {
       await this.statement();
     } catch (logError) {
-      console.error('Could not write the sync log', logError instanceof Error ? logError.message : logError);
+      console.error('Could not write the sync log', describeError(logError));
     }
   }
 }
