@@ -16,7 +16,7 @@ import type { Tenant } from '../db/tenant';
 import type { Deps } from '../ports';
 import { SyncRun, type SyncTrigger } from './activity';
 import { collectPendingReport } from './assetReports';
-import { runHistoryLoad } from './backfill';
+import { fillMissedDays, runHistoryLoad } from './backfill';
 import { BusyError, connectionLease, holdWhile, Lease, snapshotLease } from './lease';
 import { decryptToken, encryptToken, loadTokenKeys, tokenAad } from './crypto';
 import { stableId } from './ids';
@@ -287,6 +287,8 @@ export async function underConnectionLease<T>(
     if (options.history !== false && afterReport && historyDue(afterReport)) {
       await runHistoryLoad(deps, tenant, afterReport.id, trigger, lease, null);
     }
+    // Days the syncs missed, from the stored balances.
+    if (options.history !== false) await fillMissedDays(deps, tenant, connectionId, trigger, lease);
   });
   return result as T;
 }
