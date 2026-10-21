@@ -24,7 +24,8 @@ export function Logo({ className }: { className?: string }) {
 export function Layout() {
   const { me, currency, setCurrency, logout } = useAuth();
   const connections = useConnections();
-  const broken = connections.data?.connections.filter((connection) => connection.status !== 'ok') ?? [];
+  // A disconnected login was set aside on purpose; it needs nothing.
+  const broken = connections.data?.connections.filter((connection) => connection.status !== 'ok' && connection.status !== 'disconnected') ?? [];
 
   return (
     <div className="min-h-screen md:grid md:grid-cols-[13rem_1fr]">

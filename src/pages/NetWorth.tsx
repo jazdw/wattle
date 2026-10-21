@@ -59,7 +59,8 @@ export function NetWorth() {
     });
   }, [accounts.data]);
 
-  const broken = connections.data?.connections.filter((connection) => connection.status !== 'ok') ?? [];
+  // A disconnected login was set aside on purpose; it needs nothing.
+  const broken = connections.data?.connections.filter((connection) => connection.status !== 'ok' && connection.status !== 'disconnected') ?? [];
   const lastSync = Math.max(0, ...(connections.data?.connections.map((connection) => connection.lastSyncedAt ?? 0) ?? []));
   const empty = accounts.data && accounts.data.accounts.length === 0;
 
