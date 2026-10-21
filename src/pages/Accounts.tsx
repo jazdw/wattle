@@ -251,7 +251,7 @@ export function Accounts() {
             </div>
             <div className="grid gap-2 rounded-md border p-3">
               <p className="text-muted-foreground">
-                Can't find your institution (some 401(k) providers)? Try linking holdings only; it lists institutions that don't offer balance
+                Can't find your institution? Try linking holdings only; it lists institutions that don't offer balance
                 history.
               </p>
               <Button variant="outline" className="justify-self-start" onClick={() => startLink('investments')}>
