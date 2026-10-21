@@ -36,7 +36,7 @@ import { closeLookup, describeTickers, ensureRecentCloses, fxLookup } from '../s
 import { snapshotHousehold } from '../services/snapshots';
 import { accountLease, connectionLease, Lease, snapshotLease } from '../services/lease';
 import { stableId } from '../services/ids';
-import { getConnection, MANUAL_SYNC_INTERVAL_MS, purgeStatements, removeConnection, syncConnection, underConnectionLease } from '../services/sync';
+import { getConnection, MANUAL_SYNC_INTERVAL_MS, purgeStatements, reconnectConnection, removeConnection, syncConnection, underConnectionLease } from '../services/sync';
 
 async function householdCurrency(tenant: Tenant): Promise<string> {
   const [row] = await tenant.db
@@ -121,6 +121,18 @@ connectionRoutes.post('/:id/backfill', async (c) => {
   const hook = url.protocol === 'https:' ? `${url.origin}/api/plaid/webhook` : null;
   deps.background(backfillConnection(deps, tenant, connection.id, hook, 'manual'));
   return c.json({ ok: true });
+});
+
+/** Resume syncing a disconnected login (same Plaid Item, so no new slot). */
+connectionRoutes.post('/:id/reconnect', async (c) => {
+  const deps = c.env.deps;
+  const tenant = c.get('tenant');
+  const connection = await getConnection(tenant, c.req.param('id'));
+  if (!connection) notFound('Connection not found.');
+  if (connection.status !== 'disconnected') throw new HttpError(409, "This login isn't disconnected.");
+  const result = await reconnectConnection(deps, tenant, connection.id);
+  await snapshotHousehold(deps, tenant, marketDate(deps.now()));
+  return c.json(result);
 });
 
 connectionRoutes.delete('/:id', async (c) => {

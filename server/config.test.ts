@@ -25,6 +25,12 @@ describe('config', () => {
     expect(depsFromEnv({ PLAID_CLIENT_ID: 'c', PLAID_SECRET: 's', PLAID_ENV: 'nonsense' }, {} as Db, () => {}).plaid?.env).toBe('sandbox');
   });
 
+  it('never removes logins at Plaid unless PLAID_ALLOW_REMOVE is exactly true', () => {
+    expect(configFromEnv({}).plaidAllowRemove).toBe(false);
+    expect(configFromEnv({ PLAID_ALLOW_REMOVE: 'yes' }).plaidAllowRemove).toBe(false);
+    expect(configFromEnv({ PLAID_ALLOW_REMOVE: 'true' }).plaidAllowRemove).toBe(true);
+  });
+
   it('reuses live quotes for 5 minutes unless QUOTE_CACHE_SECONDS says otherwise', () => {
     expect(configFromEnv({}).quoteCacheSeconds).toBe(300);
     expect(configFromEnv({ QUOTE_CACHE_SECONDS: '60' }).quoteCacheSeconds).toBe(60);

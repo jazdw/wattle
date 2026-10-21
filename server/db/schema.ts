@@ -112,7 +112,7 @@ export const connections = sqliteTable(
     hasInvestments: integer('has_investments', { mode: 'boolean' }).notNull().default(false),
     /** The login has Plaid Assets: daily balance history from an asset report. */
     hasBalanceHistory: integer('has_balance_history', { mode: 'boolean' }).notNull().default(false),
-    status: text('status', { enum: ['ok', 'login_required', 'pending_expiration', 'error', 'removed'] })
+    status: text('status', { enum: ['ok', 'login_required', 'pending_expiration', 'error', 'disconnected', 'removed'] })
       .notNull()
       .default('ok'),
     errorCode: text('error_code'),

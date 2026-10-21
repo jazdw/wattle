@@ -22,6 +22,12 @@ export interface Config {
   googleClientSecret?: string;
   /** base64-encoded 32-byte key(s) for encrypting aggregator tokens: "v1:<key>[,v0:<key>]" or just "<key>". */
   tokenEncKey?: string;
+  /**
+   * PLAID_ALLOW_REMOVE: Disconnect also removes the login at Plaid (/item/remove),
+   * which can't be undone. Off by default: a disconnected login is kept so it
+   * can be reconnected without using another Item (Plaid's Trial plan counts removed ones).
+   */
+  plaidAllowRemove: boolean;
   /** When set, /api requests must carry a valid Cloudflare Access token for this team and application. */
   access?: { teamDomain: string; audience: string };
 }

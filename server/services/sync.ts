@@ -3,7 +3,7 @@
  * transactions, and error states. Data for hidden accounts is dropped here —
  * it is never written.
  */
-import { eq, inArray, isNull, lte, ne, notInArray, or, sql } from 'drizzle-orm';
+import { eq, inArray, isNotNull, isNull, lte, ne, notInArray, or, sql } from 'drizzle-orm';
 import type { AccountBase, Holding, InvestmentTransaction, Security as PlaidSecurity } from 'plaid';
 import { suggestClassification } from '../../shared/classify';
 import { addDays, marketDate } from '../../shared/dates';
@@ -167,6 +167,10 @@ export const MANUAL_SYNC_INTERVAL_MS = 2 * 60 * 1000;
 
 const NOTHING = { accounts: 0, holdings: 0, transactions: 0 };
 
+/** Connections that aren't synced (and ignore Plaid's webhooks). */
+export const INACTIVE: ConnectionRow['status'][] = ['disconnected', 'removed'];
+export const isActive = (connection: Pick<ConnectionRow, 'status'>) => !INACTIVE.includes(connection.status);
+
 function statusForError(error: unknown): { status: ConnectionRow['status']; code: string } | null {
   if (!(error instanceof PlaidApiError)) return null;
   if (error.code === 'ITEM_LOGIN_REQUIRED' || error.code === 'PENDING_DISCONNECT') {
@@ -198,7 +202,7 @@ export function statusStatement(
       tenant.scope(
         connections,
         eq(connections.id, connectionId),
-        ne(connections.status, 'removed'),
+        notInArray(connections.status, INACTIVE),
         or(isNull(connections.statusObservedAt), lte(connections.statusObservedAt, observedAt)),
       ),
     );
@@ -224,7 +228,7 @@ export async function syncConnection(
   requirePlaid(deps);
   const connection = await getConnection(tenant, connectionId);
   if (!connection) throw new Error('Connection not found.');
-  if (connection.status === 'removed') return { ...NOTHING, status: 'removed' };
+  if (!isActive(connection)) return { ...NOTHING, status: connection.status };
 
   const lease = options.lease ?? (await Lease.acquire(deps, tenant, connectionLease(connection.id)));
   if (!lease) {
@@ -274,7 +278,7 @@ export async function underConnectionLease<T>(
       if (loginBroken(pass)) return lease.forceRelease();
     }
     const latest = await getConnection(tenant, connectionId);
-    if (!latest || latest.status === 'removed') return;
+    if (!latest || !isActive(latest)) return;
     // (Not straight after requesting one: Plaid takes a while to build it.)
     if (latest.assetReportTokenEnc && !(run === 1 && options.reportJustRequested)) {
       await collectPendingReport(deps, tenant, latest, trigger, lease);
@@ -812,7 +816,9 @@ async function planTransactions(
 
 /**
  * Disconnect a login. Its accounts and their history are kept (as manual
- * accounts) unless `purge` is set.
+ * accounts) unless `purge` is set. The Plaid login is kept too, so it can be
+ * reconnected (Plaid's Trial plan counts removed Items), unless
+ * PLAID_ALLOW_REMOVE is on: then it's removed at Plaid, which can't be undone.
  */
 export async function removeConnection(
   deps: Deps,
@@ -821,7 +827,8 @@ export async function removeConnection(
   purge: boolean,
 ): Promise<void> {
   const connection = await getConnection(tenant, connectionId);
-  if (!connection || connection.status === 'removed') return;
+  const atPlaid = deps.config.plaidAllowRemove;
+  if (!connection || connection.status === 'removed' || (connection.status === 'disconnected' && !atPlaid)) return;
   // Nothing else may change the connection (or recompute the snapshot from
   // its accounts) meanwhile. Throws BusyError if a sync doesn't finish soon.
   const lease = await Lease.acquireOrBusy(deps, tenant, connectionLease(connection.id));
@@ -829,8 +836,11 @@ export async function removeConnection(
   try {
     if (!snapshot) throw new BusyError('The household snapshot is being updated. Try again in a moment.');
     const run = new SyncRun(deps, tenant, connection.id, 'disconnect', 'manual');
-    run.note = purge ? 'Disconnected; its accounts and their history were deleted.' : 'Disconnected; its accounts are kept as manual accounts.';
-    if (deps.plaid) {
+    run.note = [
+      purge ? 'Disconnected; its accounts and their history were deleted.' : 'Disconnected; its accounts are kept as manual accounts.',
+      atPlaid ? 'Removed at Plaid.' : 'The Plaid login is kept, so it can be reconnected.',
+    ].join(' ');
+    if (atPlaid && deps.plaid) {
       try {
         await run.plaid().removeItem(await accessTokenFor(deps, connection));
       } catch (error) {
@@ -844,13 +854,14 @@ export async function removeConnection(
         ? tenant.db.delete(accounts).where(tenant.scope(accounts, eq(accounts.connectionId, connection.id)))
         : tenant.db
             .update(accounts)
-            .set({ source: 'manual', connectionId: null, externalId: null })
+            // Kept linked to the login while it can be reconnected.
+            .set({ source: 'manual', ...(atPlaid ? { connectionId: null, externalId: null } : {}) })
             .where(tenant.scope(accounts, eq(accounts.connectionId, connection.id))),
-      // Kept (without its token) so the Items-used count stays accurate: on
-      // Plaid's Trial plan a removed Item still uses one of the 10 slots.
+      // A removed login is kept (without its token) so the Items-used count
+      // stays accurate: on Plaid's Trial plan it still uses one of the 10 slots.
       tenant.db
         .update(connections)
-        .set({ status: 'removed', accessTokenEnc: '', assetReportTokenEnc: null, assetReportId: null })
+        .set(atPlaid ? { status: 'removed', accessTokenEnc: '', assetReportTokenEnc: null, assetReportId: null } : { status: 'disconnected' })
         .where(tenant.scope(connections, eq(connections.id, connection.id))),
       run.statement(),
     ]);
@@ -860,12 +871,50 @@ export async function removeConnection(
   }
 }
 
+/**
+ * Reconnect a disconnected login: its accounts are linked again (any you
+ * recorded or imported meanwhile keep those days) and it syncs straight away.
+ */
+export async function reconnectConnection(deps: Deps, tenant: Tenant, connectionId: string): Promise<SyncResult | null> {
+  requirePlaid(deps);
+  const connection = await getConnection(tenant, connectionId);
+  if (!connection || connection.status !== 'disconnected') return null;
+  const lease = await Lease.acquireOrBusy(deps, tenant, connectionLease(connection.id));
+  try {
+    const snapshot = await Lease.acquireWaiting(deps, tenant, snapshotLease(tenant.householdId));
+    try {
+      if (!snapshot) throw new BusyError('The household snapshot is being updated. Try again in a moment.');
+      const run = new SyncRun(deps, tenant, connection.id, 'relink', 'manual');
+      run.note = 'Reconnected; syncing resumes.';
+      await lease.renew();
+      await snapshot.renew();
+      await runAtomic(tenant.db, [
+        tenant.db
+          .update(accounts)
+          .set({ source: 'plaid' })
+          .where(tenant.scope(accounts, eq(accounts.connectionId, connection.id), isNotNull(accounts.externalId))),
+        // The sync that follows records the login's actual status.
+        tenant.db
+          .update(connections)
+          .set({ status: 'ok', errorCode: null, statusObservedAt: deps.now().getTime() })
+          .where(tenant.scope(connections, eq(connections.id, connection.id), eq(connections.status, 'disconnected'))),
+        run.statement(),
+      ]);
+    } finally {
+      await snapshot?.forceRelease();
+    }
+    return await syncConnection(deps, tenant, connection.id, 'manual', { lease });
+  } finally {
+    await lease.forceRelease();
+  }
+}
+
 /** All connections that should be synced by the daily job. */
 export async function activeConnections(tenant: Tenant): Promise<ConnectionRow[]> {
   return tenant.db
     .select()
     .from(connections)
-    .where(tenant.scope(connections, notInArray(connections.status, ['removed'])));
+    .where(tenant.scope(connections, notInArray(connections.status, INACTIVE)));
 }
 
 /** Statements deleting stored data for an account being hidden. */

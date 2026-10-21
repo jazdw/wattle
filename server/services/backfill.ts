@@ -21,7 +21,7 @@ import { SyncRun, type SyncTrigger } from './activity';
 import { encryptToken, loadTokenKeys, tokenAad } from './crypto';
 import { closeLookup, ensureCloses, ensureFx } from './pricing';
 import { connectionLease, Lease, LeaseLostError } from './lease';
-import { accessTokenFor, getConnection, HISTORY_DAYS, underConnectionLease, type ConnectionRow } from './sync';
+import { accessTokenFor, getConnection, HISTORY_DAYS, isActive, underConnectionLease, type ConnectionRow } from './sync';
 import { isCashSecurity, priceOn } from './valuation';
 
 function backfillStatusStatement(tenant: Tenant, connectionId: string, status: ConnectionRow['backfillStatus']) {
@@ -45,7 +45,7 @@ export async function backfillConnection(
   trigger: SyncTrigger,
 ): Promise<void> {
   const connection = await getConnection(tenant, connectionId);
-  if (!connection || connection.status === 'removed') return;
+  if (!connection || !isActive(connection)) return;
   const key = connectionLease(connection.id);
   let lease = await Lease.acquire(deps, tenant, key);
   if (!lease) {
