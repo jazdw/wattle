@@ -10,6 +10,7 @@ import { requireAuth } from '../auth/routes';
 import { connections } from '../db/schema';
 import { Tenant } from '../db/tenant';
 import type { AppEnv } from '../env';
+import { describeError } from '../lib/errors';
 import { HttpError, notFound, readBody } from '../lib/http';
 import type { Deps } from '../ports';
 import { runAtomic } from '../db/batch';
@@ -67,7 +68,7 @@ plaidRoutes.post('/exchange', requireAuth, async (c) => {
     (async () => {
       await backfillConnection(deps, tenant, connection.id, hook, 'link');
       await snapshotHousehold(deps, tenant, marketDate(deps.now()));
-    })().catch((error) => console.error('Post-link work failed', error)),
+    })().catch((error) => console.error('Post-link work failed', describeError(error))),
   );
   return c.json({ connectionId: connection.id, ...result });
 });
@@ -128,7 +129,7 @@ plaidRoutes.post('/webhook', async (c) => {
       (async () => {
         await syncConnection(deps, tenant, connection.id, 'webhook');
         await snapshotHousehold(deps, tenant, marketDate(deps.now()));
-      })().catch((error) => console.error('Webhook sync failed', error)),
+      })().catch((error) => console.error('Webhook sync failed', describeError(error))),
     );
 
   switch (eventName) {

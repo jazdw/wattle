@@ -36,6 +36,13 @@ if (new URLSearchParams(window.location.search).has('reset')) {
   else void clearServiceWorkerCaches();
 }
 
+// A page restored from the back-forward cache shows whatever it held when
+// left, even after signing out in between. Reload it so it asks the server
+// again (and goes to the sign-in page if the session has ended).
+window.addEventListener('pageshow', (event) => {
+  if (event.persisted) window.location.reload();
+});
+
 createRoot(document.getElementById('root')!).render(
   <StrictMode>
     <QueryClientProvider client={queryClient}>

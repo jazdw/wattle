@@ -9,6 +9,7 @@ import { secureHeaders } from 'hono/secure-headers';
 import { accountRoutes, connectionRoutes } from './routes/accounts';
 import { authRoutes } from './auth/routes';
 import type { AppEnv } from './env';
+import { describeErrorWithStack } from './lib/errors';
 import { HttpError } from './lib/http';
 import { plaidRoutes } from './routes/plaid';
 import { verifyAccessToken } from './services/accessJwt';
@@ -75,7 +76,7 @@ export function createApp(options: { assets?: (request: Request) => Promise<Resp
   app.onError((error, c) => {
     if (error instanceof HttpError) return c.json({ error: error.message }, error.status);
     if (error instanceof HTTPException) return error.getResponse();
-    console.error('Unhandled error', error instanceof Error ? (error.stack ?? error.message) : error);
+    console.error('Unhandled error', describeErrorWithStack(error));
     return c.json({ error: 'Internal server error.' }, 500);
   });
 

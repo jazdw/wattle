@@ -70,6 +70,7 @@ export async function createHousehold(deps: Deps, name: string, email: string) {
   await deps.db.insert(schema.households).values({ id: householdId, name, createdAt: now });
   await deps.db.insert(schema.users).values({ id: userId, googleSub: `sub-${userId}`, email, name: email, createdAt: now });
   await deps.db.insert(schema.householdMembers).values({ householdId, userId, role: 'owner', createdAt: now });
+  await deps.db.insert(schema.allowedEmails).values({ email, householdId, addedAt: now }).onConflictDoNothing();
   const token = await createSession(deps, userId);
   return { householdId, userId, cookie: `wt_session=${token}` };
 }

@@ -16,6 +16,7 @@ import { migrate } from 'drizzle-orm/libsql/migrator';
 import * as schema from '../server/db/schema';
 import { createApp } from '../server/app';
 import { depsFromEnv } from '../server/config';
+import { describeError } from '../server/lib/errors';
 import type { Db } from '../server/ports';
 import { runDaily } from '../server/services/jobs';
 
@@ -30,7 +31,7 @@ const env = { ...process.env };
 if (env.ALLOW_DEV_LOGIN !== '1') delete env.DEV_LOGIN_EMAILS;
 
 const deps = depsFromEnv(env, db as unknown as Db, (work) => {
-  void work.catch((error) => console.error('Background work failed', error));
+  void work.catch((error) => console.error('Background work failed', describeError(error)));
 });
 
 // Static files first (the built SPA), then the API, then index.html for client routes.
@@ -44,4 +45,4 @@ const port = Number(process.env.PORT ?? 8787);
 serve({ fetch: root.fetch, port });
 console.log(`Wattle on http://localhost:${port}`);
 
-setInterval(() => void runDaily(deps).catch((error) => console.error(error)), 24 * 3600 * 1000);
+setInterval(() => void runDaily(deps).catch((error) => console.error('Daily job failed', describeError(error))), 24 * 3600 * 1000);
