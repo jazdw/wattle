@@ -4,7 +4,8 @@
  * connection's lease whenever a report is outstanding: after the ASSETS
  * webhook, on Sync, and nightly (in case the webhook was missed).
  */
-import { eq } from 'drizzle-orm';
+import { eq, inArray, lt, ne, sql } from 'drizzle-orm';
+import { marketDate } from '../../shared/dates';
 import { toMinor } from '../../shared/money';
 import { PlaidApiError } from '../adapters/plaid';
 import { chunkRows, runAtomic } from '../db/batch';
@@ -15,6 +16,37 @@ import { SyncRun, type SyncTrigger } from './activity';
 import { decryptToken, loadTokenKeys, tokenAad } from './crypto';
 import type { Lease } from './lease';
 import type { ConnectionRow } from './sync';
+
+/**
+ * Days the bank was asked about but had no figure for keep their carried-forward
+ * balance, still estimated, relabelled as bank history: missed-days detection
+ * (./backfill) then counts them as covered and doesn't ask again.
+ */
+function askedStatement(deps: Deps, tenant: Tenant, connection: ConnectionRow) {
+  const covered = tenant.db
+    .select({ id: accounts.id })
+    .from(accounts)
+    .where(
+      tenant.scope(
+        accounts,
+        eq(accounts.connectionId, connection.id),
+        // Investment accounts' history is rebuilt from their transactions instead.
+        ...(connection.hasInvestments ? [ne(accounts.type, 'investment')] : []),
+      ),
+    );
+  return tenant.db
+    .update(accountDaily)
+    .set({ source: 'backfill' })
+    .where(
+      tenant.scope(
+        accountDaily,
+        inArray(accountDaily.accountId, covered),
+        eq(accountDaily.source, 'sync'),
+        eq(accountDaily.estimated, true),
+        lt(accountDaily.date, marketDate(deps.now())),
+      ),
+    );
+}
 
 /**
  * Collect the connection's outstanding report, if any. The balances, the
@@ -51,9 +83,15 @@ export async function collectPendingReport(
     run.fail(error);
     await lease.renew();
     await runAtomic(tenant.db, [
+      askedStatement(deps, tenant, connection),
       tenant.db
         .update(connections)
-        .set({ assetReportTokenEnc: null, assetReportId: null, backfillStatus: connection.hasInvestments ? 'done' : 'failed' })
+        // A report filling missed days leaves the loaded history as it was.
+        .set({
+          assetReportTokenEnc: null,
+          assetReportId: null,
+          backfillStatus: connection.backfillStatus !== 'running' ? connection.backfillStatus : connection.hasInvestments ? 'done' : 'failed',
+        })
         .where(tenant.scope(connections, eq(connections.id, connection.id))),
       run.statement(),
     ]);
@@ -91,7 +129,19 @@ export async function collectPendingReport(
     run.count('days', rows.length);
     await lease.renew();
     await runAtomic(tenant.db, [
-      ...chunkRows(accountDaily, rows).map((chunk) => tenant.db.insert(accountDaily).values(chunk).onConflictDoNothing()),
+      ...chunkRows(accountDaily, rows).map((chunk) =>
+        tenant.db
+          .insert(accountDaily)
+          .values(chunk)
+          .onConflictDoUpdate({
+            target: [accountDaily.accountId, accountDaily.date],
+            set: { balance: sql`excluded.balance`, source: sql`excluded.source`, estimated: sql`0` },
+            // Only balances carried forward because a sync was missed; reported,
+            // entered and imported ones stay.
+            setWhere: sql`${accountDaily.source} = 'sync' and ${accountDaily.estimated} = 1`,
+          }),
+      ),
+      askedStatement(deps, tenant, connection),
       tenant.db
         .update(connections)
         .set({ assetReportTokenEnc: null, assetReportId: null, backfillStatus: 'done' })

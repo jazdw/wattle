@@ -25,7 +25,8 @@ type Account = typeof accounts.$inferSelect;
 /**
  * Write dated balances (major units) for an account, all or none.
  * - 'manual' (Record a balance): replaces whatever that day held.
- * - 'import' (CSV): fills gaps and replaces estimates and earlier imports;
+ * - 'import' (CSV): fills gaps and replaces estimates (backfilled, or carried
+ *   forward while syncing failed) and earlier imports;
  *   with `overwrite`, replaces synced and recorded values too.
  * For a manual account, the newest recorded or imported day is its current
  * balance; when that changes, later carried-forward snapshot copies are
@@ -60,7 +61,7 @@ export async function writeBalances(
           setWhere:
             source === 'manual' || overwrite
               ? sql`1 = 1`
-              : sql`${accountDaily.source} = 'backfill' or ${accountDaily.source} = 'import'`,
+              : sql`${accountDaily.source} in ('backfill', 'import') or (${accountDaily.source} = 'sync' and ${accountDaily.estimated} = 1)`,
         }),
     );
 

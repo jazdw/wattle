@@ -69,6 +69,13 @@ migrations/  drizzle-kit SQL, applied by Wrangler (D1) or Drizzle's migrator (li
   - With Investments, investment accounts are rebuilt from up to 24 months of transactions and daily closes. Days where the institution's history has gaps are marked *estimated* and shaded in charts.
   - With Assets, the login's other accounts (bank, card, a brokerage's cash account) use Plaid Asset Report daily balances (up to 2 years).
   - Anything else can be imported from CSV. Westpac transaction exports are recognised automatically.
+- **Missed days.** Each night's snapshot records the day's balance. Which figure wins for a day:
+  - A linked account's balance reported that day is the bank's figure, and replaces anything entered or imported for it.
+  - If a sync fails (or the login is disconnected), the last balance is carried forward and marked *estimated*.
+  - After each sync, each account's last day covered by the institution's figure (a reported balance or bank history) is checked. Days after it, up to yesterday, were missed. Recorded and imported days don't count, since the fill never replaces them.
+  - Bank accounts on an Assets login: a small asset report is requested for just those days. Its balances replace the estimates, but never reported, entered or imported days.
+  - Investment accounts: they're rebuilt for just those days from the transactions that arrived since, so a trade made during the gap shows up.
+  - Each gap is asked for once. Days the bank has no figure for keep the carried-forward balance, still estimated, relabelled as bank history (`backfill`), so they count as covered and aren't asked for again.
 - **Classification.** Funds are split across categories (US/international/emerging/Australian stocks, US/international bonds, cash, real estate, …) and, for the stock portion, size and value/growth.
   - `shared/fundProfiles.ts` seeds common Vanguard, Fidelity, Schwab, iShares and ASX funds, including target-date mixes.
   - Unknown funds get a name-based guess flagged **Review**. Every classification can be edited.

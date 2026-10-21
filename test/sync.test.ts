@@ -6,6 +6,7 @@ import type { Deps } from '../server/ports';
 import { collectPendingReport } from '../server/services/assetReports';
 import { connectionLease, Lease } from '../server/services/lease';
 import { backfillConnection } from '../server/services/backfill';
+import { snapshotHousehold } from '../server/services/snapshots';
 import { syncConnection } from '../server/services/sync';
 import { account, closes, fakePlaid, fakePrices, holding, security } from './fakes';
 import { client, createHousehold, createTestDeps, flush, TODAY } from './helpers';
@@ -510,5 +511,155 @@ describe('history backfill', () => {
       .from(schema.accountDaily)
       .where(and(eq(schema.accountDaily.accountId, brk.id), eq(schema.accountDaily.date, '2026-09-30')));
     expect(row).toMatchObject({ balance: 1, source: 'import' });
+  });
+});
+
+/** Moves the clock to night n after linking (the nightly job runs at 02:00 UTC: market day TODAY + n). */
+function nights(deps: Deps) {
+  const start = deps.now().getTime();
+  return (n: number) => {
+    deps.now = () => new Date(start + n * 86400_000);
+  };
+}
+
+/** What the nightly job does for one login: sync (a failure is logged), then snapshot the day. */
+async function nightlyRun(deps: Deps, tenant: Tenant, connectionId: string) {
+  await syncConnection(deps, tenant, connectionId, 'nightly').catch(() => {});
+  await snapshotHousehold(deps, tenant, new Date(deps.now().getTime() - 5 * 3600_000).toISOString().slice(0, 10));
+}
+
+describe('missed days', () => {
+  /** A bank-only login, linked on TODAY (2026-10-08) with its history loaded. */
+  async function bank() {
+    const plaid = fakePlaid({ accounts: [account('chk', 'depository', 1000)], itemProducts: ['assets'], historicalBalances: { chk: [{ date: '2026-10-07', current: 900 }] } });
+    const deps = await createTestDeps({ plaid });
+    const home = await createHousehold(deps, 'Home', 'me@example.com');
+    const api = client(deps, home.cookie);
+    await api('/api/plaid/exchange', { method: 'POST', json: { publicToken: 'p', kind: 'account' } });
+    await flush(deps);
+    const tenant = new Tenant(deps.db, home.householdId);
+    const [connection] = await deps.db.select().from(schema.connections);
+    await syncConnection(deps, tenant, connection.id, 'manual'); // collects the first report
+    const [chk] = await deps.db.select().from(schema.accounts);
+    const day = async (date: string) =>
+      (await deps.db.select().from(schema.accountDaily).where(and(eq(schema.accountDaily.accountId, chk.id), eq(schema.accountDaily.date, date))))[0];
+    const working = plaid.getAccounts;
+    const failing = (down: boolean) => {
+      plaid.getAccounts = down
+        ? async () => {
+            throw new Error('network down');
+          }
+        : working;
+    };
+    return { deps, plaid, api, tenant, connection, chk, night: nights(deps), day, nightly: () => nightlyRun(deps, tenant, connection.id), failing };
+  }
+
+  it("a linked account's reported balance replaces one imported for that day", async () => {
+    const { api, chk, night, day, nightly } = await bank();
+    night(1);
+    await api('/api/imports/balances', { method: 'POST', json: { accountId: chk.id, rows: [{ date: '2026-10-09', balance: 5 }] } });
+    expect(await day('2026-10-09')).toMatchObject({ balance: 5_00, source: 'import' });
+    await nightly();
+    expect(await day('2026-10-09')).toMatchObject({ balance: 1000_00, source: 'sync', estimated: false });
+  });
+
+  it('asks the bank for the days after the last one it reported, filling only balances carried forward', async () => {
+    const { deps, plaid, api, connection, chk, night, day, nightly, failing } = await bank();
+    failing(true);
+    night(1);
+    await nightly();
+    night(2);
+    await nightly();
+    // Carried forward, and marked as an estimate.
+    expect(await day('2026-10-09')).toMatchObject({ balance: 1000_00, source: 'sync', estimated: true });
+    // An import replaces an estimate.
+    await api('/api/imports/balances', { method: 'POST', json: { accountId: chk.id, rows: [{ date: '2026-10-10', balance: 1150 }] } });
+
+    failing(false);
+    plaid.state.accounts = [account('chk', 'depository', 1300)];
+    plaid.state.historicalBalances = {
+      chk: [
+        { date: '2026-10-09', current: 1100 },
+        { date: '2026-10-10', current: 1200 },
+      ],
+    };
+    night(3);
+    await nightly(); // syncs, then asks for the missed days
+    expect(plaid.state.assetReportDays.at(-1)).toBe(3); // the 9th (after the last reported day) to the 11th
+    const [asked] = await deps.db.select().from(schema.connections);
+    expect(asked.backfillStatus).toBe('done');
+    expect(asked.assetReportTokenEnc).not.toBeNull();
+
+    await syncConnection(deps, new Tenant(deps.db, connection.householdId), connection.id, 'manual'); // collects it
+    expect(await day('2026-10-08')).toMatchObject({ balance: 1000_00, source: 'sync' }); // reported that day: kept
+    expect(await day('2026-10-09')).toMatchObject({ balance: 1100_00, source: 'backfill', estimated: false });
+    expect(await day('2026-10-10')).toMatchObject({ balance: 1150_00, source: 'import' }); // yours: kept
+    const [after] = await deps.db.select().from(schema.connections);
+    expect(after).toMatchObject({ backfillStatus: 'done', assetReportTokenEnc: null });
+  });
+
+  it("asks once per gap: days the bank can't fill stay estimated", async () => {
+    const { deps, plaid, tenant, connection, night, day, nightly, failing } = await bank();
+    failing(true);
+    night(1);
+    await nightly();
+    failing(false);
+    plaid.state.historicalBalances = { chk: [] }; // the bank has nothing for those days
+    night(2);
+    // Syncs with no snapshot between them (e.g. Sync pressed before the nightly
+    // snapshot): the gap is still the latest days each time.
+    await syncConnection(deps, tenant, connection.id, 'manual'); // asks
+    const asked = plaid.state.assetReportDays.length;
+    await syncConnection(deps, tenant, connection.id, 'manual'); // collects the empty report
+    await syncConnection(deps, tenant, connection.id, 'manual');
+    expect(plaid.state.assetReportDays).toHaveLength(asked);
+    expect(await day('2026-10-09')).toMatchObject({ balance: 1000_00, source: 'backfill', estimated: true }); // asked: still an estimate
+  });
+
+  it("doesn't ask when every night synced", async () => {
+    const { plaid, night, nightly } = await bank();
+    const asked = plaid.state.assetReportDays.length;
+    night(1);
+    await nightly();
+    night(2);
+    await nightly();
+    expect(plaid.state.assetReportDays).toHaveLength(asked);
+  });
+
+  it('rebuilds investment accounts for the missed days from the transactions that arrived after', async () => {
+    const prices = fakePrices({ VTI: closes('2024-10-01', 760, 50, 0.1) });
+    const { deps, plaid, tenant, connection, byName } = await linked(brokerage(), { prices });
+    const night = nights(deps);
+    const brk = byName('brk');
+    const vti = async (date: string) =>
+      (
+        await deps.db
+          .select()
+          .from(schema.holdingDaily)
+          .where(and(eq(schema.holdingDaily.accountId, brk.id), eq(schema.holdingDaily.securityId, (await deps.db.select().from(schema.securities).where(eq(schema.securities.ticker, 'VTI')))[0].id), eq(schema.holdingDaily.date, date)))
+      )[0];
+    const working = plaid.getHoldings;
+    plaid.getHoldings = async () => {
+      throw new Error('network down');
+    };
+    night(1);
+    await nightlyRun(deps, tenant, connection.id);
+    night(2);
+    await nightlyRun(deps, tenant, connection.id);
+    expect(await vti('2026-10-10')).toMatchObject({ quantity: 10, source: 'sync' }); // last known holdings, carried forward
+
+    // Bought 6 more on the 10th, while syncs were failing.
+    plaid.getHoldings = working;
+    plaid.state.holdings = [holding('brk', 's-vti', 16, 100), holding('brk', 's-cash', 500, 1), holding('joint', 's-vti', 5, 100)];
+    plaid.state.transactions.push({ ...plaid.state.transactions[0], investment_transaction_id: 't2', date: '2026-10-10', quantity: 6, amount: 600 });
+    night(3);
+    await nightlyRun(deps, tenant, connection.id);
+    expect(await vti('2026-10-09')).toMatchObject({ quantity: 10, source: 'backfill' });
+    expect(await vti('2026-10-10')).toMatchObject({ quantity: 16, source: 'backfill' });
+    const [day] = await deps.db
+      .select()
+      .from(schema.accountDaily)
+      .where(and(eq(schema.accountDaily.accountId, brk.id), eq(schema.accountDaily.date, '2026-10-10')));
+    expect(day.source).toBe('backfill');
   });
 });

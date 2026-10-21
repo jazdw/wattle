@@ -24,6 +24,8 @@ export interface PlaidState {
   /** Plaid couldn't build the report (after an ASSETS:ERROR webhook). */
   assetReportGetError: string | null;
   calls: string[];
+  /** days_requested of each asset report asked for. */
+  assetReportDays: number[];
   removed: string[];
 }
 
@@ -79,6 +81,7 @@ export function fakePlaid(initial: Partial<PlaidState> = {}): PlaidApi & { state
     assetReportFails: false,
     assetReportGetError: null,
     calls: [],
+    assetReportDays: [],
     removed: [],
     ...initial,
   };
@@ -137,8 +140,9 @@ export function fakePlaid(initial: Partial<PlaidState> = {}): PlaidApi & { state
         total_investment_transactions: state.transactions.length,
       } as never;
     },
-    createAssetReport: async () => {
+    createAssetReport: async (_token, days) => {
       state.calls.push('asset_report:create');
+      state.assetReportDays.push(days);
       if (state.assetReportFails) throw new PlaidApiError(400, 'ASSET_REPORT_ERROR', 'PRODUCTS_NOT_SUPPORTED', 'nope');
       return { token: 'assets-sandbox-token', id: 'ar-1' };
     },

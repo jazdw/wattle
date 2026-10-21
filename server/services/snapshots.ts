@@ -1,8 +1,12 @@
 /**
  * Daily snapshots: one account_daily row per visible account and one
  * holding_daily row per holding, valued at the day's close. Idempotent —
- * rerunning a day overwrites that day's synced rows. Manually entered and
- * imported values for the day are never overwritten.
+ * rerunning a day overwrites that day's synced rows. A linked account's
+ * balance reported that day replaces anything entered or imported for it (the
+ * institution's figure is the real one); otherwise entered and imported values
+ * are never overwritten. A balance carried forward (the sync failed, or the
+ * login is disconnected) is marked estimated, so a later bank-history report
+ * can replace it.
  *
  * One snapshot per household at a time (its lease), written atomically. A
  * change that finds a snapshot running leaves a note, and the running one goes
@@ -10,7 +14,7 @@
  * snapshot written always reflects the latest data.
  */
 import { eq, inArray, sql } from 'drizzle-orm';
-import type { IsoDate } from '../../shared/dates';
+import { marketDate, type IsoDate } from '../../shared/dates';
 import { chunkRows, runAtomic } from '../db/batch';
 import { accountDaily, accounts, holdingDaily, holdings, securities } from '../db/schema';
 import type { Tenant } from '../db/tenant';
@@ -92,18 +96,23 @@ async function snapshotOnce(deps: Deps, tenant: Tenant, date: IsoDate, lease: Le
   }
 
   // Snapshot rows are always `sync`; `manual` is reserved for values a person
-  // entered, which a snapshot never replaces (see setWhere below).
-  const accountDailyRows: (typeof accountDaily.$inferInsert)[] = [];
+  // entered. Reported: a linked account synced that day, whose figure wins.
+  const reportedRows: (typeof accountDaily.$inferInsert)[] = [];
+  const otherRows: (typeof accountDaily.$inferInsert)[] = [];
   for (const account of accountRows) {
     const balance = totals.get(account.id) ?? account.balance;
     if (balance === null) continue;
-    accountDailyRows.push({
+    const reported = account.source === 'plaid' && account.balanceAsOf !== null && marketDate(new Date(account.balanceAsOf)) >= date;
+    // Linked (or disconnected) accounts not synced that day carry their last balance forward.
+    const estimated = !reported && account.connectionId !== null;
+    (reported ? reportedRows : otherRows).push({
       householdId: tenant.householdId,
       accountId: account.id,
       date,
       balance,
       currency: account.currency,
       source: 'sync',
+      estimated,
     });
   }
 
@@ -151,17 +160,26 @@ async function snapshotOnce(deps: Deps, tenant: Tenant, date: IsoDate, lease: Le
           setWhere: sql`${holdingDaily.source} in ('sync', 'backfill')`,
         }),
     ),
-    ...chunkRows(accountDaily, accountDailyRows).map((chunk) =>
+    ...chunkRows(accountDaily, reportedRows).map((chunk) =>
       tenant.db
         .insert(accountDaily)
         .values(chunk)
         .onConflictDoUpdate({
           target: [accountDaily.accountId, accountDaily.date],
           set: { balance: sql`excluded.balance`, source: sql`excluded.source`, estimated: sql`0` },
+        }),
+    ),
+    ...chunkRows(accountDaily, otherRows).map((chunk) =>
+      tenant.db
+        .insert(accountDaily)
+        .values(chunk)
+        .onConflictDoUpdate({
+          target: [accountDaily.accountId, accountDaily.date],
+          set: { balance: sql`excluded.balance`, source: sql`excluded.source`, estimated: sql`excluded.estimated` },
           setWhere: sql`${accountDaily.source} in ('sync', 'backfill')`,
         }),
     ),
   ]);
 
-  return { accounts: accountDailyRows.length, holdings: holdingDailyRows.length };
+  return { accounts: reportedRows.length + otherRows.length, holdings: holdingDailyRows.length };
 }
