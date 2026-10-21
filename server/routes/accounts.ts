@@ -1,9 +1,9 @@
 /** Connections, accounts (Plaid and manual), manual balances and holdings. */
-import { and, count, desc, eq, inArray, isNotNull, ne, sql } from 'drizzle-orm';
+import { and, count, desc, eq, inArray, isNotNull, ne } from 'drizzle-orm';
 import { Hono } from 'hono';
 import { suggestClassification } from '../../shared/classify';
 import { marketDate } from '../../shared/dates';
-import { convertMinor, toMinor } from '../../shared/money';
+import { convertMinor } from '../../shared/money';
 import {
   accountPatchSchema,
   balanceEntrySchema,
@@ -30,14 +30,13 @@ import { HttpError, notFound, readBody, requestCurrency } from '../lib/http';
 import type { Deps, SecurityDescription } from '../ports';
 import { connectionActivity, SyncRun } from '../services/activity';
 import { backfillConnection } from '../services/backfill';
+import { signedBalance, writeBalances } from '../services/balances';
 import { toCurrency } from '../services/portfolio';
 import { closeLookup, describeTickers, ensureRecentCloses, fxLookup } from '../services/pricing';
 import { snapshotHousehold } from '../services/snapshots';
 import { accountLease, connectionLease, Lease, snapshotLease } from '../services/lease';
 import { stableId } from '../services/ids';
 import { getConnection, MANUAL_SYNC_INTERVAL_MS, purgeStatements, removeConnection, syncConnection, underConnectionLease } from '../services/sync';
-
-const LIABILITY_TYPES = new Set(['credit', 'loan']);
 
 async function householdCurrency(tenant: Tenant): Promise<string> {
   const [row] = await tenant.db
@@ -227,11 +226,6 @@ export function possibleDuplicates(
   return duplicates;
 }
 
-function signedBalance(type: string, amount: number): number {
-  const minor = toMinor(amount);
-  return LIABILITY_TYPES.has(type) ? -Math.abs(minor) : minor;
-}
-
 accountRoutes.post('/', async (c) => {
   const deps = c.env.deps;
   const tenant = c.get('tenant');
@@ -371,42 +365,7 @@ accountRoutes.post('/:id/balances', async (c) => {
   if (!account) notFound('Account not found.');
   if (account.source !== 'manual') throw new HttpError(409, 'Linked account balances come from the institution.');
   const body = await readBody(c, balanceEntrySchema);
-  const balance = signedBalance(account.type, body.balance);
-
-  // One change to the account at a time (two entries at once could otherwise
-  // leave the older one as the current balance), written atomically.
-  const lease = await Lease.acquireOrBusy(deps, tenant, accountLease(account.id), 'Someone else is updating this account. Try again in a moment.');
-  let isLatest = false;
-  try {
-    // The account's current balance is its most recent entry (recorded or imported).
-    const [latest] = await tenant.db
-      .select({ date: accountDaily.date })
-      .from(accountDaily)
-      .where(tenant.scope(accountDaily, eq(accountDaily.accountId, account.id), inArray(accountDaily.source, ['manual', 'import'])))
-      .orderBy(desc(accountDaily.date))
-      .limit(1);
-    isLatest = !latest || body.date >= latest.date;
-    const statements: BatchItem<'sqlite'>[] = [
-      tenant.db
-        .insert(accountDaily)
-        .values({ householdId: tenant.householdId, accountId: account.id, date: body.date, balance, currency: account.currency, source: 'manual' })
-        .onConflictDoUpdate({ target: [accountDaily.accountId, accountDaily.date], set: { balance, source: 'manual', estimated: false } }),
-    ];
-    if (isLatest) {
-      statements.push(
-        tenant.db.update(accounts).set({ balance, balanceAsOf: deps.now().getTime() }).where(tenant.scope(accounts, eq(accounts.id, account.id))),
-        // Carried-forward snapshot copies after this date are stale now.
-        tenant.db
-          .delete(accountDaily)
-          .where(tenant.scope(accountDaily, eq(accountDaily.accountId, account.id), eq(accountDaily.source, 'sync'), sql`${accountDaily.date} > ${body.date}`)),
-      );
-    }
-    await lease.renew();
-    await runAtomic(tenant.db, statements);
-  } finally {
-    await lease.forceRelease();
-  }
-  if (isLatest) await snapshotHousehold(deps, tenant, marketDate(deps.now()));
+  await writeBalances(deps, tenant, account, [body], 'manual');
   return c.json({ ok: true });
 });
 

@@ -29,19 +29,21 @@ const REVIEWED: Record<string, Record<string, string>> = {
     connections: 'webhooks: status via statusStatement (newest wins), consent warning column; no lease needed',
   },
   'server/routes/accounts.ts': {
-    accounts: 'create: atomic; rename/owner/category: single update; hide: connection + snapshot leases; balance: account lease; delete: account lease',
-    accountDaily: 'manual balance: account lease; hide/purge: connection + snapshot leases',
+    accounts: 'create: atomic; rename/owner/category: single update; hide: connection + snapshot leases; delete: account lease',
+    accountDaily: 'hide/purge: connection + snapshot leases',
     holdingDaily: 'hide/purge: connection + snapshot leases',
     holdings: 'manual holdings: account lease + version, atomic',
     securities: 'manual holdings: account lease; never modifies Plaid-owned rows; derived ids',
   },
   'server/routes/portfolio.ts': {
-    accountDaily: 'CSV import: one atomic batch; never overwrites unless asked; manual accounts under the account lease',
-    accounts: "CSV import into a manual account: current balance from its latest entry, account lease",
     holdingDaily: 'CSV import: one atomic batch',
     securities: 'classification edit: single update (syncs never touch classification); import: derived ids',
     targets: 'targets lease + version',
     households: 'settings: single update',
+  },
+  'server/services/balances.ts': {
+    accountDaily: 'recorded balances and CSV imports: one atomic batch; imports never overwrite unless asked; manual accounts under the account lease',
+    accounts: "manual account's current balance from its newest entry: account lease, atomic with dropping stale copies",
   },
   'server/services/snapshots.ts': {
     accountDaily: 'snapshot lease, atomic',
