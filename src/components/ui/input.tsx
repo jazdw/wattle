@@ -1,4 +1,5 @@
 import { useId, type ComponentProps } from 'react';
+import { ChevronDown } from 'lucide-react';
 import { cn } from '@/lib/utils';
 
 /** Every form control gets an id (browsers expect an id or name on each) unless the caller gives one. */
@@ -23,15 +24,19 @@ export function Input({ className, ...props }: ComponentProps<'input'>) {
 
 export function NativeSelect({ className, ...props }: ComponentProps<'select'>) {
   const id = useControlId(props);
+  // The browser's own arrow sits hard against the edge: draw one with room.
   return (
-    <select
-      id={id}
-      className={cn(
-        'flex h-9 w-full rounded-md border border-input bg-card px-2 py-1 text-sm shadow-xs focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:opacity-50',
-        className,
-      )}
-      {...props}
-    />
+    <div className="relative w-full">
+      <select
+        id={id}
+        className={cn(
+          'flex h-9 w-full appearance-none rounded-md border border-input bg-card py-1 pl-2 pr-8 text-sm shadow-xs focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:opacity-50',
+          className,
+        )}
+        {...props}
+      />
+      <ChevronDown aria-hidden className="pointer-events-none absolute right-2.5 top-1/2 size-4 -translate-y-1/2 text-muted-foreground" />
+    </div>
   );
 }
 
