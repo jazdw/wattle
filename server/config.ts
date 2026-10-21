@@ -14,6 +14,8 @@ export interface RawEnv {
   PLAID_ENV?: string;
   TIINGO_API_KEY?: string;
   FINNHUB_API_KEY?: string;
+  /** 'true' lets Disconnect remove the login at Plaid (permanent). Default off. */
+  PLAID_ALLOW_REMOVE?: string;
   /** Live quotes: 'finnhub' (default when FINNHUB_API_KEY is set), 'tiingo' (default otherwise, with a Tiingo key), or 'none'. */
   QUOTE_PROVIDER?: string;
   /** How long a live quote is reused, in seconds (default 300). Lower it on a paid market-data plan. */
@@ -51,6 +53,7 @@ export function configFromEnv(env: RawEnv): Config {
     googleClientId: env.GOOGLE_CLIENT_ID || undefined,
     googleClientSecret: env.GOOGLE_CLIENT_SECRET || undefined,
     tokenEncKey: env.TOKEN_ENC_KEY || undefined,
+    plaidAllowRemove: env.PLAID_ALLOW_REMOVE === 'true',
     access:
       env.ACCESS_TEAM_DOMAIN && env.ACCESS_AUD ? { teamDomain: env.ACCESS_TEAM_DOMAIN, audience: env.ACCESS_AUD } : undefined,
   };

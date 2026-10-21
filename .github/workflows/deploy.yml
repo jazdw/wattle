@@ -68,6 +68,7 @@ jobs:
           CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
           # Plain app settings, passed to the Worker as variables (unset: default).
           PLAID_ENV: ${{ vars.PLAID_ENV }}
+          PLAID_ALLOW_REMOVE: ${{ vars.PLAID_ALLOW_REMOVE }}
           QUOTE_PROVIDER: ${{ vars.QUOTE_PROVIDER }}
           QUOTE_CACHE_SECONDS: ${{ vars.QUOTE_CACHE_SECONDS }}
           FX_PROVIDER: ${{ vars.FX_PROVIDER }}

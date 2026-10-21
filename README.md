@@ -42,7 +42,7 @@ migrations/  drizzle-kit SQL, applied by Wrangler (D1) or Drizzle's migrator (li
 ## How it works
 
 - **Households.** Every row of financial data belongs to a household (the tenant). Routes only reach data through `Tenant.scope()`, which always adds `household_id = ?`. `test/tenancy.test.ts` checks that two households can't see or change each other's data through any route.
-- **Unlinking.** Disconnecting a login keeps its accounts and history as manual accounts, unless you choose to delete them. Accounts an institution stops reporting (closed, or deselected in Plaid) are flagged "no longer reported" and drop out of totals, keeping their history.
+- **Unlinking.** Disconnecting a login stops syncing and keeps its accounts and history as manual accounts, unless you choose to delete them. The Plaid login itself is kept (unless `PLAID_ALLOW_REMOVE` is on), so **Reconnect** resumes it on the same Item: Plaid's Trial plan counts removed Items, so a new link would use another of the 10. Balances recorded or imported while disconnected keep those days; syncing never overwrites them. Accounts an institution stops reporting (closed, or deselected in Plaid) are flagged "no longer reported" and drop out of totals, keeping their history.
 - **Sold positions.** Sold holdings disappear on the next sync. Their history stays, and charts show them falling to zero.
 - **Linking.** Each person links their own logins with Plaid Link. **Link account** asks Plaid for Assets (daily balance history; it's what Link lists institutions by), Investments wherever the login has investment accounts, and consent for Transactions and Liabilities, which aren't fetched or billed until used and can be switched on later on the same login (no new Item). So one login, one Item, brings a brokerage's holdings and its cash account's history. **Link investments only** is the fallback for institutions without Assets (some 401(k) providers). Each completed link is a new Plaid Item; on the Trial plan removed Items still count against the 10. Accounts are tagged by owner (either of you, or joint). If you've both linked a joint account, **hide** one copy. Hidden accounts aren't synced or stored and don't count in any total.
 - **No account numbers.** Only Plaid's `mask` (last ≤4 characters) is stored. The `auth` product is never requested. `test/schema.test.ts` fails if a column for account or routing numbers appears.
@@ -182,6 +182,7 @@ A second lock in front of the app. Cloudflare's edge only lets your Google accou
 | `TOKEN_ENC_KEY` | Worker secret | Encrypts Plaid tokens at rest |
 | `PLAID_CLIENT_ID`, `PLAID_SECRET` | Worker secrets | Plaid |
 | `PLAID_ENV` | GitHub variable | `sandbox` (default) or `production` |
+| `PLAID_ALLOW_REMOVE` | GitHub variable (optional) | `true` makes Disconnect also remove the login at Plaid (`/item/remove`, can't be undone). Default off: the login is kept so it can be reconnected without using another Item |
 | `TIINGO_API_KEY` | Worker secret | Daily closes (mutual funds too), history, ticker lookups; live quotes without Finnhub (50 requests an hour free) |
 | `FINNHUB_API_KEY` | Worker secret (optional) | Live quotes (60 calls a minute free; no mutual funds or history, which come from Tiingo) |
 | `QUOTE_PROVIDER` | GitHub variable (optional) | `finnhub` (default with a Finnhub key), `tiingo` (default otherwise) or `none` |

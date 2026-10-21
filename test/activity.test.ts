@@ -322,8 +322,8 @@ describe('one change at a time per connection, applied atomically', () => {
     await syncing;
 
     expect((await api(`/api/connections/${connection.id}`, { method: 'DELETE' })).status).toBe(200);
-    expect(await syncConnection(deps, tenant, connection.id, 'webhook')).toMatchObject({ status: 'removed' });
-    expect((await deps.db.select().from(schema.connections))[0].status).toBe('removed');
+    expect(await syncConnection(deps, tenant, connection.id, 'webhook')).toMatchObject({ status: 'disconnected' });
+    expect((await deps.db.select().from(schema.connections))[0].status).toBe('disconnected');
     expect((await latestRuns(deps))[0]).toMatchObject({ action: 'disconnect' });
   });
 
