@@ -1,4 +1,4 @@
-import { screen } from '@testing-library/react';
+import { screen, within } from '@testing-library/react';
 import { http, HttpResponse } from 'msw';
 import { describe, expect, it, vi } from 'vitest';
 import App from './App';
@@ -35,8 +35,10 @@ describe('App shell', () => {
     // Vanguard needs re-authentication: the Accounts link carries a red dot.
     await expect.poll(() => screen.getByRole('link', { name: 'Accounts' }).querySelector('.bg-negative')).not.toBeNull();
 
-    await user.click(screen.getByRole('tab', { name: 'AUD' }));
-    expect(screen.getByRole('tab', { name: 'AUD' })).toHaveAttribute('aria-selected', 'true');
+    // The sidebar (desktop); the phone's top bar has the same switch.
+    const sidebar = within(screen.getByRole('complementary'));
+    await user.click(sidebar.getByRole('tab', { name: 'AUD' }));
+    for (const tab of screen.getAllByRole('tab', { name: 'AUD' })) expect(tab).toHaveAttribute('aria-selected', 'true');
     expect(localStorage.getItem('wt-currency')).toBe('AUD');
     await expect.poll(() => sent('GET /api/portfolio').some((request) => request.url.searchParams.get('currency') === 'AUD')).toBe(true);
   });
@@ -46,7 +48,7 @@ describe('App shell', () => {
     vi.stubGlobal('location', { ...window.location, assign, origin: window.location.origin });
     const { user } = renderPage(<App />, { route: '/' });
     expect(await screen.findByTitle('Signed in as me@example.com')).toHaveTextContent('Jared W');
-    await user.click(await screen.findByRole('button', { name: /Sign out/ }));
+    await user.click(within(await screen.findByRole('banner')).getByRole('button', { name: 'Sign out' }));
     await vi.waitFor(() => expect(assign).toHaveBeenCalledWith('/login'));
     expect(sent('POST /api/auth/logout')).toHaveLength(1);
   });
