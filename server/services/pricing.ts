@@ -368,8 +368,8 @@ function asOf<T extends { date: IsoDate }, R>(list: T[] | undefined, date: IsoDa
 
 const FX_PAIR: [Currency, Currency] = ['USD', 'AUD'];
 
-export async function ensureFx(deps: Deps, start: IsoDate, end: IsoDate): Promise<void> {
-  if (!deps.fx) return;
+export async function ensureFx(deps: Deps, start: IsoDate, end: IsoDate): Promise<{ failed: boolean }> {
+  if (!deps.fx) return { failed: false };
   const fx = deps.fx;
   const run = new PriceRun(deps, 'fx');
   const [base, quote] = FX_PAIR;
@@ -384,6 +384,7 @@ export async function ensureFx(deps: Deps, start: IsoDate, end: IsoDate): Promis
     if (have.last < end) ranges.push([addDays(have.last, 1), end]);
   }
   const rows: (typeof fxDaily.$inferInsert)[] = [];
+  let failed = false;
   for (const [from, to] of ranges) {
     if (from > to) continue;
     try {
@@ -391,15 +392,17 @@ export async function ensureFx(deps: Deps, start: IsoDate, end: IsoDate): Promis
       rows.push(...rates.filter((rate) => rate.rate > 0).map((rate) => ({ base, quote, date: rate.date, rate: rate.rate })));
     } catch (error) {
       console.warn('FX fetch failed', describeError(error));
+      failed = true;
     }
   }
   if (run.calls.length === 0) {
     await run.skipped(`${base}/${quote} rates already cover ${start} to ${end}.`);
-    return;
+    return { failed };
   }
   // Rates are never overwritten (insert-or-ignore), so none "change".
   run.saved = rows.length;
   await run.finish(chunkRows(fxDaily, rows).map((chunk) => deps.db.insert(fxDaily).values(chunk).onConflictDoNothing()));
+  return { failed };
 }
 
 export type FxLookup = (date: IsoDate) => FxRates;

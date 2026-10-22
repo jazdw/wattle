@@ -1,5 +1,5 @@
 import { eq } from 'drizzle-orm';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { cloudflareJobQueue, consumeJobs, localJobQueue } from '../server/adapters/jobQueues';
 import * as schema from '../server/db/schema';
 import { Tenant } from '../server/db/tenant';
@@ -110,6 +110,28 @@ describe('job runner', () => {
     await runJobWith(deps, 'j', stopped);
     expect(await job('j')).toMatchObject({ status: 'failed', errorCode: 'INTERRUPTED' });
     expect(await job('next')).toMatchObject({ status: 'queued' }); // the group finished, if not well
+  });
+
+  it('a running attempt keeps its lock with a heartbeat, so a slow job is not taken over', async () => {
+    const { deps, tenant, job, later } = await setup();
+    await enqueue(deps, tenant, [{ id: 'slow', type: 'sync', payload: {} }]);
+    vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval'] });
+    try {
+      let finishSlow!: () => void;
+      const running = runJobWith(deps, 'slow', handlersFor(() => new Promise<void>((resolve) => (finishSlow = resolve))));
+      await expect.poll(async () => (await job('slow')).status).toBe('running');
+      for (let beat = 0; beat < 8; beat += 1) {
+        later(LEASE_MS / 4); // two leases' worth in all
+        vi.advanceTimersByTime(LEASE_MS / 4);
+        await expect.poll(async () => (await job('slow')).lockedUntil).toBe(deps.now().getTime() + LEASE_MS);
+      }
+      expect(await dueJobs(deps)).toEqual([]); // nobody else may take it
+      finishSlow();
+      await running;
+      expect(await job('slow')).toMatchObject({ status: 'done', attempts: 1 });
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('an attempt that lost its lock stops at its next write, leaving the newer attempt alone', async () => {

@@ -14,7 +14,7 @@
  * One still running when the next night starts didn't finish: marked
  * interrupted. Old log entries and finished jobs are pruned here.
  */
-import { and, desc, eq, gte, inArray, like, lt, or } from 'drizzle-orm';
+import { and, desc, eq, gte, inArray, like, lt, or, sql } from 'drizzle-orm';
 import type { StatusResponse } from '../../shared/types';
 import { connections, households, jobRuns, jobs, sessions, syncRuns } from '../db/schema';
 import { Tenant } from '../db/tenant';
@@ -41,6 +41,14 @@ export async function runDaily(deps: Deps): Promise<DailyReport> {
   const startedAt = deps.now().getTime();
   const date = marketDate(deps.now());
   const errors: string[] = [];
+  // Cron triggers can fire twice: a run started in the last few hours is this night's.
+  const [current] = await deps.db
+    .select()
+    .from(jobRuns)
+    .where(and(eq(jobRuns.status, 'running'), gte(jobRuns.startedAt, startedAt - NIGHTLY_MAX_MS)))
+    .orderBy(desc(jobRuns.startedAt))
+    .limit(1);
+  if (current) return { id: current.id, date: current.date, households: current.households };
   // An earlier run still 'running' never finished (its jobs ran out of attempts
   // without completing it, or the cron was stopped before adding them).
   const stopped = await deps.db
@@ -51,24 +59,7 @@ export async function runDaily(deps: Deps): Promise<DailyReport> {
   for (const run of stopped) errors.push(`The daily job of ${run.date} was stopped before finishing.`);
   await deps.db.insert(jobRuns).values({ id, job: 'daily', date, startedAt, finishedAt: startedAt, status: 'running', households: 0, errors });
 
-  // Light, global upkeep. A failure here is reported, and the night's syncs still run.
-  const upkeep: [string, () => Promise<unknown>][] = [
-    ['FX rates', () => ensureFx(deps, addDays(date, -7), date)],
-    ['cache', () => cachePrune(deps)],
-    ['logs', () => pruneLogs(deps)],
-    ['jobs', () => pruneJobsStatement(deps)],
-    ['sessions', () => deps.db.delete(sessions).where(lt(sessions.expiresAt, startedAt))],
-    // Jobs whose wake-up was lost since yesterday.
-    ['sweep', () => sweep(deps)],
-  ];
-  for (const [name, step] of upkeep) {
-    try {
-      await step();
-    } catch (error) {
-      errors.push(`${name}: ${describeError(error)}`);
-    }
-  }
-
+  // The night's jobs first: if this invocation is stopped during the upkeep below, they still run.
   const rows = await deps.db.select({ id: households.id }).from(households);
   const entries: [Tenant, JobSpec][] = [];
   for (const { id: householdId } of rows) {
@@ -96,11 +87,50 @@ export async function runDaily(deps: Deps): Promise<DailyReport> {
     // Recorded on the first household (jobs belong to one); it reads every household's jobs.
     entries.push([new Tenant(deps.db, rows[0].id), { id: `${nightlyGroup(id)}:finish`, type: 'nightly_finish', payload: { runId: id }, waitsFor: nightlyGroup(id) }]);
   }
-  await deps.db.update(jobRuns).set({ households: rows.length, errors }).where(eq(jobRuns.id, id));
+  await deps.db.update(jobRuns).set({ households: rows.length }).where(eq(jobRuns.id, id));
   // All at once, so no household's snapshot can finish before the others exist.
   await enqueueForHouseholds(deps, entries);
+
+  // Light, global upkeep. A failure here is added to the night's errors.
+  const upkeep: [string, () => Promise<unknown>][] = [
+    // Values in other currencies carry the last rate forward meanwhile: worth knowing.
+    [
+      'FX rates',
+      async () => {
+        if ((await ensureFx(deps, addDays(date, -7), date)).failed) throw new Error("couldn't be fetched; values in other currencies use the last rate stored.");
+      },
+    ],
+    ['cache', () => cachePrune(deps)],
+    ['logs', () => pruneLogs(deps)],
+    ['jobs', () => pruneJobsStatement(deps)],
+    ['sessions', () => deps.db.delete(sessions).where(lt(sessions.expiresAt, startedAt))],
+    // Jobs whose wake-up was lost since yesterday.
+    ['sweep', () => sweep(deps)],
+  ];
+  for (const [name, step] of upkeep) {
+    try {
+      await step();
+    } catch (error) {
+      await addNightlyError(deps, id, `${name}: ${describeError(error)}`);
+    }
+  }
   if (rows.length === 0) await finishNightly(deps, id);
   return { id, date, households: rows.length };
+}
+
+/**
+ * Add an error to a night's job_runs row in one statement, whether or not its
+ * jobs have finished it meanwhile (a finished 'ok' becomes 'errors').
+ */
+async function addNightlyError(deps: Deps, runId: string, error: string): Promise<void> {
+  console.error('Daily job error', error);
+  await deps.db
+    .update(jobRuns)
+    .set({
+      errors: sql`json_insert(${jobRuns.errors}, '$[#]', ${error})`,
+      status: sql`case when ${jobRuns.status} = 'ok' then 'errors' else ${jobRuns.status} end`,
+    })
+    .where(eq(jobRuns.id, runId));
 }
 
 /**

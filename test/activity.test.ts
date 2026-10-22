@@ -150,6 +150,40 @@ describe('sync log', () => {
     }
   });
 
+  it("gives up on a report that never becomes ready, or can't be collected, instead of trying it on every sync", async () => {
+    for (const problem of ['never ready', 'collection fails'] as const) {
+      const plaid = fakePlaid({
+        accounts: [account('chk', 'depository', 1000)],
+        historicalBalances: { chk: [{ date: '2026-10-01', current: 900 }] },
+        assetReportReady: false,
+      });
+      if (problem === 'collection fails') {
+        plaid.getAssetReport = async () => {
+          throw new Error('network down');
+        };
+      }
+      const deps = await createTestDeps({ plaid });
+      const home = await createHousehold(deps, 'Home', 'me@example.com');
+      const api = client(deps, home.cookie);
+      await api('/api/plaid/exchange', { method: 'POST', json: { publicToken: 'p', kind: 'account' } });
+      await settle(deps, 200); // a day of checks every 10 minutes, or three attempts
+      const [connection] = await deps.db.select().from(schema.connections);
+      expect(connection).toMatchObject({ backfillStatus: 'failed', assetReportTokenEnc: null, assetReportId: null }); // offers Reload history
+      const [run] = (await api(`/api/connections/${connection.id}/activity`)).body.runs as SyncRunSummary[];
+      expect(run).toMatchObject({ action: 'balance_history', outcome: 'error' });
+      expect(run.errorCode).toBe(problem === 'never ready' ? 'REPORT_NOT_READY' : null);
+      expect(plaid.state.calls).toContain('asset_report:remove'); // deleted at Plaid
+      // A later sync doesn't go back to it.
+      const checks = async () => (await deps.db.select().from(schema.jobs).where(eq(schema.jobs.type, 'report_collect'))).length;
+      const before = await checks();
+      const later = deps.now().getTime() + 3600_000;
+      deps.now = () => new Date(later);
+      await api(`/api/connections/${connection.id}/sync`, { method: 'POST' });
+      await settle(deps);
+      expect(await checks()).toBe(before);
+    }
+  });
+
   it("never shows one household another's log", async () => {
     const { deps, connection } = await linked();
     const other = await createHousehold(deps, 'Other', 'other@example.com');
