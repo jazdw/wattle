@@ -1,5 +1,6 @@
 /** Test harness: the real app on in-memory SQLite (libsql) with fake providers. */
 import { createClient } from '@libsql/client';
+import { eq } from 'drizzle-orm';
 import { drizzle } from 'drizzle-orm/libsql';
 import { migrate } from 'drizzle-orm/libsql/migrator';
 import { createApp } from '../server/app';
@@ -7,6 +8,7 @@ import { createSession } from '../server/auth/routes';
 import * as schema from '../server/db/schema';
 import type { Deps, Db } from '../server/ports';
 import { runJob } from '../server/services/jobHandlers';
+import { runDaily } from '../server/services/jobs';
 import { dueJobs } from '../server/services/jobRunner';
 
 export const ORIGIN = 'http://localhost';
@@ -63,7 +65,6 @@ export async function createTestDeps(overrides: Partial<Deps> = {}): Promise<Dep
   const db = drizzle(client, { schema });
   await migrate(db, { migrationsFolder: 'migrations' });
   Object.assign(stats, { calls: 0, statements: 0, rowsWritten: 0 });
-  const pending: Promise<unknown>[] = [];
   const wakes: { ids: string[]; delaySeconds?: number }[] = [];
   const deps: Deps = {
     db: db as unknown as Db,
@@ -80,18 +81,13 @@ export async function createTestDeps(overrides: Partial<Deps> = {}): Promise<Dep
         wakes.push({ ids, delaySeconds });
       },
     },
-    background: (work) => {
-      pending.push(work);
-    },
     ...overrides,
   };
-  pendingWork.set(deps, pending);
   wakesByDeps.set(deps, wakes);
   dbStatsByDeps.set(deps, stats);
   return deps;
 }
 
-const pendingWork = new WeakMap<Deps, Promise<unknown>[]>();
 const wakesByDeps = new WeakMap<Deps, { ids: string[]; delaySeconds?: number }[]>();
 
 /** The runner wake-ups `deps` asked for so far. */
@@ -113,10 +109,36 @@ export async function runDueJobs(deps: Deps, run: (id: string) => Promise<unknow
   throw new Error('Jobs kept becoming due: a job that never settles?');
 }
 
-/** Finish background work: work handed to `deps.background`, then every due job. */
+/**
+ * Run jobs until none is left, moving the clock forward to each retry
+ * (backoffs, RetryLater) as needed, at most `maxWaits` times.
+ */
+export async function settle(deps: Deps, maxWaits = 10): Promise<void> {
+  await flush(deps);
+  for (let wait = 0; wait < maxWaits; wait += 1) {
+    const [next] = await deps.db
+      .select({ runAfter: schema.jobs.runAfter })
+      .from(schema.jobs)
+      .where(eq(schema.jobs.status, 'queued'))
+      .orderBy(schema.jobs.runAfter)
+      .limit(1);
+    if (!next) return;
+    const at = Math.max(next.runAfter, deps.now().getTime());
+    deps.now = () => new Date(at);
+    await flush(deps);
+  }
+}
+
+/** The nightly cron, then every job it adds (with their retries); returns the night's job_runs row. */
+export async function nightly(deps: Deps) {
+  const report = await runDaily(deps);
+  await settle(deps);
+  const [run] = await deps.db.select().from(schema.jobRuns).where(eq(schema.jobRuns.id, report.id));
+  return run;
+}
+
+/** Finish background work: run every due job (and the ones they add or release). */
 export async function flush(deps: Deps): Promise<void> {
-  const pending = pendingWork.get(deps) ?? [];
-  while (pending.length > 0) await pending.shift();
   await runDueJobs(deps);
 }
 

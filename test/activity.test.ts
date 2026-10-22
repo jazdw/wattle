@@ -4,14 +4,14 @@ import type { ActivityResponse, SyncRunSummary } from '../shared/types';
 import * as schema from '../server/db/schema';
 import { Tenant } from '../server/db/tenant';
 import type { Deps } from '../server/ports';
-import { backfillConnection } from '../server/services/backfill';
+import { queueHistory } from '../server/services/backfill';
 import { runAtomic } from '../server/db/batch';
 import { connectionLease, Lease, LEASE_MS, LeaseLostError, snapshotLease } from '../server/services/lease';
 import { snapshotHousehold } from '../server/services/snapshots';
 import { statusStatement, syncConnection } from '../server/services/sync';
 import { ensureRecentCloses, saveCloses } from '../server/services/pricing';
 import { account, closes, fakePlaid, fakePrices, holding, security } from './fakes';
-import { client, createHousehold, createTestDeps, flush, TODAY } from './helpers';
+import { client, createHousehold, createTestDeps, flush, nightly, settle, TODAY } from './helpers';
 
 function brokerage() {
   return fakePlaid({
@@ -150,13 +150,12 @@ describe('price log', () => {
 
 describe('nightly job log', () => {
   it('records each run and prunes entries older than two years', async () => {
-    const { runDaily } = await import('../server/services/jobs');
     const { deps, connection } = await linked();
     const old = deps.now().getTime() - 731 * 24 * 3600 * 1000;
     await deps.db.insert(schema.jobRuns).values({ id: 'old', job: 'daily', date: '2024-01-01', startedAt: old, finishedAt: old, households: 1, errors: [] });
     await deps.db.update(schema.syncRuns).set({ startedAt: old }).where(eq(schema.syncRuns.connectionId, connection.id));
 
-    await runDaily(deps);
+    await nightly(deps);
     const jobs = await deps.db.select().from(schema.jobRuns);
     expect(jobs).toEqual([expect.objectContaining({ job: 'daily', households: 1, errors: [] })]);
     const syncs = await deps.db.select().from(schema.syncRuns);
@@ -167,11 +166,10 @@ describe('nightly job log', () => {
 
 describe('household activity', () => {
   it("lists the household's runs, snapshots and nightly jobs, newest first, and none of another household's", async () => {
-    const { runDaily } = await import('../server/services/jobs');
     const { deps, api, connection } = await linked();
     const later = deps.now().getTime() + 86400_000;
     deps.now = () => new Date(later);
-    await runDaily(deps);
+    await nightly(deps);
 
     const { entries, next } = (await api('/api/activity')).body as ActivityResponse;
     expect(next).toBeNull();
@@ -392,20 +390,23 @@ describe('one change at a time per connection, applied atomically', () => {
     expect((await deps.db.select().from(schema.connections))[0]).toMatchObject({ status: 'login_required', errorCode: 'ITEM_LOGIN_REQUIRED' });
   });
 
-  it('a history load while the connection is busy runs when the holder finishes', async () => {
+  it('a history load queued while the connection is busy waits for it, then runs', async () => {
     const { deps, plaid, connection } = await linked();
     const tenant = new Tenant(deps.db, connection.householdId);
     const pause = pauseAt(plaid, 'getHoldings');
     const syncing = syncConnection(deps, tenant, connection.id, 'nightly');
     await pause.entered;
-    await backfillConnection(deps, tenant, connection.id, null, 'manual'); // busy: marked due
-    expect((await latestRuns(deps))[0]).toMatchObject({ action: 'history', outcome: 'skipped' });
-    const later = new Date(deps.now().getTime() + 5);
-    deps.now = () => later;
+    const runsBefore = (await latestRuns(deps)).filter((run) => run.action === 'history').length;
+    expect(await queueHistory(deps, tenant, connection.id, 'load', 'manual')).toBe(true);
+    await flush(deps); // the plan finds the connection busy: tried again later, not counted as an attempt
+    const plans = await deps.db.select().from(schema.jobs).where(eq(schema.jobs.type, 'history_plan'));
+    expect(plans.find((plan) => plan.status !== 'done')).toMatchObject({ status: 'queued', attempts: 0 });
     pause.release();
     await syncing;
-    expect((await latestRuns(deps)).find((run) => run.action === 'history' && run.outcome === 'ok')).toBeDefined();
-    expect((await deps.db.select().from(schema.connections))[0].historyStaleAt).toBeNull();
+    await settle(deps);
+    const history = (await latestRuns(deps)).filter((run) => run.action === 'history');
+    expect(history.length).toBe(runsBefore + 1);
+    expect(history[0]).toMatchObject({ outcome: 'ok' });
   });
 
   it('rebuilds history when a transaction dated before it arrives later', async () => {
@@ -430,6 +431,7 @@ describe('one change at a time per connection, applied atomically', () => {
     let tick = deps.now().getTime();
     deps.now = () => new Date((tick += 1));
     await syncConnection(deps, tenant, connection.id, 'nightly');
+    await flush(deps); // the rebuild it queued
     const runs = await latestRuns(deps);
     expect(runs.find((run) => run.action === 'sync')).toMatchObject({ counts: expect.objectContaining({ lateTransactions: 1 }) });
     expect(runs.find((run) => run.action === 'history')).toMatchObject({ outcome: 'ok', note: expect.stringContaining('Rebuilt') });

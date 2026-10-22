@@ -38,9 +38,7 @@ const jobQueue = localJobQueue(
   () => dueJobs(deps),
   (id) => runJob(deps, id),
 );
-const deps: Deps = depsFromEnv(env, db as unknown as Db, jobQueue, (work) => {
-  void work.catch((error: unknown) => console.error('Background work failed', describeError(error)));
-});
+const deps: Deps = depsFromEnv(env, db as unknown as Db, jobQueue);
 setInterval(() => void sweep(deps).then(() => jobQueue.drain()), 60_000);
 
 // Static files first (the built SPA), then the API, then index.html for client routes.
