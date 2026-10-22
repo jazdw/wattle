@@ -32,7 +32,7 @@ describe('Growth page', () => {
 
   it('drills into an account’s holdings, including sold ones, and back out', async () => {
     const { user } = renderPage(<Growth />);
-    // Clicking a row drills in (only accounts with holdings can).
+    // Clicking a row drills in.
     await user.click(await screen.findByRole('row', { name: /Vanguard Brokerage/ }));
     expect(await screen.findByText('Vanguard Brokerage — holdings')).toBeInTheDocument();
     expect(sent('GET /api/history').at(-1)?.url.searchParams.get('accountId')).toBe('brk');
@@ -42,7 +42,17 @@ describe('Growth page', () => {
     await user.click(screen.getByRole('button', { name: /All accounts/ }));
     expect(await screen.findByRole('tab', { name: 'By account' })).toBeInTheDocument();
 
-    await user.selectOptions(screen.getByRole('combobox', { name: /Drill into/ }), 'brk');
+    await user.selectOptions(screen.getByRole('combobox', { name: 'Select an account' }), 'brk');
     expect(await screen.findByText('Vanguard Brokerage — holdings')).toBeInTheDocument();
+  });
+
+  it('shows the balance of an account without holdings', async () => {
+    const { user } = renderPage(<Growth />);
+    await screen.findByRole('option', { name: 'Chase Checking' });
+    await user.selectOptions(screen.getByRole('combobox', { name: 'Select an account' }), 'chk');
+    expect(await screen.findByText('Chase Checking — balance')).toBeInTheDocument();
+    const request = sent('GET /api/history').at(-1)?.url.searchParams;
+    expect(request?.get('group')).toBe('account');
+    expect(request?.get('accountId')).toBe('chk');
   });
 });
