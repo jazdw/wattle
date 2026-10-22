@@ -5,6 +5,7 @@ import type { PlaidGlobal } from '../lib/plaidLink';
 export const plaidLink = {
   open: vi.fn(),
   token: null as string | null,
+  receivedRedirectUri: undefined as string | undefined,
   onSuccess: null as null | ((publicToken: string) => void),
   onExit: null as null | ((error: { error_message?: string; display_message?: string | null } | null) => void),
 };
@@ -13,6 +14,7 @@ export const plaidLink = {
 export const fakePlaid: PlaidGlobal = {
   create: (options) => {
     plaidLink.token = options.token;
+    plaidLink.receivedRedirectUri = options.receivedRedirectUri;
     plaidLink.onSuccess = options.onSuccess;
     plaidLink.onExit = options.onExit;
     queueMicrotask(() => options.onLoad?.());
@@ -23,6 +25,7 @@ export const fakePlaid: PlaidGlobal = {
 export function resetPlaid() {
   plaidLink.open.mockReset();
   plaidLink.token = null;
+  plaidLink.receivedRedirectUri = undefined;
   plaidLink.onSuccess = null;
   plaidLink.onExit = null;
   window.Plaid = fakePlaid;

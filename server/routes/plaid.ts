@@ -29,6 +29,16 @@ function webhookUrl(requestUrl: string): string | null {
   return url.protocol === 'https:' ? `${url.origin}/api/plaid/webhook` : null;
 }
 
+/**
+ * Where a bank's own login (OAuth) returns to on a phone, registered with
+ * Plaid as an allowed redirect URI. HTTPS only, like the webhook: on a
+ * local http address Link uses its desktop popup instead.
+ */
+function oauthRedirectUrl(requestUrl: string): string | null {
+  const url = new URL(requestUrl);
+  return url.protocol === 'https:' ? `${url.origin}/plaid-oauth` : null;
+}
+
 function requirePlaid(deps: Deps) {
   if (!deps.plaid) throw new HttpError(503, 'Plaid is not configured on the server.');
   return deps.plaid;
@@ -48,6 +58,7 @@ plaidRoutes.post('/link-token', requireAuth, async (c) => {
     clientUserId: c.get('user').id,
     kind: body.kind,
     webhook: webhookUrl(c.req.url),
+    redirectUri: oauthRedirectUrl(c.req.url) ?? undefined,
     accessToken,
   });
   return c.json({ linkToken });
@@ -91,11 +102,16 @@ plaidRoutes.post('/webhook', async (c) => {
   const deps = c.env.deps;
   if (!deps.plaid) return c.json({ ok: false }, 503);
   const raw = await c.req.text();
-  const verified = await verifyPlaidWebhook(deps.plaid, c.req.header('plaid-verification'), raw, deps.now());
-  if (!verified) return c.json({ error: 'invalid signature' }, 401);
-
-  const event = JSON.parse(raw) as PlaidWebhook;
-  // Webhooks carry no household: find the connection, then act as its household.
+  let event: PlaidWebhook;
+  try {
+    event = JSON.parse(raw) as PlaidWebhook;
+  } catch {
+    return c.json({ error: 'invalid body' }, 400);
+  }
+  // Webhooks carry no household: find the connection, then act as its
+  // household. Looked up before the signature is checked: only Plaid and
+  // Wattle know an item's or report's id, so a forged webhook naming none of
+  // ours is dropped without asking Plaid for a verification key.
   const [connection] = await deps.db
     .select({ id: connections.id, householdId: connections.householdId })
     .from(connections)
@@ -106,6 +122,8 @@ plaidRoutes.post('/webhook', async (c) => {
     )
     .limit(1);
   if (!connection) return c.json({ ok: true });
+  const verified = await verifyPlaidWebhook(deps.plaid, c.req.header('plaid-verification'), raw, deps.now());
+  if (!verified) return c.json({ error: 'invalid signature' }, 401);
   const tenant = new Tenant(deps.db, connection.householdId);
 
   const eventName = `${event.webhook_type}:${event.webhook_code}`;

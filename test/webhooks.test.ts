@@ -45,6 +45,17 @@ describe('Plaid webhooks', () => {
     expect(plaid.state.calls.length).toBe(before);
   });
 
+  it("drops webhooks for logins that aren't ours without asking Plaid for a key", async () => {
+    const { send, plaid } = await setup();
+    const lookups = plaid.state.webhookKeyLookups;
+    const calls = plaid.state.calls.length;
+    const forged = { webhook_type: 'HOLDINGS', webhook_code: 'DEFAULT_UPDATE', item_id: 'someone-elses-item' };
+    expect((await send(forged, { signature: await signWebhook(JSON.stringify(forged), new Date(), 'never-seen-kid') })).status).toBe(200);
+    expect((await send({ webhook_type: 'ASSETS', webhook_code: 'PRODUCT_READY', asset_report_id: 'unknown' })).status).toBe(200);
+    expect(plaid.state.webhookKeyLookups).toBe(lookups);
+    expect(plaid.state.calls.length).toBe(calls);
+  });
+
   it('syncs on holdings updates', async () => {
     const { send, plaid, api } = await setup();
     plaid.state.holdings = [holding('brk', 's-vti', 12, 100)];
