@@ -7,17 +7,21 @@ import * as schema from '../server/db/schema';
 import { createApp } from '../server/app';
 import { depsFromEnv, type RawEnv } from '../server/config';
 import { describeError } from '../server/lib/errors';
+import { cloudflareJobQueue, consumeJobs, type JobMessage } from '../server/adapters/jobQueues';
 import type { Db } from '../server/ports';
+import { runJob } from '../server/services/jobHandlers';
 import { runDaily } from '../server/services/jobs';
 
 interface Env extends RawEnv {
   DB: D1Database;
   ASSETS?: Fetcher;
+  /** Background jobs: one message per job to run (see server/services/jobRunner.ts). */
+  JOBS: Queue<JobMessage>;
 }
 
 function deps(env: Env, ctx: ExecutionContext) {
   const db = drizzle(env.DB, { schema }) as unknown as Db;
-  return depsFromEnv(env, db, (work) => ctx.waitUntil(work));
+  return depsFromEnv(env, db, cloudflareJobQueue(env.JOBS), (work) => ctx.waitUntil(work));
 }
 
 let app: ReturnType<typeof createApp> | null = null;
@@ -26,6 +30,11 @@ export default {
   fetch(request, env, ctx) {
     app ??= createApp({ assets: env.ASSETS ? (req) => env.ASSETS!.fetch(req) : undefined });
     return app.fetch(request, { deps: deps(env, ctx) }, ctx);
+  },
+  /** One job per message (max_batch_size 1), so each has an invocation's limits to itself. */
+  async queue(batch, env, ctx) {
+    const jobDeps = deps(env, ctx);
+    await consumeJobs(batch, (id) => runJob(jobDeps, id));
   },
   async scheduled(_controller, env, ctx) {
     try {
@@ -36,4 +45,4 @@ export default {
       throw new Error(`Daily job failed: ${describeError(error)}`);
     }
   },
-} satisfies ExportedHandler<Env>;
+} satisfies ExportedHandler<Env, JobMessage>;
