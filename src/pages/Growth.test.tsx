@@ -28,7 +28,7 @@ describe('Growth page', () => {
     expect(sent('GET /api/history').at(-1)?.url.searchParams.get('range')).toBe('2Y');
   });
 
-  it('picks an account from its type group; by account it shows the holdings, by category its split; clearing shows all again', async () => {
+  it('picks an account from its type group; by account it shows the holdings, by category its split; All accounts shows all again', async () => {
     const { user } = renderPage(<Growth />);
     await screen.findByRole('option', { name: 'Vanguard Brokerage' });
     const picker = screen.getByRole('combobox', { name: 'Account' });
@@ -49,10 +49,8 @@ describe('Growth page', () => {
     expect(lastGroup()).toBe('category');
     expect(sent('GET /api/history').at(-1)?.url.searchParams.get('accountId')).toBe('brk');
 
-    await user.click(screen.getByRole('button', { name: 'Show all accounts' }));
-    expect(picker).toHaveValue('');
-    expect(sent('GET /api/history').at(-1)?.url.searchParams.get('accountId')).toBeNull();
-    expect(screen.queryByRole('button', { name: 'Show all accounts' })).toBeNull();
+    await user.selectOptions(picker, '');
+    await expect.poll(() => sent('GET /api/history').at(-1)?.url.searchParams.has('accountId')).toBe(false);
   });
 
   it('shows the balance of an account without holdings', async () => {
