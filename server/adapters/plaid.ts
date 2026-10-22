@@ -106,8 +106,48 @@ export interface PlaidApi {
  * institutions Link lists, and Assets can only go there (it can't be optional
  * or added later without update mode). Products consented to but not used
  * aren't billed, and can be switched on later on the same Item (no new slot).
+ * Never Auth (account and routing numbers) or Liabilities (loan account
+ * numbers): Wattle never sees full account numbers.
  */
-const LATER = ['transactions', 'liabilities'];
+const LATER = ['transactions'];
+
+/**
+ * Every Plaid endpoint Wattle may call. Nothing that returns full account or
+ * routing numbers (/auth/get, /liabilities/get, /identity/get, processor
+ * tokens) is here, and `call` refuses anything that isn't.
+ */
+export const PLAID_ENDPOINTS = new Set([
+  '/link/token/create',
+  '/item/public_token/exchange',
+  '/item/get',
+  '/item/remove',
+  '/institutions/get_by_id',
+  '/accounts/get',
+  '/investments/holdings/get',
+  '/investments/transactions/get',
+  '/asset_report/create',
+  '/asset_report/get',
+  '/asset_report/remove',
+  '/webhook_verification_key/get',
+]);
+
+/**
+ * Fields dropped from every Plaid response before anything else sees it:
+ * account and routing numbers wherever they might appear, and asset reports'
+ * account owners (names, addresses, emails, phone numbers), which Wattle
+ * doesn't use. Masks (the last 2-4 digits) are kept.
+ */
+const DROPPED_FIELDS = new Set(['numbers', 'account_number', 'routing', 'routing_number', 'wire_routing', 'iban', 'bic', 'sort_code', 'owners']);
+
+export function scrubPlaidResponse<T>(value: T): T {
+  if (Array.isArray(value)) return value.map(scrubPlaidResponse) as T;
+  if (value && typeof value === 'object') {
+    return Object.fromEntries(
+      Object.entries(value).flatMap(([key, field]) => (DROPPED_FIELDS.has(key) ? [] : [[key, scrubPlaidResponse(field)]])),
+    ) as T;
+  }
+  return value;
+}
 const PRODUCTS: Record<LinkKind, { products: string[]; ifSupported?: string[]; consented: string[] }> = {
   // Any login: up to two years of daily balance history (Assets), plus
   // holdings wherever it has investment accounts. No transactions are stored.
@@ -126,6 +166,7 @@ export function createPlaidClient(config: PlaidConfig, log?: PlaidCall[]): Plaid
   const baseUrl = `https://${config.env}.plaid.com`;
 
   async function call<T>(path: string, body: Record<string, unknown>): Promise<T> {
+    if (!PLAID_ENDPOINTS.has(path)) throw new Error(`Plaid endpoint ${path} is not allowed.`);
     const response = await fetch(`${baseUrl}${path}`, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
@@ -145,7 +186,7 @@ export function createPlaidClient(config: PlaidConfig, log?: PlaidCall[]): Plaid
       );
     }
     log?.push({ endpoint: path, requestId });
-    return json as T;
+    return scrubPlaidResponse(json) as T;
   }
 
   return {
