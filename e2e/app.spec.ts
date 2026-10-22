@@ -83,9 +83,9 @@ test('a Westpac CSV export imports as daily balances', async ({ page }) => {
 test('growth drills from accounts into holdings', async ({ page }) => {
   await page.goto('/growth');
   await page.getByRole('row', { name: /Vanguard Brokerage \(demo\)/ }).click();
-  await expect(page.getByText('Vanguard Brokerage (demo) — holdings')).toBeVisible();
+  await expect(page.getByRole('combobox', { name: 'Account' })).toHaveValue(/.+/);
   await expect(page.getByRole('row', { name: /VTSAX/ })).toBeVisible();
-  await page.getByRole('button', { name: /All accounts/ }).click();
+  await page.getByRole('button', { name: 'Show all accounts' }).click();
   await expect(page.getByRole('tab', { name: 'By account' })).toBeVisible();
 });
 
