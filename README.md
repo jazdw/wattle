@@ -110,7 +110,7 @@ npm install
 cp .dev.vars.example .dev.vars        # fill in keys; TOKEN_ENC_KEY: openssl rand -base64 32
 npm run db:migrate                    # local D1
 npm run allow -- add you@gmail.com --local   # Google accounts that can sign in
-npm run dev                           # http://localhost:5173
+npm run dev                           # http://localhost:5173 (applies new local migrations first)
 node scripts/seed-demo.mjs            # optional: demo accounts + a year of history (dev sign-in)
 ```
 

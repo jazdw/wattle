@@ -4,6 +4,7 @@
   "version": "0.1.0",
   "type": "module",
   "scripts": {
+    "predev": "npm run db:migrate",
     "dev": "vite",
     "build": "tsc -b && vite build",
     "preview": "npm run build && vite preview",
