@@ -20,11 +20,11 @@ import { accountDaily, accounts, connections, holdingDaily, holdings, investment
 import type { Tenant } from '../db/tenant';
 import type { Deps } from '../ports';
 import { reconstructHistory } from './backfillCore';
-import { SyncRun, type SyncTrigger } from './activity';
+import { historyKeepsStopping, SyncRun, type SyncTrigger } from './activity';
 import { encryptToken, loadTokenKeys, tokenAad } from './crypto';
 import { closeLookup, ensureCloses, ensureFx } from './pricing';
 import { connectionLease, Lease, LeaseLostError } from './lease';
-import { accessTokenFor, getConnection, HISTORY_DAYS, isActive, underConnectionLease, type ConnectionRow } from './sync';
+import { accessTokenFor, getConnection, HISTORY_DAYS, HISTORY_STOPPED_NOTE, isActive, underConnectionLease, type ConnectionRow } from './sync';
 import { isCashSecurity, priceOn } from './valuation';
 import { describeError } from '../lib/errors';
 
@@ -95,6 +95,7 @@ export async function runHistoryLoad(
   const run = new SyncRun(deps, tenant, connection.id, 'history', trigger);
   try {
     await lease.renew();
+    await run.begin();
     await backfillStatusStatement(tenant, connection.id, 'running');
     await ensureFx(deps, addDays(today, -HISTORY_DAYS), today);
     const rebuild = connection.historyStaleAt !== null && connection.backfillStatus === 'done';
@@ -362,10 +363,15 @@ export async function fillMissedDays(deps: Deps, tenant: Tenant, connectionId: s
   const today = marketDate(deps.now());
   const missed = await missedDays(tenant, connection, today);
   if (!missed) return;
+  if (trigger !== 'manual' && (await historyKeepsStopping(tenant, connection.id))) {
+    await new SyncRun(deps, tenant, connection.id, 'history', trigger).skipped(HISTORY_STOPPED_NOTE);
+    return;
+  }
 
   const run = new SyncRun(deps, tenant, connection.id, 'history', trigger);
   run.note = `Filling days missed since ${missed.from}.`;
   try {
+    await run.begin();
     const outcome: BatchItem<'sqlite'>[] = [];
     if (missed.bankFrom) {
       const report = await requestBalanceHistory(deps, tenant, connection, null, run, Math.min(731, dateRange(missed.bankFrom, today).length));

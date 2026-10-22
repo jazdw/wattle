@@ -67,7 +67,7 @@ export interface SyncRunSummary {
   startedAt: number;
   finishedAt: number;
   /** 'skipped': looked, but had nothing to do (`note` says why). */
-  outcome: 'ok' | 'error' | 'skipped';
+  outcome: 'ok' | 'error' | 'skipped' | 'running';
   errorCode: string | null;
   errorMessage: string | null;
   note: string | null;
@@ -106,6 +106,19 @@ export interface AccountSummary {
    * the same one, e.g. a joint account you've both linked: hide one copy.
    */
   possibleDuplicateOf: string | null;
+}
+
+/** Background work that didn't finish, for the warning shown on every page. */
+export interface StatusResponse {
+  /**
+   * The latest daily job: finished (whatever its errors, which may be other
+   * households'), still running, stopped part-way, or late (none for over a day).
+   */
+  nightly: { date: string; state: 'finished' | 'running' | 'interrupted' | 'late' } | null;
+  /** This household's runs stopped part-way in the last three days. */
+  interrupted: { connectionId: string; institutionName: string; action: SyncRunSummary['action']; startedAt: number }[];
+  /** Logins whose history work keeps being stopped, so it no longer runs on its own. */
+  historyStopped: { connectionId: string; institutionName: string }[];
 }
 
 export interface ConnectionsResponse {

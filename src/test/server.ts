@@ -25,6 +25,7 @@ export const handlers = [
   http.get('*/api/history', ({ request }) => HttpResponse.json(history(new URL(request.url).searchParams.get('group') ?? 'total'))),
   http.get('*/api/targets', json(TARGET)),
   http.get('*/api/quotes', json(QUOTES)),
+  http.get('*/api/status', json({ nightly: { date: '2026-10-08', state: 'finished' }, interrupted: [], historyStopped: [] })),
   // Writes succeed by default; tests assert on what was sent.
   http.post('*/api/*', json({ ok: true })),
   http.put('*/api/*', json({ ok: true })),

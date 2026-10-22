@@ -21,6 +21,7 @@ import type { AppEnv } from '../env';
 import { HttpError, notFound, readBody, requestCurrency } from '../lib/http';
 import { cacheGetMany, cacheSetMany } from '../services/cache';
 import { loadHistory, RANGES, type Range } from '../services/history';
+import { backgroundStatus } from '../services/jobs';
 import { activeTarget, loadPortfolio } from '../services/portfolio';
 import { stableId } from '../services/ids';
 import { Lease, targetsLease } from '../services/lease';
@@ -58,6 +59,9 @@ portfolioRoutes.get('/history', async (c) => {
   if (group === 'holding' && !accountId) throw new HttpError(400, 'accountId is required for holdings.');
   return c.json(await loadHistory(c.env.deps, tenant, { range, group, currency, accountId }));
 });
+
+/** Background work that didn't finish (the nightly job, stopped runs), for the warning banner. */
+portfolioRoutes.get('/status', async (c) => c.json(await backgroundStatus(c.env.deps, c.get('tenant'))));
 
 /** Sync every connection now (rate-limited per connection) and refresh today's snapshot. */
 portfolioRoutes.post('/refresh', async (c) => {
