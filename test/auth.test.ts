@@ -216,6 +216,26 @@ describe('sessions', () => {
     expect(response.headers.get('clear-site-data')).toBe('"cache"');
   });
 
+  it('over HTTPS, uses __Host- cookies that other subdomains can\'t set, and ignores plain ones', async () => {
+    const deps = await configured(['me@example.com']);
+    stubGoogle({ sub: 'g-1', email: 'me@example.com', email_verified: true });
+    const https = client(deps, undefined, 'https://wattle.example');
+    const start = await https('/api/auth/google');
+    expect(start.headers.get('set-cookie')).toMatch(/^__Host-wt_oauth=[^;]+;.*Path=\/;.*Secure/i);
+    const location = new URL(start.headers.get('location')!);
+    currentNonce = location.searchParams.get('nonce')!;
+    const callback = await https(`/api/auth/google/callback?code=abc&state=${location.searchParams.get('state')}`, {
+      headers: { cookie: start.headers.get('set-cookie')!.split(';')[0] },
+    });
+    const session = callback.headers.getSetCookie().find((cookie) => cookie.startsWith('__Host-wt_session='))!;
+    expect(session).toMatch(/Path=\/;.*HttpOnly;.*Secure;.*SameSite=Lax/i);
+    const token = session.split(';')[0].split('=')[1];
+
+    expect((await client(deps, `__Host-wt_session=${token}`, 'https://wattle.example')('/api/auth/me')).status).toBe(200);
+    // A cookie without the prefix could have come from another subdomain.
+    expect((await client(deps, `wt_session=${token}`, 'https://wattle.example')('/api/auth/me')).status).toBe(401);
+  });
+
   it('rejects unknown session tokens', async () => {
     const deps = await createTestDeps();
     expect((await client(deps, 'wt_session=nonsense')('/api/accounts')).status).toBe(401);

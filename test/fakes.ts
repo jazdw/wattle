@@ -24,6 +24,10 @@ export interface PlaidState {
   /** Plaid couldn't build the report (after an ASSETS:ERROR webhook). */
   assetReportGetError: string | null;
   calls: string[];
+  /** Webhook verification keys asked for. */
+  webhookKeyLookups: number;
+  /** redirect_uri of each link token created (undefined when none was sent). */
+  linkRedirects: (string | undefined)[];
   /** days_requested of each asset report asked for. */
   assetReportDays: number[];
   removed: string[];
@@ -81,6 +85,8 @@ export function fakePlaid(initial: Partial<PlaidState> = {}): PlaidApi & { state
     assetReportFails: false,
     assetReportGetError: null,
     calls: [],
+    linkRedirects: [],
+    webhookKeyLookups: 0,
     assetReportDays: [],
     removed: [],
     ...initial,
@@ -115,6 +121,7 @@ export function fakePlaid(initial: Partial<PlaidState> = {}): PlaidApi & { state
     },
     createLinkToken: async (options) => {
       state.calls.push(`link:${options.kind}:${options.accessToken ? 'update' : 'new'}`);
+      state.linkRedirects.push(options.redirectUri);
       return 'link-sandbox-token';
     },
     exchangePublicToken: async () => ({ accessToken: `access-sandbox-${state.itemId}`, itemId: state.itemId }),
@@ -167,7 +174,10 @@ export function fakePlaid(initial: Partial<PlaidState> = {}): PlaidApi & { state
     removeItem: async (token) => {
       state.removed.push(token);
     },
-    getWebhookVerificationKey: async () => (await webhookKeys()).jwk as never,
+    getWebhookVerificationKey: async () => {
+      state.webhookKeyLookups += 1;
+      return (await webhookKeys()).jwk as never;
+    },
   };
   return api;
 }

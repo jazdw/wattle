@@ -49,8 +49,9 @@ migrations/  drizzle-kit SQL, applied by Wrangler (D1) or Drizzle's migrator (li
 - **Secrets at rest.** Plaid access tokens and asset-report tokens are AES-256-GCM encrypted with `TOKEN_ENC_KEY`. The ciphertext is bound to its household and connection, and keys can be rotated (`v2:<new>,v1:<old>`).
 - **Nothing personal in logs.** Errors are logged through `describeError` (`server/lib/errors.ts`), which keeps a failed query's SQL but drops its values (Drizzle puts them in the message).
 - **Sessions** last 30 days and end as soon as the email leaves the allow-list. Signing out also tells the browser to drop cached pages, and a page restored by the back button reloads.
-- **Shared prices.** Closes are public data shared by all households. A close an institution reports through Plaid is shared only if it's from the last week, not after today, for a ticker Tiingo knows, and within 25% of Tiingo's latest. Otherwise it stays as that household's own last price.
-- **Webhook key lookups.** The webhook is public, so verifying a forged one mustn't make Wattle Wealth call Plaid without limit: key ids must be well-formed, an id Plaid had no key for isn't asked about again for five minutes, and each instance makes at most 10 lookups a minute (Plaid's real key is normally cached).
+- **Shared prices.** Daily closes and FX rates from Tiingo and Frankfurter are public data, shared by all households. Prices an institution reports through Plaid stay with that household (its securities' last price) and never go in the shared table.
+- **Session cookies.** Over HTTPS they're `__Host-` cookies, which only this exact host can set, so another subdomain can't plant a session.
+- **Webhook checks.** The webhook is public. A webhook naming an item or report Wattle Wealth doesn't have is dropped before its signature is checked, so forged ones can't make it ask Plaid for verification keys. For the rest: key ids must be well-formed, an id Plaid had no key for isn't asked about again for five minutes, and each instance makes at most 10 lookups a minute (Plaid's real key is normally cached).
 - **Daily job** (cron `0 2 * * *` UTC, after US close). It syncs every connection, fetches closes and FX, and writes one `account_daily` and one `holding_daily` row per account and holding. Manual and imported values are never overwritten.
 - **Concurrency.** Two people, a webhook and the nightly job can all act at once; the rules (`services/lease.ts`, enforced by `test/writes.test.ts`):
   - **Leases**, at most one holder per key, taken with one atomic conditional write and renewed (checking the holder) right before every write batch. They expire after 2 minutes, so a run killed mid-way can't block anything for long.
@@ -128,6 +129,7 @@ The redirect URI is built from the request's origin, so no hostname is configure
 1. Get `PLAID_CLIENT_ID` and the sandbox/production secrets from <https://dashboard.plaid.com/developers/keys>.
 2. Develop against **sandbox**. On the Trial plan, production allows 10 Items (logins), and removing an Item does not free its slot. Link each real institution once.
 3. Webhooks are sent to `https://<your-domain>/api/plaid/webhook`, derived automatically from the request origin. They are verified with Plaid's signed JWT.
+4. Add `https://<your-domain>/plaid-oauth` under **Allowed redirect URIs** in the dashboard (Developers → API). Banks with their own login page (OAuth: Chase, Capital One, …) send phones back there to finish linking. It's sent over HTTPS only; on a local http address Link uses its desktop popup and needs no redirect URI.
 
 ### Market data
 - Tiingo: <https://www.tiingo.com>. The free tier is personal use, 1,000 requests/day and 500 symbols/month.

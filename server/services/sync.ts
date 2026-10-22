@@ -11,7 +11,7 @@ import { toMinor } from '../../shared/money';
 import { itemProducts, PlaidApiError, type LinkKind, type PlaidApi } from '../adapters/plaid';
 import type { BatchItem } from 'drizzle-orm/batch';
 import { chunkRows, inChunks, runAtomic } from '../db/batch';
-import { accounts, connections, holdings, investmentTransactions, pricesDaily, securities } from '../db/schema';
+import { accounts, connections, holdings, investmentTransactions, securities } from '../db/schema';
 import type { Tenant } from '../db/tenant';
 import type { Deps } from '../ports';
 import { SyncRun, type SyncTrigger } from './activity';
@@ -20,7 +20,6 @@ import { fillMissedDays, runHistoryLoad } from './backfill';
 import { BusyError, connectionLease, holdWhile, Lease, snapshotLease } from './lease';
 import { decryptToken, encryptToken, loadTokenKeys, tokenAad } from './crypto';
 import { stableId } from './ids';
-import { sharedCloseStatements } from './pricing';
 import { describeError } from '../lib/errors';
 
 export type ConnectionRow = typeof connections.$inferSelect;
@@ -339,7 +338,7 @@ async function syncPass(
     let holdingCount = 0;
     let transactionCount = 0;
     if (fetched.investments) {
-      const securityIds = await planSecurities(deps, tenant, fetched.investments.securities, run, writes);
+      const securityIds = await planSecurities(deps, tenant, fetched.investments.securities, writes);
       holdingCount = await planHoldings(deps, tenant, fetched.investments.holdings, fetched.investments.securities, securityIds, visible, run, writes);
       transactionCount = await planTransactions(deps, tenant, connection, fetched.investments.transactions, securityIds, visible, run, writes);
     }
@@ -542,7 +541,6 @@ async function planSecurities(
   deps: Deps,
   tenant: Tenant,
   plaidSecurities: PlaidSecurity[],
-  run: SyncRun,
   writes: BatchItem<'sqlite'>[],
 ): Promise<Map<string, string>> {
   const ids = new Map<string, string>();
@@ -559,10 +557,10 @@ async function planSecurities(
     for (const row of rows) byExternal.set(row.externalId, row.id);
   }
 
+  // Plaid's close is kept on the household's own security (lastPrice), never
+  // in the shared price table: what an institution reports for one
+  // household mustn't reach another's (shared prices come from Tiingo).
   const inserts: (typeof securities.$inferInsert)[] = [];
-  // Plaid's previous close for a public ticker can go in the shared price
-  // table (after checks), so the nightly snapshot needn't ask Tiingo for it.
-  const closes: (typeof pricesDaily.$inferInsert)[] = [];
 
   for (const security of plaidSecurities) {
     const ticker = security.ticker_symbol?.toUpperCase() ?? null;
@@ -570,9 +568,6 @@ async function planSecurities(
     const lastPriceDate = security.close_price_as_of ?? (lastPrice !== null ? today : null);
     const currency = security.iso_currency_code ?? 'USD';
     const isPublic = isPublicSecurity(security);
-    if (isPublic && ticker && lastPrice !== null && security.close_price_as_of) {
-      closes.push({ ticker, date: security.close_price_as_of, close: lastPrice, currency, source: 'plaid' });
-    }
     const id = byExternal.get(security.security_id);
     if (id) {
       writes.push(
@@ -623,10 +618,6 @@ async function planSecurities(
   for (const chunk of chunkRows(securities, inserts)) {
     writes.push(tenant.db.insert(securities).values(chunk).onConflictDoNothing({ target: [securities.householdId, securities.externalId] }));
   }
-  // Tiingo's official closes win over Plaid's for the same day.
-  const shared = await sharedCloseStatements(deps, closes, today);
-  writes.push(...shared.statements);
-  run.count('pricesFromPlaid', shared.shared);
   return ids;
 }
 

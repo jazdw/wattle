@@ -14,6 +14,7 @@ const Holdings = lazy(() => import('./pages/Holdings').then((module) => ({ defau
 const Style = lazy(() => import('./pages/Style').then((module) => ({ default: module.Style })));
 const Accounts = lazy(() => import('./pages/Accounts').then((module) => ({ default: module.Accounts })));
 const Settings = lazy(() => import('./pages/Settings').then((module) => ({ default: module.Settings })));
+const PlaidOAuth = lazy(() => import('./pages/PlaidOAuth').then((module) => ({ default: module.PlaidOAuth })));
 
 function RequireAuth({ children }: { children: React.ReactNode }) {
   const { me, loading } = useAuth();
@@ -44,6 +45,7 @@ export default function App() {
         <Route path="style" element={<Style />} />
         <Route path="accounts" element={<Accounts />} />
         <Route path="settings" element={<Settings />} />
+        <Route path="plaid-oauth" element={<PlaidOAuth />} />
       </Route>
       <Route path="*" element={<Navigate to="/" replace />} />
     </Routes>

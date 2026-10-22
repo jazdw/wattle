@@ -14,6 +14,8 @@ interface PlaidHandler {
 
 interface PlaidCreateOptions {
   token: string;
+  /** Back from a bank's own login (OAuth) on the redirect page: where it sent us. */
+  receivedRedirectUri?: string;
   onSuccess: (publicToken: string) => void;
   onExit: (error: { error_message?: string; display_message?: string | null } | null) => void;
   onLoad?: () => void;
@@ -58,8 +60,11 @@ export interface LinkCallbacks {
   onExit: (message?: string) => void;
 }
 
-/** Open Plaid Link for a link token. Returns a function that closes it. */
-export async function openPlaidLink(token: string, callbacks: LinkCallbacks): Promise<() => void> {
+/**
+ * Open Plaid Link for a link token. Returns a function that closes it. With
+ * `receivedRedirectUri`, Link picks up where a bank's login left off.
+ */
+export async function openPlaidLink(token: string, callbacks: LinkCallbacks, receivedRedirectUri?: string): Promise<() => void> {
   const Plaid = await loadPlaid();
   let closed = false;
   const finish = (then: () => void) => {
@@ -70,6 +75,7 @@ export async function openPlaidLink(token: string, callbacks: LinkCallbacks): Pr
   };
   const handler = Plaid.create({
     token,
+    ...(receivedRedirectUri ? { receivedRedirectUri } : {}),
     onLoad: () => {
       if (!closed) handler.open();
     },

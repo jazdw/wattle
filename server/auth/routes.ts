@@ -17,12 +17,33 @@ import { stableId } from '../services/ids';
 import type { Db, Deps } from '../ports';
 import { describeError } from '../lib/errors';
 
-export const SESSION_COOKIE = 'wt_session';
+const SESSION_COOKIE = 'wt_session';
 const OAUTH_COOKIE = 'wt_oauth';
 const SESSION_TTL_SECONDS = 60 * 60 * 24 * 30; // 30 days
 
 function isSecureRequest(url: string): boolean {
   return new URL(url).protocol === 'https:';
+}
+
+/**
+ * A cookie's name for this request. Over HTTPS it has the __Host- prefix:
+ * browsers then accept it only from this exact host (Secure, Path=/, no
+ * Domain), so a page on another subdomain of the domain can't plant a session
+ * cookie of its own. Local http keeps the plain name (not every browser takes
+ * Secure cookies on http://localhost).
+ */
+export function cookieName(requestUrl: string, base: string): string {
+  return isSecureRequest(requestUrl) ? `__Host-${base}` : base;
+}
+
+function cookieOptions(c: Context<AppEnv>) {
+  return { path: '/', secure: isSecureRequest(c.req.url) };
+}
+
+function clearCookie(c: Context<AppEnv>, base: string): void {
+  deleteCookie(c, cookieName(c.req.url, base), cookieOptions(c));
+  // Over HTTPS, also the plain name used before the prefix (ignored when read).
+  if (isSecureRequest(c.req.url)) deleteCookie(c, base, { path: '/' });
 }
 
 /**
@@ -87,11 +108,10 @@ async function getSessionUser(deps: Deps, token: string): Promise<AuthUser | nul
 }
 
 function setSessionCookie(c: Context<AppEnv>, token: string): void {
-  setCookie(c, SESSION_COOKIE, token, {
+  setCookie(c, cookieName(c.req.url, SESSION_COOKIE), token, {
+    ...cookieOptions(c),
     httpOnly: true,
     sameSite: 'Lax',
-    secure: isSecureRequest(c.req.url),
-    path: '/',
     maxAge: SESSION_TTL_SECONDS,
   });
 }
@@ -202,12 +222,12 @@ async function signIn(c: Context<AppEnv>, profile: UserProfile, allowance: Allow
 /* ------------------------------------------------------------------ */
 
 export const requireAuth: MiddlewareHandler<AppEnv> = async (c, next) => {
-  const token = getCookie(c, SESSION_COOKIE);
+  const token = getCookie(c, cookieName(c.req.url, SESSION_COOKIE));
   if (!token) return c.json({ error: 'unauthenticated' }, 401);
 
   const user = await getSessionUser(c.env.deps, token);
   if (!user) {
-    deleteCookie(c, SESSION_COOKIE, { path: '/' });
+    clearCookie(c, SESSION_COOKIE);
     return c.json({ error: 'unauthenticated' }, 401);
   }
 
@@ -229,11 +249,10 @@ authRoutes.get('/google', async (c) => {
     return c.redirect('/login?auth=config_error');
   }
   const { url, pending } = await startSignIn(googleClientId, c.req.url);
-  setCookie(c, OAUTH_COOKIE, bytesToBase64Url(new TextEncoder().encode(JSON.stringify(pending))), {
+  setCookie(c, cookieName(c.req.url, OAUTH_COOKIE), bytesToBase64Url(new TextEncoder().encode(JSON.stringify(pending))), {
+    ...cookieOptions(c),
     httpOnly: true,
     sameSite: 'Lax',
-    secure: isSecureRequest(c.req.url),
-    path: '/api/auth',
     maxAge: 600,
   });
   return c.redirect(url.href);
@@ -251,8 +270,8 @@ function readPending(value: string | undefined): PendingSignIn | null {
 
 authRoutes.get('/google/callback', async (c) => {
   const { googleClientId, googleClientSecret } = c.env.deps.config;
-  const pending = readPending(getCookie(c, OAUTH_COOKIE));
-  deleteCookie(c, OAUTH_COOKIE, { path: '/api/auth' });
+  const pending = readPending(getCookie(c, cookieName(c.req.url, OAUTH_COOKIE)));
+  clearCookie(c, OAUTH_COOKIE);
 
   if (!googleClientId || !googleClientSecret) return c.redirect('/login?auth=config_error');
   const state = new URL(c.req.url).searchParams.get('state');
@@ -296,9 +315,9 @@ authRoutes.get('/me', requireAuth, async (c) => {
 });
 
 authRoutes.post('/logout', async (c) => {
-  const token = getCookie(c, SESSION_COOKIE);
+  const token = getCookie(c, cookieName(c.req.url, SESSION_COOKIE));
   if (token) await destroySession(c.env.deps.db, token);
-  deleteCookie(c, SESSION_COOKIE, { path: '/' });
+  clearCookie(c, SESSION_COOKIE);
   // Drop this site's cached pages, including signed-in pages the back button
   // could restore. Not "storage": that would also wipe the offline app shell.
   c.header('Clear-Site-Data', '"cache"');

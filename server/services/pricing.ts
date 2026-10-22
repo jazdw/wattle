@@ -3,7 +3,7 @@
  * reference data shared by all households). Lookups carry the last known
  * value forward over weekends and holidays.
  */
-import { and, desc, eq, gte, inArray, lte, max, min, ne, sql } from 'drizzle-orm';
+import { and, desc, eq, gte, inArray, lte, max, min, sql } from 'drizzle-orm';
 import { addDays, lastTradingDay, type IsoDate } from '../../shared/dates';
 import type { Currency, FxRates } from '../../shared/money';
 import type { BatchItem } from 'drizzle-orm/batch';
@@ -146,37 +146,6 @@ export function closeStatements(deps: Deps, rows: PriceRow[], options: { replace
   });
 }
 
-/** How old an institution-reported close may be to be shared. */
-const SHARED_CLOSE_MAX_AGE_DAYS = 7;
-/** How far an institution-reported close may stray from the provider's latest. */
-const SHARED_CLOSE_TOLERANCE = 0.25;
-
-/**
- * Statements sharing closes an institution reported (through Plaid) in the
- * price table every household reads, keeping existing closes. Only recent
- * closes, none after `today`, for tickers the price provider already knows
- * and near its latest close for them. Anything else (a private fund's code, a
- * made-up price from a Plaid sandbox user) stays with the household that holds
- * it, as the security's own last price.
- */
-export async function sharedCloseStatements(deps: Deps, rows: PriceRow[], today: IsoDate): Promise<{ statements: BatchItem<'sqlite'>[]; shared: number }> {
-  const recent = rows.filter((row) => row.date <= today && row.date >= addDays(today, -SHARED_CLOSE_MAX_AGE_DAYS));
-  const reference = new Map<string, number>();
-  for (const chunk of inChunks(normalise(recent.map((row) => row.ticker)))) {
-    const latest = await deps.db
-      .select({ ticker: pricesDaily.ticker, date: max(pricesDaily.date), close: pricesDaily.close })
-      .from(pricesDaily)
-      .where(and(inArray(pricesDaily.ticker, chunk), ne(pricesDaily.source, 'plaid'), lte(pricesDaily.date, today)))
-      .groupBy(pricesDaily.ticker);
-    for (const row of latest) reference.set(row.ticker, row.close);
-  }
-  const trusted = recent.filter((row) => {
-    const known = reference.get(row.ticker);
-    return known !== undefined && known > 0 && Math.abs(row.close - known) / known <= SHARED_CLOSE_TOLERANCE;
-  });
-  return { statements: closeStatements(deps, trusted, { replace: false }), shared: trusted.length };
-}
-
 /** Store closes now (manual entry, tests); see closeStatements. */
 export async function saveCloses(deps: Deps, rows: PriceRow[], options: { replace: boolean }): Promise<void> {
   await runAtomic(deps.db, closeStatements(deps, rows, options));
@@ -199,9 +168,9 @@ async function saveFetchedCloses(deps: Deps, run: PriceRun, rows: PriceRow[]): P
 
 /**
  * Make sure each ticker has its latest close as of `date` (the nightly
- * snapshot, manual holdings). Prices Plaid already supplied count. What's
- * missing is fetched in bulk where the provider can (Tiingo's IEX endpoint for
- * stocks and ETFs), then one request per remaining ticker (mutual funds).
+ * snapshot, manual holdings). What's missing is fetched in bulk where the
+ * provider can (Tiingo's IEX endpoint for stocks and ETFs), then one request
+ * per remaining ticker (mutual funds).
  */
 export async function ensureRecentCloses(deps: Deps, tickers: string[], date: IsoDate): Promise<void> {
   if (!deps.prices || tickers.length === 0) return;
