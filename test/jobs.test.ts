@@ -155,15 +155,29 @@ describe('job runner', () => {
     expect(woken(deps).filter((wake) => wake.id === 'next')).toHaveLength(1);
   });
 
+  it('releases a job added waiting for a group that finished meanwhile, without the sweep', async () => {
+    const { deps, tenant, job } = await setup();
+    await enqueue(deps, tenant, [{ id: 'a', type: 'history_block', payload: {}, groupId: 'g' }]);
+    await runJobWith(deps, 'a', handlersFor(async () => undefined)); // its release finds nothing waiting yet
+    await enqueue(deps, tenant, [{ id: 'late', type: 'history_finish', payload: {}, waitsFor: 'g' }]);
+    expect(await job('late')).toMatchObject({ status: 'queued' });
+    expect(woken(deps).at(-1)?.id).toBe('late');
+    // Waiting for a group with jobs still to run stays waiting.
+    await enqueue(deps, tenant, [{ id: 'b', type: 'history_block', payload: {}, groupId: 'h' }, { id: 'held', type: 'history_finish', payload: {}, waitsFor: 'h' }]);
+    expect(await job('held')).toMatchObject({ status: 'waiting' });
+  });
+
   it('the sweep wakes overdue and stopped jobs, and releases waiting jobs whose group finished', async () => {
     const { deps, tenant, job, later } = await setup();
     await enqueue(deps, tenant, [
       { id: 'lost', type: 'sync', payload: {} },
       { id: 'stopped', type: 'sync', payload: {} },
-      { id: 'orphan', type: 'snapshot', payload: {}, waitsFor: 'finished-group' },
       { id: 'blocked', type: 'snapshot', payload: {}, waitsFor: 'busy-group' },
       { id: 'busy', type: 'sync', payload: {}, groupId: 'busy-group', runAfter: deps.now().getTime() + 3_600_000 },
     ]);
+    // A waiting job whose release was lost (added straight to the table, so nothing released it).
+    const now = deps.now().getTime();
+    await deps.db.insert(schema.jobs).values({ id: 'orphan', householdId: tenant.householdId, type: 'snapshot', payload: {}, waitsFor: 'finished-group', status: 'waiting', runAfter: now, createdAt: now });
     void runJobWith(deps, 'stopped', handlersFor(() => new Promise(() => {})));
     await expect.poll(async () => (await job('stopped')).status).toBe('running');
     later(LEASE_MS + 60_000);
