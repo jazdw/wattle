@@ -64,8 +64,8 @@ export const CONNECTIONS: ConnectionsResponse = {
   plaidEnv: 'sandbox',
   itemsUsed: 2,
   connections: [
-    { id: 'c-chase', institutionName: 'Chase', kind: 'account', hasInvestments: false, hasBalanceHistory: true, status: 'ok', errorCode: null, ownerUserId: 'u-me', lastSyncedAt: Date.now() - 3600_000, backfillStatus: 'skipped', historyProgress: null, consentExpiresAt: null, createdAt: 1 },
-    { id: 'c-vg', institutionName: 'Vanguard', kind: 'investments', hasInvestments: true, hasBalanceHistory: false, status: 'login_required', errorCode: 'ITEM_LOGIN_REQUIRED', ownerUserId: 'u-partner', lastSyncedAt: Date.now() - 86400_000, backfillStatus: 'done', historyProgress: null, consentExpiresAt: null, createdAt: 2 },
+    { id: 'c-chase', institutionName: 'Chase', kind: 'account', hasInvestments: false, hasBalanceHistory: true, status: 'ok', errorCode: null, ownerUserId: 'u-me', lastSyncedAt: Date.now() - 3600_000, backfillStatus: 'skipped', historyProgress: null, consentExpiresAt: null, newAccountsAvailable: false, createdAt: 1 },
+    { id: 'c-vg', institutionName: 'Vanguard', kind: 'investments', hasInvestments: true, hasBalanceHistory: false, status: 'login_required', errorCode: 'ITEM_LOGIN_REQUIRED', ownerUserId: 'u-partner', lastSyncedAt: Date.now() - 86400_000, backfillStatus: 'done', historyProgress: null, consentExpiresAt: null, newAccountsAvailable: false, createdAt: 2 },
   ],
 };
 

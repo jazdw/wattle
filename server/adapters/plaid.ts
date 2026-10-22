@@ -58,6 +58,8 @@ export interface LinkTokenOptions {
   webhook: string | null;
   /** Update mode: re-authenticate an existing connection. */
   accessToken?: string;
+  /** Update mode: let the user choose which accounts to share (add or remove). */
+  chooseAccounts?: boolean;
   redirectUri?: string;
 }
 
@@ -204,6 +206,7 @@ export function createPlaidClient(config: PlaidConfig, log?: PlaidCall[]): Plaid
       if (options.redirectUri) body.redirect_uri = options.redirectUri;
       if (options.accessToken) {
         body.access_token = options.accessToken;
+        if (options.chooseAccounts) body.update = { account_selection_enabled: true };
       } else {
         const products = PRODUCTS[options.kind];
         body.products = products.products;

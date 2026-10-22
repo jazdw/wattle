@@ -59,6 +59,7 @@ plaidRoutes.post('/link-token', requireAuth, async (c) => {
     webhook: webhookUrl(c.req.url),
     redirectUri: oauthRedirectUrl(c.req.url) ?? undefined,
     accessToken,
+    chooseAccounts: body.chooseAccounts,
   });
   return c.json({ linkToken });
 });
@@ -176,6 +177,15 @@ plaidRoutes.post('/webhook', async (c) => {
       );
       break;
     }
+    case 'ITEM:NEW_ACCOUNTS_AVAILABLE':
+      // Shown on the login's card until accounts are chosen (Choose accounts).
+      await record(
+        tenant.db
+          .update(connections)
+          .set({ newAccountsAt: observedAt })
+          .where(tenant.scope(connections, eq(connections.id, connection.id), notInArray(connections.status, INACTIVE))),
+      );
+      break;
     case 'ITEM:USER_PERMISSION_REVOKED':
     case 'ITEM:USER_ACCOUNT_REVOKED':
       await setStatus('error', event.webhook_code ?? null);

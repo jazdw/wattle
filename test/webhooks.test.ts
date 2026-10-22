@@ -90,6 +90,44 @@ describe('Plaid webhooks', () => {
     expect((await connection()).status).toBe('error');
   });
 
+  it('Choose accounts: new accounts Plaid reports are flagged; choosing adds them (with history) and removes deselected ones (history kept)', async () => {
+    const { deps, send, connection, plaid, api } = await setup();
+    const [before] = (await api('/api/connections')).body.connections;
+    expect(before.newAccountsAvailable).toBe(false);
+    await send({ webhook_type: 'ITEM', webhook_code: 'NEW_ACCOUNTS_AVAILABLE', item_id: 'item-1' });
+    expect((await api('/api/connections')).body.connections[0].newAccountsAvailable).toBe(true);
+
+    // Link opens with account selection for this login.
+    expect((await api('/api/plaid/link-token', { method: 'POST', json: { kind: 'investments', connectionId: before.id, chooseAccounts: true } })).status).toBe(200);
+    expect(plaid.state.calls).toContain('link:investments:choose');
+    expect((await api('/api/plaid/link-token', { method: 'POST', json: { kind: 'investments', chooseAccounts: true } })).status).toBe(400);
+
+    // In Link: the new IRA chosen, the brokerage account deselected. Just
+    // linked, so a plain Sync would wait out its cooldown; this doesn't.
+    plaid.state.accounts = [account('ira', 'investment', 2000)];
+    plaid.state.holdings = [holding('ira', 's-vti', 20, 100)];
+    const historyBefore = (await deps.db.select().from(schema.syncRuns)).filter((run) => run.action === 'history').length;
+    const chosen = await api(`/api/connections/${before.id}/accounts-chosen`, { method: 'POST' });
+    expect(chosen.body).toMatchObject({ added: 1, historyQueued: true });
+    await flush(deps);
+    const rows = await deps.db.select().from(schema.accounts);
+    expect(rows.find((row) => row.externalId === 'ira')).toMatchObject({ missingSince: null });
+    expect(rows.find((row) => row.externalId === 'brk')?.missingSince).not.toBeNull();
+    const brkHistory = await deps.db.select().from(schema.accountDaily);
+    expect(brkHistory.some((row) => row.accountId === rows.find((r) => r.externalId === 'brk')!.id)).toBe(true); // kept
+    expect(brkHistory.some((row) => row.accountId === rows.find((r) => r.externalId === 'ira')!.id && row.source === 'backfill')).toBe(true); // loaded
+    expect((await deps.db.select().from(schema.syncRuns)).filter((run) => run.action === 'history').length).toBe(historyBefore + 1);
+    expect((await connection()).newAccountsAt).toBeNull();
+    expect((await api('/api/portfolio')).body.netWorth).toBe(2000_00); // only what's shared counts
+
+    // Choosing the brokerage account again brings it back, without a new history load.
+    plaid.state.accounts = [account('brk', 'investment', 1000), account('ira', 'investment', 2000)];
+    plaid.state.holdings = [holding('brk', 's-vti', 10, 100), holding('ira', 's-vti', 20, 100)];
+    const again = await api(`/api/connections/${before.id}/accounts-chosen`, { method: 'POST' });
+    expect(again.body).toMatchObject({ added: 1, historyQueued: false });
+    expect((await api('/api/portfolio')).body.netWorth).toBe(3000_00);
+  });
+
   it('ignores unknown items and events', async () => {
     const { send, connection } = await setup();
     expect((await send({ webhook_type: 'ITEM', webhook_code: 'ERROR', item_id: 'someone-else' })).status).toBe(200);

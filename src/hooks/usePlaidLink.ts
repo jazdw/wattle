@@ -14,6 +14,8 @@ export interface PendingLink {
   linkToken: string;
   kind: LinkKind;
   connectionId?: string;
+  /** Choosing which of the connection's accounts to share. */
+  chooseAccounts?: boolean;
 }
 
 const PENDING_KEY = 'wt-plaid-link';
@@ -51,9 +53,10 @@ function clearPending(): void {
  */
 export function usePlaidLink({
   connectionId,
+  chooseAccounts,
   onError,
   onLinked,
-}: { connectionId?: string; onError?: (message: string) => void; onLinked?: () => void } = {}) {
+}: { connectionId?: string; chooseAccounts?: boolean; onError?: (message: string) => void; onLinked?: () => void } = {}) {
   const queryClient = useQueryClient();
   const [open, setOpen] = useState(false);
   const close = useRef<(() => void) | null>(null);
@@ -74,10 +77,12 @@ export function usePlaidLink({
     onError: (error) => onError?.(error.message),
   });
 
-  const onSuccess = (publicToken: string, kind: LinkKind) => {
+  const onSuccess = (publicToken: string, { kind, chooseAccounts: choosing }: PendingLink) => {
     if (connectionId) {
-      // Update mode keeps the same access token; just resync.
-      void api(`/api/connections/${connectionId}/sync`, { method: 'POST' }).finally(() => {
+      // Update mode keeps the same access token: resync (after choosing
+      // accounts, straight away, loading new accounts' history).
+      const path = choosing ? `/api/connections/${connectionId}/accounts-chosen` : `/api/connections/${connectionId}/sync`;
+      void api(path, { method: 'POST' }).finally(() => {
         void queryClient.invalidateQueries();
         onLinked?.();
       });
@@ -86,7 +91,8 @@ export function usePlaidLink({
     }
   };
 
-  const openLink = async ({ linkToken, kind }: PendingLink, receivedRedirectUri?: string) => {
+  const openLink = async (pending: PendingLink, receivedRedirectUri?: string) => {
+    const { linkToken } = pending;
     setOpen(true);
     close.current = await openPlaidLink(
       linkToken,
@@ -95,7 +101,7 @@ export function usePlaidLink({
           close.current = null;
           clearPending();
           setOpen(false);
-          onSuccess(publicToken, kind);
+          onSuccess(publicToken, pending);
         },
         onExit: (message) => {
           close.current = null;
@@ -112,9 +118,9 @@ export function usePlaidLink({
     mutationFn: async (kind: LinkKind) => {
       const { linkToken } = await api<{ linkToken: string }>('/api/plaid/link-token', {
         method: 'POST',
-        body: JSON.stringify({ kind, connectionId }),
+        body: JSON.stringify({ kind, connectionId, ...(chooseAccounts ? { chooseAccounts } : {}) }),
       });
-      const pending = { linkToken, kind, ...(connectionId ? { connectionId } : {}) };
+      const pending = { linkToken, kind, ...(connectionId ? { connectionId } : {}), ...(chooseAccounts ? { chooseAccounts } : {}) };
       savePending(pending);
       await openLink(pending);
     },

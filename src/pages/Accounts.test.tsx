@@ -150,6 +150,31 @@ describe('Accounts page', () => {
     expect(sent('POST /api/plaid/exchange')).toHaveLength(0);
   });
 
+  it('chooses accounts on a working login at any time, highlighted when new ones are available', async () => {
+    server.use(
+      http.get('*/api/connections', () =>
+        HttpResponse.json({
+          ...CONNECTIONS,
+          connections: CONNECTIONS.connections.map((connection) => (connection.id === 'c-chase' ? { ...connection, newAccountsAvailable: true } : connection)),
+        }),
+      ),
+      http.post('*/api/plaid/link-token', () => HttpResponse.json({ linkToken: 'link-choose' })),
+      http.post('*/api/connections/c-chase/accounts-chosen', () => HttpResponse.json({ added: 1, historyQueued: true })),
+    );
+    const { user } = renderPage(<Accounts />);
+    await screen.findByText('Sapphire');
+    expect(within(card('Chase')).getByText('New accounts available')).toBeInTheDocument();
+    // Only on working logins (Vanguard needs fixing first).
+    expect(within(card('Vanguard')).queryByRole('button', { name: 'Choose accounts' })).not.toBeInTheDocument();
+    await user.click(within(card('Chase')).getByRole('button', { name: 'Choose accounts' }));
+    await expect.poll(() => plaidLink.open.mock.calls.length).toBe(1);
+    expect(sent('POST /api/plaid/link-token')[0].body).toEqual({ kind: 'account', connectionId: 'c-chase', chooseAccounts: true });
+    plaidLink.onSuccess!('public-choose');
+    await expect.poll(() => sent('POST /api/connections/c-chase/accounts-chosen').length).toBe(1);
+    expect(sent('POST /api/connections/c-chase/sync')).toHaveLength(0);
+    expect(sent('POST /api/plaid/exchange')).toHaveLength(0);
+  });
+
   it("disables the button while Link is open and shows Plaid's exit error", async () => {
     const { user } = renderPage(<Accounts />);
     const button = await screen.findByRole('button', { name: 'Link account' });

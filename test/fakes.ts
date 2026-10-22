@@ -126,7 +126,7 @@ export function fakePlaid(initial: Partial<PlaidState> = {}): PlaidApi & { state
       });
     },
     createLinkToken: async (options) => {
-      state.calls.push(`link:${options.kind}:${options.accessToken ? 'update' : 'new'}`);
+      state.calls.push(`link:${options.kind}:${options.accessToken ? (options.chooseAccounts ? 'choose' : 'update') : 'new'}`);
       state.linkRedirects.push(options.redirectUri);
       return 'link-sandbox-token';
     },

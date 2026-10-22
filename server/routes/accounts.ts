@@ -1,5 +1,5 @@
 /** Connections, accounts (Plaid and manual), manual balances and holdings. */
-import { and, count, desc, eq, inArray, isNotNull, ne } from 'drizzle-orm';
+import { and, count, desc, eq, inArray, isNotNull, isNull, lt, ne } from 'drizzle-orm';
 import { Hono } from 'hono';
 import { suggestClassification } from '../../shared/classify';
 import { marketDate } from '../../shared/dates';
@@ -84,6 +84,7 @@ connectionRoutes.get('/', async (c) => {
         backfillStatus: row.backfillStatus,
         historyProgress: progress.get(row.id) ?? null,
         consentExpiresAt: row.consentExpiresAt,
+        newAccountsAvailable: row.newAccountsAt !== null,
         createdAt: row.createdAt,
       })),
     plaidEnv: c.env.deps.plaid?.env ?? null,
@@ -104,6 +105,42 @@ connectionRoutes.post('/:id/sync', async (c) => {
   const result = await syncConnection(deps, tenant, connection.id, 'manual', { minIntervalMs: MANUAL_SYNC_INTERVAL_MS });
   await snapshotHousehold(deps, tenant, marketDate(deps.now()));
   return c.json(result);
+});
+
+/**
+ * After Choose accounts (Link's update mode with account selection): sync
+ * straight away, whatever the cooldown, so added accounts appear and removed
+ * ones are marked no longer reported (their history kept). Accounts new to
+ * Wattle get their history loaded (existing days are kept as they are).
+ */
+connectionRoutes.post('/:id/accounts-chosen', async (c) => {
+  const deps = c.env.deps;
+  const tenant = c.get('tenant');
+  const connection = await getConnection(tenant, c.req.param('id'));
+  if (!connection) notFound('Connection not found.');
+  const shared = async () =>
+    (
+      await tenant.db
+        .select({ id: accounts.id })
+        .from(accounts)
+        .where(tenant.scope(accounts, eq(accounts.connectionId, connection.id), eq(accounts.source, 'plaid'), isNull(accounts.missingSince)))
+    ).map((row) => row.id);
+  const startedAt = deps.now().getTime();
+  const before = new Set(await shared());
+  const result = await syncConnection(deps, tenant, connection.id, 'manual');
+  const added = (await shared()).filter((id) => !before.has(id));
+  // Only a notice from before this choice: one Plaid sends meanwhile stays.
+  await tenant.db
+    .update(connections)
+    .set({ newAccountsAt: null })
+    .where(tenant.scope(connections, eq(connections.id, connection.id), lt(connections.newAccountsAt, startedAt + 1)));
+  // Accounts with no days stored yet need their history (a returning account's gap is filled as missed days).
+  const known = added.length > 0 ? await tenant.db.selectDistinct({ id: accountDaily.accountId }).from(accountDaily).where(tenant.scope(accountDaily, inArray(accountDaily.accountId, added))) : [];
+  const fresh = added.filter((id) => !known.some((row) => row.id === id));
+  const url = new URL(c.req.url);
+  const historyQueued = fresh.length > 0 && (await queueHistory(deps, tenant, connection.id, 'load', 'manual', url.protocol === 'https:' ? `${url.origin}/api/plaid/webhook` : null));
+  await snapshotHousehold(deps, tenant, marketDate(deps.now()));
+  return c.json({ ...result, added: added.length, historyQueued });
 });
 
 /** The connection's sync log, newest first. */

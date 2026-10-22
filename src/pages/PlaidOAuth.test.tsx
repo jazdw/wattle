@@ -38,6 +38,15 @@ describe('Plaid OAuth redirect page', () => {
     expect(sent('POST /api/plaid/exchange')).toHaveLength(0);
   });
 
+  it('finishes choosing accounts after a bank login on a phone', async () => {
+    sessionStorage.setItem('wt-plaid-link', JSON.stringify({ linkToken: 'link-choose', kind: 'account', connectionId: 'c-chase', chooseAccounts: true }));
+    renderPage(<PlaidOAuth />, { route: '/plaid-oauth', routes });
+    await expect.poll(() => plaidLink.open.mock.calls.length).toBe(1);
+    act(() => plaidLink.onSuccess!('public-choose'));
+    await expect.poll(() => sent('POST /api/connections/c-chase/accounts-chosen').length).toBe(1);
+    expect(sent('POST /api/connections/c-chase/sync')).toHaveLength(0);
+  });
+
   it("shows Plaid's error, or says the session ended when there isn't one", async () => {
     sessionStorage.setItem('wt-plaid-link', JSON.stringify({ linkToken: 'link-sandbox-abc', kind: 'account' }));
     const { unmount } = renderPage(<PlaidOAuth />, { route: '/plaid-oauth', routes });
