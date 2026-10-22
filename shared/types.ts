@@ -52,6 +52,8 @@ export interface ConnectionSummary {
   /** While a history load runs as background jobs: how many of its parts (prices, blocks) are done. */
   historyProgress: { done: number; total: number } | null;
   consentExpiresAt: number | null;
+  /** Plaid says the login has accounts not shared with Wattle yet (Choose accounts adds them). */
+  newAccountsAvailable: boolean;
   createdAt: number;
 }
 

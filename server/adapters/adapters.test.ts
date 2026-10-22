@@ -51,6 +51,9 @@ describe('Plaid client', () => {
     expect(account.webhook).toBeUndefined();
     expect(update).toMatchObject({ access_token: 'access-1' });
     expect(update.products).toBeUndefined();
+    expect(update.update).toBeUndefined();
+    await plaid.createLinkToken({ clientUserId: 'u1', kind: 'account', webhook: null, accessToken: 'access-1', chooseAccounts: true });
+    expect(requests[3].body).toMatchObject({ access_token: 'access-1', update: { account_selection_enabled: true } });
     for (const body of [investments, account, update]) expect(JSON.stringify(body)).not.toContain('"auth"');
   });
 
