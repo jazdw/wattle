@@ -100,14 +100,18 @@ describe('sync log', () => {
     const runs = async () => (await api(`/api/connections/${connection.id}/activity`)).body.runs as SyncRunSummary[];
 
     expect((await runs()).find((run) => run.action === 'history')?.counts).toEqual({ assetReportsRequested: 1 });
-    // Just linked, so Sync skips Plaid (cooldown) but checks the report: not ready.
+    // Just linked, so Sync skips Plaid (cooldown) but queues a check of the
+    // report: not ready, so it waits to check again, and nothing is logged.
     await api(`/api/connections/${connection.id}/sync`, { method: 'POST' });
-    const [checked, cooldown] = await runs();
-    expect(checked).toMatchObject({ action: 'balance_history', outcome: 'skipped', note: 'Plaid is still preparing the report.' });
+    await flush(deps);
+    const [cooldown] = await runs();
     expect(cooldown).toMatchObject({ action: 'sync', outcome: 'skipped', note: 'Last synced less than 2 minutes ago.' });
+    const [check] = await deps.db.select().from(schema.jobs).where(eq(schema.jobs.type, 'report_collect'));
+    expect(check).toMatchObject({ status: 'queued', attempts: 0, errorMessage: 'Plaid is still preparing the report.' });
 
     plaid.state.assetReportReady = true;
-    await api(`/api/connections/${connection.id}/sync`, { method: 'POST' });
+    await api(`/api/connections/${connection.id}/sync`, { method: 'POST' }); // makes the check due now
+    await flush(deps);
     const [collected] = await runs();
     expect(collected).toMatchObject({ action: 'balance_history', trigger: 'manual', outcome: 'ok', counts: { days: 2 } });
     // Deleting the report at Plaid happens after the balances are stored, and is logged too.

@@ -15,7 +15,7 @@ import { accounts, connections, holdings, investmentTransactions, securities } f
 import type { Tenant } from '../db/tenant';
 import type { Deps } from '../ports';
 import { closeInterruptedRuns, SyncRun, type SyncTrigger } from './activity';
-import { collectPendingReport } from './assetReports';
+import { queueReportCollection } from './assetReports';
 import { queueDueHistory } from './backfill';
 import { BusyError, connectionLease, holdWhile, Lease, snapshotLease } from './lease';
 import { decryptToken, encryptToken, loadTokenKeys, tokenAad } from './crypto';
@@ -283,7 +283,7 @@ export async function underConnectionLease<T>(
     }
     const latest = await getConnection(tenant, connectionId);
     if (!latest || !isActive(latest)) return;
-    if (latest.assetReportTokenEnc) await collectPendingReport(deps, tenant, latest, trigger, lease);
+    if (latest.assetReportTokenEnc) await queueReportCollection(deps, tenant, latest, trigger);
     // A history load, rebuild or days the syncs missed, as jobs.
     if (options.history !== false) await queueDueHistory(deps, tenant, connectionId, trigger);
   });
