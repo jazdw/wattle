@@ -103,3 +103,27 @@
 .recharts-layer {
   outline: none;
 }
+
+/* Phone menu: slides in from the left. */
+@keyframes drawer-in {
+  from {
+    transform: translateX(-100%);
+  }
+}
+@keyframes fade-in {
+  from {
+    opacity: 0;
+  }
+}
+.drawer-in {
+  animation: drawer-in 180ms ease-out;
+}
+.fade-in {
+  animation: fade-in 180ms ease-out;
+}
+@media (prefers-reduced-motion: reduce) {
+  .drawer-in,
+  .fade-in {
+    animation: none;
+  }
+}
