@@ -28,6 +28,12 @@ export interface Config {
    * can be reconnected without using another Item (Plaid's Trial plan counts removed ones).
    */
   plaidAllowRemove: boolean;
+  /**
+   * JOB_CHUNK_ROWS: about how many rows one background job builds and writes
+   * (default 1,000). Sized for Workers Free's 10 ms of CPU per invocation;
+   * raise it on Workers Paid for fewer, larger jobs.
+   */
+  jobChunkRows: number;
   /** When set, /api requests must carry a valid Cloudflare Access token for this team and application. */
   access?: { teamDomain: string; audience: string };
 }
@@ -81,6 +87,16 @@ export interface FxProvider {
   rates(base: Currency, quote: Currency, start: IsoDate, end: IsoDate): Promise<{ date: IsoDate; rate: number }[]>;
 }
 
+/**
+ * Wakes a runner for jobs (services/jobRunner.ts). The jobs table is the
+ * record; this only says "run job X now (or after a delay)". A Cloudflare
+ * Queue on Workers, the process's own loop on Node. A lost wake-up is
+ * recovered by the sweep.
+ */
+export interface JobQueue {
+  wake(ids: string[], delaySeconds?: number): Promise<void>;
+}
+
 export interface Deps {
   db: Db;
   config: Config;
@@ -89,6 +105,7 @@ export interface Deps {
   quotes: QuoteProvider | null;
   fx: FxProvider | null;
   now: () => Date;
+  jobQueue: JobQueue;
   /** Keep work running after the response is sent (ctx.waitUntil on Workers). */
   background: (work: Promise<unknown>) => void;
   /** Wait (e.g. for a lease); tests make it instant. */

@@ -1,8 +1,9 @@
 #!/usr/bin/env node
-// Deploy: find (or create) the production D1 database, build with its id,
-// apply migrations, then deploy the Worker to CUSTOM_DOMAIN with the plain
-// settings below. Used locally (after `npx wrangler login`) and by CI (with
-// CLOUDFLARE_API_TOKEN; settings from GitHub repository variables).
+// Deploy: find (or create) the production D1 database and the jobs queue,
+// build with the database id, apply migrations, then deploy the Worker to
+// CUSTOM_DOMAIN with the plain settings below. Used locally (after
+// `npx wrangler login`) and by CI (with CLOUDFLARE_API_TOKEN; settings from
+// GitHub repository variables).
 //
 //   CUSTOM_DOMAIN=wattle.example.com PLAID_ENV=sandbox npm run deploy
 
@@ -26,9 +27,22 @@ function run(command, args, env = {}) {
  * replaces all variables, so the Worker always has exactly these; secrets
  * (API keys) are set separately with `wrangler secret put` and never touched.
  */
-const SETTINGS = ['PLAID_ENV', 'PLAID_ALLOW_REMOVE', 'QUOTE_PROVIDER', 'QUOTE_CACHE_SECONDS', 'FX_PROVIDER', 'ACCESS_TEAM_DOMAIN', 'ACCESS_AUD'];
+const SETTINGS = ['PLAID_ENV', 'PLAID_ALLOW_REMOVE', 'QUOTE_PROVIDER', 'QUOTE_CACHE_SECONDS', 'FX_PROVIDER', 'ACCESS_TEAM_DOMAIN', 'ACCESS_AUD', 'JOB_CHUNK_ROWS'];
 const vars = SETTINGS.filter((name) => process.env[name]).flatMap((name) => ['--var', `${name}:${process.env[name]}`]);
 
+/** The background-jobs queue (wrangler.jsonc), created on the first deploy. */
+const QUEUE = 'wattle-jobs';
+function ensureQueue() {
+  const result = spawnSync('npx', ['wrangler', 'queues', 'create', QUEUE], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
+  const output = `${result.stdout}${result.stderr}`;
+  if (result.status === 0) console.log(`Created the queue "${QUEUE}".`);
+  else if (!/already (exists|taken)/i.test(output)) {
+    console.error(output);
+    process.exit(result.status ?? 1);
+  }
+}
+
+ensureQueue();
 const id = databaseId();
 // The Vite build writes the id into the generated deploy config (vite.config.ts).
 run('npm', ['run', 'build'], { D1_DATABASE_ID: id });

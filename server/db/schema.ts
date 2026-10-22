@@ -570,3 +570,63 @@ export const kvCache = sqliteTable('kv_cache', {
   value: text('value').notNull(),
   expiresAt: integer('expires_at').notNull(),
 });
+
+export const JOB_TYPES = [
+  'sync',
+  'snapshot',
+  'nightly_finish',
+  'history_plan',
+  'history_prices',
+  'history_block',
+  'history_finish',
+  'report_collect',
+  'report_account',
+  'report_finish',
+] as const;
+export const JOB_STATES = ['waiting', 'queued', 'running', 'done', 'failed'] as const;
+
+/**
+ * Background work, as small jobs (services/jobRunner.ts). The table is the
+ * record: the platform only wakes a runner for a job id (a Cloudflare Queue
+ * message, or the Node process's own loop), so lost wake-ups are recovered by
+ * the sweep and nothing depends on the queue keeping messages.
+ *
+ * Jobs that belong together share a `group_id`. A job can wait for a group
+ * (`waits_for`, status 'waiting'); it's queued once that group has no
+ * unfinished jobs. Household data, finished jobs kept 30 days.
+ */
+export const jobs = sqliteTable(
+  'jobs',
+  {
+    id: text('id').primaryKey(),
+    householdId: text('household_id')
+      .notNull()
+      .references(() => households.id, { onDelete: 'cascade' }),
+    /** The login the job works on, if any (its card shows progress and failures). */
+    connectionId: text('connection_id').references(() => connections.id, { onDelete: 'cascade' }),
+    type: text('type', { enum: JOB_TYPES }).notNull(),
+    payload: text('payload', { mode: 'json' }).$type<Record<string, unknown>>().notNull(),
+    groupId: text('group_id'),
+    waitsFor: text('waits_for'),
+    status: text('status', { enum: JOB_STATES }).notNull(),
+    attempts: integer('attempts').notNull().default(0),
+    maxAttempts: integer('max_attempts').notNull().default(3),
+    /** Not before then (backoff, or a delay the job asked for). */
+    runAfter: integer('run_after').notNull(),
+    /** The running attempt must renew before then, or the job is free to run again. */
+    lockedUntil: integer('locked_until'),
+    lockToken: text('lock_token'),
+    createdAt: integer('created_at').notNull(),
+    startedAt: integer('started_at'),
+    finishedAt: integer('finished_at'),
+    errorCode: text('error_code'),
+    errorMessage: text('error_message'),
+    result: text('result', { mode: 'json' }).$type<Record<string, unknown>>(),
+  },
+  (table) => [
+    index('jobs_due').on(table.status, table.runAfter),
+    index('jobs_group').on(table.groupId, table.status),
+    index('jobs_waits_for').on(table.waitsFor),
+    index('jobs_household').on(table.householdId, table.createdAt),
+  ],
+);

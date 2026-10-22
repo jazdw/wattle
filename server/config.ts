@@ -26,6 +26,8 @@ export interface RawEnv {
   ACCESS_TEAM_DOMAIN?: string;
   /** Application Audience (AUD) tag of the Access application. */
   ACCESS_AUD?: string;
+  /** About how many rows one background job writes (default 1,000, for Workers Free). */
+  JOB_CHUNK_ROWS?: string;
 }
 
 /**
@@ -33,6 +35,12 @@ export interface RawEnv {
  * hour; at 5 minutes an open Holdings page costs at most 12.
  */
 const DEFAULT_QUOTE_CACHE_SECONDS = 300;
+
+/**
+ * Rows per background job. Building a row costs about 6.6 µs of CPU (mostly
+ * Drizzle), so 1,000 rows stays well inside Workers Free's 10 ms.
+ */
+const DEFAULT_JOB_CHUNK_ROWS = 1_000;
 
 function positiveInteger(value: string | undefined): number | undefined {
   const number = Number(value);
@@ -54,6 +62,7 @@ export function configFromEnv(env: RawEnv): Config {
     googleClientSecret: env.GOOGLE_CLIENT_SECRET || undefined,
     tokenEncKey: env.TOKEN_ENC_KEY || undefined,
     plaidAllowRemove: env.PLAID_ALLOW_REMOVE === 'true',
+    jobChunkRows: positiveInteger(env.JOB_CHUNK_ROWS) ?? DEFAULT_JOB_CHUNK_ROWS,
     access:
       env.ACCESS_TEAM_DOMAIN && env.ACCESS_AUD ? { teamDomain: env.ACCESS_TEAM_DOMAIN, audience: env.ACCESS_AUD } : undefined,
   };
@@ -79,9 +88,10 @@ function quoteProvider(env: RawEnv) {
 }
 
 /** Build the dependency set from environment variables and a database. */
-export function depsFromEnv(env: RawEnv, db: Db, background: Deps['background']): Deps {
+export function depsFromEnv(env: RawEnv, db: Db, jobQueue: Deps['jobQueue'], background: Deps['background']): Deps {
   const deps: Deps = {
     db,
+    jobQueue,
     config: configFromEnv(env),
     plaid:
       env.PLAID_CLIENT_ID && env.PLAID_SECRET

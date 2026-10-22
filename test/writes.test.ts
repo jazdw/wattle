@@ -67,6 +67,9 @@ const REVIEWED: Record<string, Record<string, string>> = {
     fxDaily: 'public data; insert-or-ignore, atomic with its log row',
   },
   'server/services/cache.ts': { kvCache: 'TTL cache; last write wins is fine' },
+  'server/services/jobRunner.ts': {
+    jobs: 'insert-or-ignore (fixed ids dedupe); claimed by one conditional update (queued and due, or lock expired); later writes only by the lock token holder; waiting jobs released by one conditional update per group',
+  },
   'server/services/jobs.ts': {
     jobRuns: 'one row per nightly run, written running and completed by id; earlier rows left running marked interrupted',
     sessions: 'pruning expired sessions',

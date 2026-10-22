@@ -39,6 +39,23 @@
       "migrations_dir": "migrations"
     }
   ],
+  // Background jobs (server/services/jobRunner.ts): the jobs table is the
+  // record; a message only says "run job <id>". One job per invocation, so
+  // each has the Worker's limits to itself. `npm run deploy` creates the
+  // queue if it doesn't exist.
+  "queues": {
+    "producers": [{ "binding": "JOBS", "queue": "wattle-jobs" }],
+    "consumers": [
+      {
+        "queue": "wattle-jobs",
+        "max_batch_size": 1,
+        // A few at once: enough to keep up, gentle on D1 and on Tiingo's 50 requests an hour.
+        "max_concurrency": 3,
+        // Jobs count their own attempts; this only covers deliveries that failed outright.
+        "max_retries": 10
+      }
+    ]
+  },
   // Daily snapshot: 02:00 UTC is after the US close (22:00 New York in
   // summer, 21:00 in winter), once end-of-day prices are published.
   "triggers": {
