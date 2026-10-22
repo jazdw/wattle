@@ -101,6 +101,15 @@ describe('linking', () => {
     expect((await api('/api/plaid/link-token', { method: 'POST', json: { kind: 'investments', connectionId: 'nope' } })).status).toBe(404);
     expect((await api('/api/plaid/link-token', { method: 'POST', json: { kind: 'stocks' } })).status).toBe(400);
   });
+
+  it('sends the OAuth redirect address over HTTPS only (phones return there from a bank\'s login)', async () => {
+    const { deps, home, plaid } = await linked();
+    await client(deps, home.cookie)('/api/plaid/link-token', { method: 'POST', json: { kind: 'account' } });
+    const token = home.cookie.split('=')[1];
+    const https = client(deps, `__Host-wt_session=${token}`, 'https://wattle.example');
+    expect((await https('/api/plaid/link-token', { method: 'POST', json: { kind: 'account' } })).status).toBe(200);
+    expect(plaid.state.linkRedirects).toEqual([undefined, 'https://wattle.example/plaid-oauth']);
+  });
 });
 
 describe('ongoing sync', () => {
@@ -236,30 +245,27 @@ describe('market pricing', () => {
     expect(byTicker.get('SBSI')?.lastPrice).toBe(34);
   });
 
-  it("shares Plaid's closes with other households only for known tickers, recent days and plausible prices", async () => {
+  it("never puts an institution's prices in the shared price table; the household still sees them", async () => {
     const deps = await createTestDeps();
-    await saveCloses(
-      deps,
-      ['VTI', 'BND', 'VXUS'].map((ticker) => ({ ticker, date: '2026-10-07', close: 100, currency: 'USD', source: 'tiingo' })),
-      { replace: true },
-    );
+    await saveCloses(deps, [{ ticker: 'VTI', date: '2026-10-07', close: 100, currency: 'USD', source: 'tiingo' }], { replace: true });
     const plaid = fakePlaid({
       accounts: [account('brk', 'investment', 1000)],
-      securities: [
-        security('s-vti', 'VTI', 'etf', 101), // shared
-        security('s-bnd', 'BND', 'etf', 500), // too far from the provider's close
-        { ...security('s-vxus', 'VXUS', 'etf', 100), close_price_as_of: '2026-10-20' }, // dated after today
-        security('s-own', 'MYPLAN', 'equity', 10), // a code the provider doesn't know
-      ],
-      holdings: ['s-vti', 's-bnd', 's-vxus', 's-own'].map((id) => holding('brk', id, 1, 10)),
+      securities: [security('s-vti', 'VTI', 'etf', 101), security('s-own', 'MYPLAN', 'equity', 10)],
+      holdings: [holding('brk', 's-vti', 1, 101), holding('brk', 's-own', 1, 10)],
     });
     const { api } = await linked(plaid, { db: deps.db });
-    const shared = await deps.db.select().from(schema.pricesDaily).where(eq(schema.pricesDaily.source, 'plaid'));
-    expect(shared.map((row) => [row.ticker, row.date, row.close])).toEqual([['VTI', '2026-10-08', 101]]);
+    expect(await deps.db.select().from(schema.pricesDaily).where(eq(schema.pricesDaily.source, 'plaid'))).toEqual([]);
 
-    // The household still sees its institution's prices for the rest.
+    // Plaid's close (2026-10-08) is newer than the shared one, so it's shown.
     const closes = (await api('/api/quotes')).body.closes as { ticker: string; close: number }[];
-    expect(Object.fromEntries(closes.map((row) => [row.ticker, row.close]))).toEqual({ VTI: 101, BND: 500, VXUS: 100, MYPLAN: 10 });
+    expect(Object.fromEntries(closes.map((row) => [row.ticker, row.close]))).toEqual({ VTI: 101, MYPLAN: 10 });
+
+    // Another household holding VTI sees only the shared close.
+    const other = await createHousehold(deps, 'Other', 'other@example.com');
+    const asOther = client(deps, other.cookie);
+    const created = await asOther('/api/accounts', { method: 'POST', json: { name: 'Brokerage', type: 'investment', currency: 'USD' } });
+    expect((await asOther(`/api/accounts/${created.body.id}/holdings`, { method: 'PUT', json: { holdings: [{ ticker: 'VTI', quantity: 1 }], version: 0 } })).status).toBe(200);
+    expect((await asOther('/api/quotes')).body.closes).toEqual([expect.objectContaining({ ticker: 'VTI', close: 100 })]);
   });
 });
 
