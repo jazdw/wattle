@@ -192,6 +192,40 @@ describe('household activity', () => {
     expect(theirs.entries.map((entry) => entry.kind)).toEqual(['nightly']);
   });
 
+  it('lists background jobs that failed for good, for their household only', async () => {
+    const { deps, home, api, connection } = await linked();
+    const at = deps.now().getTime();
+    await deps.db.insert(schema.jobs).values({
+      id: 'failed-1',
+      householdId: home.householdId,
+      connectionId: connection.id,
+      type: 'history_block',
+      payload: {},
+      status: 'failed',
+      attempts: 4,
+      runAfter: at,
+      createdAt: at,
+      finishedAt: at + 1,
+      errorCode: 'INTERRUPTED',
+      errorMessage: 'Stopped before finishing.',
+    });
+    const { entries } = (await api('/api/activity')).body as ActivityResponse;
+    expect(entries[0]).toEqual({
+      kind: 'job',
+      id: 'failed-1',
+      startedAt: at + 1,
+      type: 'history_block',
+      connectionId: connection.id,
+      institutionName: 'Vanguard',
+      attempts: 4,
+      errorCode: 'INTERRUPTED',
+      errorMessage: 'Stopped before finishing.',
+    });
+    const other = await createHousehold(deps, 'Other', 'other@example.com');
+    const theirs = (await client(deps, other.cookie)('/api/activity')).body as ActivityResponse;
+    expect(theirs.entries.some((entry) => entry.kind === 'job')).toBe(false);
+  });
+
   it('pages back without skipping entries that started at the same moment', async () => {
     const { api } = await linked(); // the test clock stands still: every entry has the same start time
     const all = ((await api('/api/activity')).body as ActivityResponse).entries;

@@ -19,7 +19,7 @@ import type { BatchItem } from 'drizzle-orm/batch';
 import type { ActivityEntry, ActivityResponse, SyncChange, SyncRunSummary } from '../../shared/types';
 import { PlaidApiError, type PlaidApi, type PlaidCall } from '../adapters/plaid';
 import { runBatch } from '../db/batch';
-import { connections, jobRuns, priceRuns, snapshotRuns, syncRuns, type SYNC_ACTIONS, type SYNC_TRIGGERS } from '../db/schema';
+import { connections, jobRuns, jobs, priceRuns, snapshotRuns, syncRuns, type SYNC_ACTIONS, type SYNC_TRIGGERS } from '../db/schema';
 import type { Tenant } from '../db/tenant';
 import type { Deps } from '../ports';
 import { describeError } from '../lib/errors';
@@ -229,7 +229,7 @@ export interface ActivityCursor {
   id: string;
 }
 
-const KIND_ORDER: ActivityEntry['kind'][] = ['run', 'snapshot', 'nightly'];
+const KIND_ORDER: ActivityEntry['kind'][] = ['run', 'snapshot', 'nightly', 'job'];
 const entryId = (entry: ActivityEntry) => (entry.kind === 'run' ? entry.run.id : entry.id);
 
 function compareEntries(a: { startedAt: number; kind: ActivityEntry['kind']; id: string }, b: typeof a): number {
@@ -247,8 +247,9 @@ function afterCursor(cursor: ActivityCursor | null, kind: ActivityEntry['kind'],
 
 /**
  * A page of the household's activity after `cursor`, newest first: every
- * login's runs, every snapshot, and the nightly job (shared by all
- * households: only its date and whether it finished are shown).
+ * login's runs, every snapshot, the nightly job (shared by all households:
+ * only its date and whether it finished are shown), and background jobs that
+ * failed for good (when they failed).
  */
 export async function householdActivity(deps: Deps, tenant: Tenant, cursor: ActivityCursor | null, limit: number): Promise<ActivityResponse> {
   const now = deps.now().getTime();
@@ -285,11 +286,26 @@ export async function householdActivity(deps: Deps, tenant: Tenant, cursor: Acti
     .where(tenant.scope(snapshotRuns, afterCursor(cursor, 'snapshot', snapshotRuns.startedAt, snapshotRuns.id)))
     .orderBy(desc(snapshotRuns.startedAt), asc(snapshotRuns.id))
     .limit(limit);
-  const jobs = await deps.db
+  const nightlyRuns = await deps.db
     .select({ id: jobRuns.id, date: jobRuns.date, status: jobRuns.status, startedAt: jobRuns.startedAt, finishedAt: jobRuns.finishedAt })
     .from(jobRuns)
     .where(afterCursor(cursor, 'nightly', jobRuns.startedAt, jobRuns.id))
     .orderBy(desc(jobRuns.startedAt), asc(jobRuns.id))
+    .limit(limit);
+
+  const failedJobs = await tenant.db
+    .select({
+      id: jobs.id,
+      finishedAt: jobs.finishedAt,
+      type: jobs.type,
+      connectionId: jobs.connectionId,
+      attempts: jobs.attempts,
+      errorCode: jobs.errorCode,
+      errorMessage: jobs.errorMessage,
+    })
+    .from(jobs)
+    .where(tenant.scope(jobs, eq(jobs.status, 'failed'), afterCursor(cursor, 'job', jobs.finishedAt, jobs.id)))
+    .orderBy(desc(jobs.finishedAt), asc(jobs.id))
     .limit(limit);
 
   const entries: ActivityEntry[] = [
@@ -301,14 +317,20 @@ export async function householdActivity(deps: Deps, tenant: Tenant, cursor: Acti
       run,
     })),
     ...snapshots.map(({ householdId: _householdId, ...snapshot }) => ({ kind: 'snapshot' as const, ...snapshot })),
-    ...jobs.map(({ status, ...job }) => {
+    ...nightlyRuns.map(({ status, ...job }) => {
       const stopped = status === 'interrupted' || (status === 'running' && now - job.startedAt > NIGHTLY_MAX_MS);
       return { kind: 'nightly' as const, ...job, state: stopped ? ('interrupted' as const) : status === 'running' ? ('running' as const) : ('finished' as const) };
     }),
+    ...failedJobs.map(({ finishedAt, ...job }) => ({
+      kind: 'job' as const,
+      ...job,
+      startedAt: finishedAt ?? 0,
+      institutionName: job.connectionId ? (names.get(job.connectionId) ?? 'A login') : null,
+    })),
   ].sort((a, b) => compareEntries({ ...a, id: entryId(a) }, { ...b, id: entryId(b) }));
   // Each source gave at most `limit` after the cursor, so the first `limit` merged are complete.
   const page = entries.slice(0, limit);
-  const more = entries.length > limit || runs.length === limit || snapshots.length === limit || jobs.length === limit;
+  const more = entries.length > limit || [runs, snapshots, nightlyRuns, failedJobs].some((rows) => rows.length === limit);
   const last = page.at(-1);
   return { entries: page, next: more && last ? { startedAt: last.startedAt, kind: last.kind, id: entryId(last) } : null };
 }
