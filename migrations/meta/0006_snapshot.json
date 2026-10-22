@@ -1,7 +1,7 @@
 {
   "version": "6",
   "dialect": "sqlite",
-  "id": "6b72c749-e65b-4897-b73d-2fb8d408f1d2",
+  "id": "f6edcddd-6d70-470c-9067-0db93c6263af",
   "prevId": "b20f2b2b-e10f-4181-a1e8-e14398247b0e",
   "tables": {
     "account_daily": {
@@ -534,6 +534,13 @@
         },
         "history_stale_at": {
           "name": "history_stale_at",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "missed_retry_at": {
+          "name": "missed_retry_at",
           "type": "integer",
           "primaryKey": false,
           "notNull": false,
