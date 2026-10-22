@@ -11,15 +11,18 @@ const card = (title: string) => screen.getByText(title, { selector: 'h3' }).clos
 const accountRow = (name: string) => screen.getByText(name).closest('li') as HTMLElement;
 
 describe('Accounts page', () => {
-  it('offers Reload history only for a login whose history stopped retrying (or failed)', async () => {
+  it('offers Reload history only for a login whose history failed', async () => {
     const first = renderPage(<Accounts />);
     await screen.findByText('Sapphire');
     expect(screen.queryByRole('button', { name: 'Reload history' })).not.toBeInTheDocument();
     first.unmount();
 
     server.use(
-      http.get('*/api/status', () =>
-        HttpResponse.json({ nightly: null, interrupted: [], historyStopped: [{ connectionId: 'c-chase', institutionName: 'Chase' }] }),
+      http.get('*/api/connections', () =>
+        HttpResponse.json({
+          ...CONNECTIONS,
+          connections: CONNECTIONS.connections.map((connection) => (connection.id === 'c-chase' ? { ...connection, backfillStatus: 'failed' } : connection)),
+        }),
       ),
     );
     const { user } = renderPage(<Accounts />);

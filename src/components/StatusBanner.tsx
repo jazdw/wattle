@@ -12,11 +12,26 @@ const ACTION_TEXT: Record<StatusResponse['interrupted'][number]['action'], strin
   account: 'an account change',
 };
 
+const JOB_TEXT: Record<StatusResponse['failedJobs'][number]['type'], string> = {
+  sync: 'syncing',
+  snapshot: "updating the day's snapshot",
+  nightly_finish: 'finishing the nightly update',
+  history_plan: 'loading history',
+  history_prices: 'loading price history',
+  history_block: 'loading history',
+  history_finish: 'loading history',
+  report_collect: 'collecting balance history',
+  report_account: 'collecting balance history',
+  report_finish: 'collecting balance history',
+};
+
 const day = (time: number) => new Date(time).toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
 
 /**
- * Warns when background work didn't finish: a Worker stopped part-way (CPU or
- * time limit) can't report it, so it's found afterwards (see /api/status).
+ * Warns when background work didn't finish: the nightly update, a run stopped
+ * part-way (a Worker limit can't be reported as it happens, so it's found
+ * afterwards), or a background job that failed after its retries (see
+ * /api/status).
  */
 export function StatusBanner() {
   const { data } = useStatus();
@@ -24,12 +39,19 @@ export function StatusBanner() {
   const messages: string[] = [];
   if (data.nightly?.state === 'interrupted') messages.push(`The nightly update of ${data.nightly.date} was stopped before it finished.`);
   if (data.nightly?.state === 'late') messages.push(`The nightly update hasn't run since ${data.nightly.date}.`);
-  for (const login of data.historyStopped) {
-    messages.push(`${login.institutionName}: history was stopped part-way several times in a row, so it no longer retries on its own. Use Reload history on its Accounts card to try again.`);
+  // One message per login and kind of work (a load's several parts fail together).
+  const failed = new Map<string, string>();
+  for (const job of data.failedJobs) {
+    const what = JOB_TEXT[job.type];
+    const key = `${job.connectionId ?? ''}:${what}`;
+    if (failed.has(key)) continue;
+    const how = job.errorCode === 'INTERRUPTED' ? 'was stopped part-way every time it ran' : `failed after ${job.attempts} attempts`;
+    const fix = job.type.startsWith('history_') ? ' Use Reload history on its Accounts card to try again.' : '';
+    failed.set(key, `${job.institutionName ? `${job.institutionName}: ` : ''}${what} ${how} (${day(job.finishedAt)}).${fix}`);
   }
-  const stopped = new Set(data.historyStopped.map((login) => login.connectionId));
+  messages.push(...failed.values());
   const latest = new Map<string, StatusResponse['interrupted'][number]>();
-  for (const run of data.interrupted) if (!stopped.has(run.connectionId) && !latest.has(run.connectionId)) latest.set(run.connectionId, run);
+  for (const run of data.interrupted) if (!latest.has(run.connectionId)) latest.set(run.connectionId, run);
   for (const run of latest.values()) {
     messages.push(`${run.institutionName}: ${ACTION_TEXT[run.action]} was stopped part-way on ${day(run.startedAt)}. It's retried automatically.`);
   }

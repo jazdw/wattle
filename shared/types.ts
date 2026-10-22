@@ -108,6 +108,19 @@ export interface AccountSummary {
   possibleDuplicateOf: string | null;
 }
 
+/** Kinds of background job (server/db/schema.ts JOB_TYPES). */
+export type JobType =
+  | 'sync'
+  | 'snapshot'
+  | 'nightly_finish'
+  | 'history_plan'
+  | 'history_prices'
+  | 'history_block'
+  | 'history_finish'
+  | 'report_collect'
+  | 'report_account'
+  | 'report_finish';
+
 /** One entry in the household's activity: a login's run, a snapshot, or the nightly job. */
 export type ActivityEntry =
   | { kind: 'run'; startedAt: number; connectionId: string; institutionName: string; run: SyncRunSummary }
@@ -141,8 +154,15 @@ export interface StatusResponse {
   nightly: { date: string; state: 'finished' | 'running' | 'interrupted' | 'late' } | null;
   /** This household's runs stopped part-way in the last three days. */
   interrupted: { connectionId: string; institutionName: string; action: SyncRunSummary['action']; startedAt: number }[];
-  /** Logins whose history work keeps being stopped, so it no longer runs on its own. */
-  historyStopped: { connectionId: string; institutionName: string }[];
+  /** This household's background jobs that failed for good (after their retries) in the last three days. */
+  failedJobs: {
+    type: JobType;
+    connectionId: string | null;
+    institutionName: string | null;
+    finishedAt: number;
+    errorCode: string | null;
+    attempts: number;
+  }[];
 }
 
 export interface ConnectionsResponse {

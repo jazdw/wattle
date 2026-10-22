@@ -88,7 +88,7 @@ function quoteProvider(env: RawEnv) {
 }
 
 /** Build the dependency set from environment variables and a database. */
-export function depsFromEnv(env: RawEnv, db: Db, jobQueue: Deps['jobQueue'], background: Deps['background']): Deps {
+export function depsFromEnv(env: RawEnv, db: Db, jobQueue: Deps['jobQueue']): Deps {
   const deps: Deps = {
     db,
     jobQueue,
@@ -105,7 +105,6 @@ export function depsFromEnv(env: RawEnv, db: Db, jobQueue: Deps['jobQueue'], bac
     quotes: quoteProvider(env),
     fx: env.FX_PROVIDER === 'none' ? null : createFrankfurter(),
     now: () => new Date(),
-    background,
     sleep: (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
   };
   // Back off from a provider that says "too many requests". Tiingo's prices

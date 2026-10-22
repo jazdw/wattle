@@ -106,8 +106,6 @@ export interface Deps {
   fx: FxProvider | null;
   now: () => Date;
   jobQueue: JobQueue;
-  /** Keep work running after the response is sent (ctx.waitUntil on Workers). */
-  background: (work: Promise<unknown>) => void;
   /** Wait (e.g. for a lease); tests make it instant. */
   sleep: (ms: number) => Promise<void>;
 }

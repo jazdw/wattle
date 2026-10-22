@@ -19,9 +19,9 @@ interface Env extends RawEnv {
   JOBS: Queue<JobMessage>;
 }
 
-function deps(env: Env, ctx: ExecutionContext) {
+function deps(env: Env) {
   const db = drizzle(env.DB, { schema }) as unknown as Db;
-  return depsFromEnv(env, db, cloudflareJobQueue(env.JOBS), (work) => ctx.waitUntil(work));
+  return depsFromEnv(env, db, cloudflareJobQueue(env.JOBS));
 }
 
 let app: ReturnType<typeof createApp> | null = null;
@@ -29,16 +29,16 @@ let app: ReturnType<typeof createApp> | null = null;
 export default {
   fetch(request, env, ctx) {
     app ??= createApp({ assets: env.ASSETS ? (req) => env.ASSETS!.fetch(req) : undefined });
-    return app.fetch(request, { deps: deps(env, ctx) }, ctx);
+    return app.fetch(request, { deps: deps(env) }, ctx);
   },
   /** One job per message (max_batch_size 1), so each has an invocation's limits to itself. */
-  async queue(batch, env, ctx) {
-    const jobDeps = deps(env, ctx);
+  async queue(batch, env) {
+    const jobDeps = deps(env);
     await consumeJobs(batch, (id) => runJob(jobDeps, id));
   },
-  async scheduled(_controller, env, ctx) {
+  async scheduled(_controller, env) {
     try {
-      await runDaily(deps(env, ctx));
+      await runDaily(deps(env));
     } catch (error) {
       // Rethrown without the original, whose message can carry query values,
       // so the run still shows as failed.

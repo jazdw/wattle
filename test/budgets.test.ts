@@ -1,6 +1,7 @@
 /**
  * Work budgets: how many database calls, rows written and outside requests
- * the main operations make with realistically sized data. Workers count
+ * the main operations make with realistically sized data: each request, and
+ * each background job (each runs in an invocation of its own). Workers count
  * these per invocation (Free: 50 outside requests, 1,000 to Cloudflare
  * services; D1 Free: 100,000 rows written a day), and the work behind them
  * (mostly building statements) is most of the CPU time. Counts, not timings,
@@ -13,9 +14,12 @@
 import { describe, expect, it } from 'vitest';
 import type { InvestmentTransaction } from 'plaid';
 import type { Deps } from '../server/ports';
+import { eq } from 'drizzle-orm';
+import * as schema from '../server/db/schema';
+import { runJob } from '../server/services/jobHandlers';
 import { runDaily } from '../server/services/jobs';
 import { account, closes, fakeFx, fakePlaid, fakePrices, holding, security } from './fakes';
-import { client, createHousehold, createTestDeps, dbStats, flush } from './helpers';
+import { client, createHousehold, createTestDeps, dbStats, runDueJobs } from './helpers';
 
 const ETFS = Array.from({ length: 25 }, (_, index) => `E${String(index).padStart(2, '0')}`);
 const FUNDS = ['FNDAX', 'FNDBX', 'FNDCX', 'FNDDX', 'FNDEX'];
@@ -74,6 +78,21 @@ async function measure(deps: Deps, outside: () => number, operation: () => Promi
   };
 }
 
+type Work = Awaited<ReturnType<typeof measure>>;
+
+/** Run due jobs one at a time, measuring each (each runs in its own invocation on Workers). */
+async function measureJobs(deps: Deps, outside: () => number) {
+  const jobs: (Work & { type: string })[] = [];
+  await runDueJobs(deps, async (id) => {
+    const [row] = await deps.db.select({ type: schema.jobs.type }).from(schema.jobs).where(eq(schema.jobs.id, id));
+    jobs.push({ type: row.type, ...(await measure(deps, outside, () => runJob(deps, id))) });
+  });
+  return jobs;
+}
+
+const largest = (jobs: Work[], key: keyof Work) => Math.max(0, ...jobs.map((job) => job[key]));
+const total = (jobs: Work[], key: keyof Work) => jobs.reduce((sum, job) => sum + job[key], 0);
+
 async function linkedBrokerage() {
   const plaid = brokerage();
   const { prices, fx } = marketData();
@@ -81,35 +100,51 @@ async function linkedBrokerage() {
   const home = await createHousehold(deps, 'Home', 'me@example.com');
   const api = client(deps, home.cookie);
   const outside = () => plaid.state.requests + prices.calls.length + fx.calls.length;
-  const link = await measure(deps, outside, async () => {
+  // The link request itself (the first sync), then its background jobs.
+  const request = await measure(deps, outside, async () => {
     expect((await api('/api/plaid/exchange', { method: 'POST', json: { publicToken: 'p', kind: 'investments' } })).status).toBe(200);
-    await flush(deps); // the history load and snapshot run after the response, in the same invocation
   });
-  return { deps, api, plaid, outside, link };
+  const jobs = await measureJobs(deps, outside);
+  return { deps, api, plaid, outside, request, jobs };
 }
 
 /** Measured (2026-10-21) → budget. */
 describe('work budgets (2 accounts, 30 positions, 500 transactions, 2 years)', () => {
-  it('first link, with its history load', async () => {
-    const { link } = await linkedBrokerage();
-    // 37 requests: Plaid ~7, one Tiingo history request per ticker. Workers Free stops at 50.
-    expect(link.outside).toBeLessThanOrEqual(45);
-    expect(link.dbCalls).toBeLessThanOrEqual(140); // 113
-    // Statements are built one by one (Drizzle), the main CPU cost: 3,587.
-    expect(link.statements).toBeLessThanOrEqual(4_500);
-    // 46,691: two years of daily rows per position. D1 Free allows 100,000 a day (indexes count too).
-    expect(link.rowsWritten).toBeLessThanOrEqual(60_000);
+  it('first link: the request, and each of its background jobs', async () => {
+    const { request, jobs } = await linkedBrokerage();
+    expect(request.outside).toBeLessThanOrEqual(8); // 6
+    expect(request.dbCalls).toBeLessThanOrEqual(25); // 18
+
+    // Every job fits an invocation of its own: well under Workers Free's 50
+    // outside requests, and about JOB_CHUNK_ROWS (1,000) rows built.
+    expect(largest(jobs, 'outside')).toBeLessThanOrEqual(8); // 6
+    expect(largest(jobs, 'dbCalls')).toBeLessThanOrEqual(25); // 19
+    // Statements are built one by one (Drizzle): the main CPU cost.
+    expect(largest(jobs, 'statements')).toBeLessThanOrEqual(150); // 119
+    expect(largest(jobs, 'rowsWritten')).toBeLessThanOrEqual(1_400); // 1,081
+    // The whole load: two years of daily rows per position (D1 Free allows
+    // 100,000 rows written a day, indexes counting too), and one Tiingo
+    // history request per ticker.
+    expect(total(jobs, 'rowsWritten')).toBeLessThanOrEqual(60_000); // 46,318
+    expect(total(jobs, 'outside')).toBeLessThanOrEqual(45); // 37
+    expect(jobs.length).toBeLessThanOrEqual(70); // 57
   });
 
   it('the nightly job', async () => {
     const { deps, outside } = await linkedBrokerage();
     const later = deps.now().getTime() + 86400_000;
     deps.now = () => new Date(later);
-    const nightly = await measure(deps, outside, () => runDaily(deps));
-    expect(nightly.outside).toBeLessThanOrEqual(8); // 5
-    expect(nightly.dbCalls).toBeLessThanOrEqual(70); // 55
-    expect(nightly.statements).toBeLessThanOrEqual(220); // 176
-    expect(nightly.rowsWritten).toBeLessThanOrEqual(200); // 158
+    const cron = await measure(deps, outside, () => runDaily(deps));
+    const jobs = await measureJobs(deps, outside);
+    // The cron only does upkeep and adds the night's jobs.
+    expect(cron.outside).toBeLessThanOrEqual(2); // 1
+    expect(cron.dbCalls).toBeLessThanOrEqual(18); // 14
+    // A sync, a snapshot and the finish, each in its own invocation.
+    expect(jobs.map((job) => job.type).sort()).toEqual(['nightly_finish', 'snapshot', 'sync']);
+    expect(largest(jobs, 'outside')).toBeLessThanOrEqual(5); // 3
+    expect(largest(jobs, 'dbCalls')).toBeLessThanOrEqual(33); // 26
+    expect(largest(jobs, 'statements')).toBeLessThanOrEqual(170); // 137
+    expect(total(jobs, 'rowsWritten')).toBeLessThanOrEqual(220); // 165
   });
 
   it('page loads', async () => {
@@ -122,7 +157,7 @@ describe('work budgets (2 accounts, 30 positions, 500 transactions, 2 years)', (
       '/api/history?range=2Y&group=total': 13, // 10
       '/api/history?range=2Y&group=category': 10, // 8
       '/api/quotes': 4, // 3
-      '/api/status': 5, // 4
+      '/api/status': 9, // 7, with the job sweep
       '/api/activity': 5, // 4
     };
     for (const [path, budget] of Object.entries(budgets)) {

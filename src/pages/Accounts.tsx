@@ -14,7 +14,7 @@ import { Button } from '../components/ui/button';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '../components/ui/card';
 import { Dialog, DialogContent } from '../components/ui/dialog';
 import { Alert, Skeleton } from '../components/ui/misc';
-import { useAccounts, useConnections, useStatus } from '../hooks/queries';
+import { useAccounts, useConnections } from '../hooks/queries';
 import { useAuth, useOwnerName } from '../hooks/useAuth';
 import { accountKind, money, relativeTime } from '../lib/format';
 
@@ -76,9 +76,7 @@ export function Accounts() {
     const found = accounts.data?.accounts.find((row) => row.id === id);
     return found ? `${found.name}${found.institutionName ? ` at ${found.institutionName}` : ''}` : 'another account';
   };
-  // History that failed, or stopped retrying after being stopped part-way, can be asked for again.
-  const status = useStatus();
-  const historyStopped = new Set(status.data?.historyStopped.map((login) => login.connectionId));
+  // History that failed (after its jobs' retries) can be asked for again.
   const reloadHistory = useMutation({
     mutationFn: (id: string) => api(`/api/connections/${id}/backfill`, { method: 'POST' }),
     onSuccess: () => void queryClient.invalidateQueries(),
@@ -175,7 +173,7 @@ export function Accounts() {
                   <Button variant="outline" size="sm" onClick={() => sync.mutate(connection.id)} disabled={sync.isPending}>
                     <RefreshCw className={sync.isPending && sync.variables === connection.id ? 'animate-spin' : undefined} /> Sync
                   </Button>
-                  {connection.status === 'ok' && (connection.backfillStatus === 'failed' || historyStopped.has(connection.id)) && (
+                  {connection.status === 'ok' && connection.backfillStatus === 'failed' && (
                     <Button variant="outline" size="sm" onClick={() => reloadHistory.mutate(connection.id)} disabled={reloadHistory.isPending}>
                       <RotateCcw /> Reload history
                     </Button>

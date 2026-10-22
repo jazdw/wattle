@@ -10,14 +10,13 @@ import { requireAuth } from '../auth/routes';
 import { connections } from '../db/schema';
 import { Tenant } from '../db/tenant';
 import type { AppEnv } from '../env';
-import { describeError } from '../lib/errors';
 import { HttpError, notFound, readBody } from '../lib/http';
 import type { Deps } from '../ports';
 import { runAtomic } from '../db/batch';
 import { SyncRun } from '../services/activity';
-import { backfillConnection } from '../services/backfill';
+import { queueHistory } from '../services/backfill';
+import { enqueue } from '../services/jobRunner';
 import { verifyPlaidWebhook } from '../services/plaidWebhook';
-import { snapshotHousehold } from '../services/snapshots';
 import { accessTokenFor, getConnection, INACTIVE, linkConnection, statusStatement, syncConnection } from '../services/sync';
 import { marketDate } from '../../shared/dates';
 
@@ -73,14 +72,9 @@ plaidRoutes.post('/exchange', requireAuth, async (c) => {
   // The history load runs after responding (it can take a while).
   const result = await syncConnection(deps, tenant, connection.id, 'link', { lease, history: false });
 
-  // History and today's snapshot can take a while; finish after responding.
-  const hook = webhookUrl(c.req.url);
-  deps.background(
-    (async () => {
-      await backfillConnection(deps, tenant, connection.id, hook, 'link');
-      await snapshotHousehold(deps, tenant, marketDate(deps.now()));
-    })().catch((error) => console.error('Post-link work failed', describeError(error))),
-  );
+  // The history load and today's snapshot run as background jobs.
+  await queueHistory(deps, tenant, connection.id, 'load', 'link', webhookUrl(c.req.url));
+  await enqueue(deps, tenant, [{ type: 'snapshot', payload: { date: marketDate(deps.now()), trigger: 'change' } }]);
   return c.json({ connectionId: connection.id, ...result });
 });
 
@@ -142,13 +136,17 @@ plaidRoutes.post('/webhook', async (c) => {
   const setStatus = (status: 'login_required' | 'error', errorCode: string | null) =>
     record(statusStatement(tenant, connection.id, { status, errorCode }, observedAt));
 
+  // A sync job (which also redoes today's snapshot). Plaid often sends several
+  // webhooks at once (holdings and transactions): one job per minute serves them all.
   const sync = () =>
-    deps.background(
-      (async () => {
-        await syncConnection(deps, tenant, connection.id, 'webhook');
-        await snapshotHousehold(deps, tenant, marketDate(deps.now()));
-      })().catch((error) => console.error('Webhook sync failed', describeError(error))),
-    );
+    enqueue(deps, tenant, [
+      {
+        id: `webhook-sync:${connection.id}:${Math.floor(observedAt / 60_000)}`,
+        type: 'sync',
+        payload: { connectionId: connection.id, trigger: 'webhook' },
+        connectionId: connection.id,
+      },
+    ]);
 
   switch (eventName) {
     case 'HOLDINGS:DEFAULT_UPDATE':
@@ -158,7 +156,7 @@ plaidRoutes.post('/webhook', async (c) => {
     // under the connection's lease.
     case 'ASSETS:PRODUCT_READY':
     case 'ASSETS:ERROR':
-      sync();
+      await sync();
       break;
     case 'ITEM:ERROR':
       await setStatus(

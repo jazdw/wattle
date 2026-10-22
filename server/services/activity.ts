@@ -13,7 +13,7 @@
  * still-running row into an INTERRUPTED error (closeInterruptedRuns), since
  * nothing else can be running then.
  */
-import { and, asc, desc, eq, gt, gte, lt, lte, ne, or, sql, type SQL } from 'drizzle-orm';
+import { and, asc, desc, eq, gt, lt, lte, ne, or, sql, type SQL } from 'drizzle-orm';
 import type { SQLiteColumn } from 'drizzle-orm/sqlite-core';
 import type { BatchItem } from 'drizzle-orm/batch';
 import type { ActivityEntry, ActivityResponse, SyncChange, SyncRunSummary } from '../../shared/types';
@@ -34,10 +34,11 @@ const RETENTION_DAYS = 730;
 /** Error code of a run that was stopped part-way. */
 export const INTERRUPTED = 'INTERRUPTED';
 export const INTERRUPTED_MESSAGE = 'Stopped before finishing, most likely by a Worker limit (CPU time, run time or requests). Its finished steps are kept.';
-/** Longer than a Cron Trigger may run: a daily job still 'running' after this was stopped. */
-export const JOB_MAX_MS = 20 * 60 * 1000;
-/** History work stopped part-way this many times in a row isn't retried on its own. */
-export const MAX_INTERRUPTED_HISTORY = 3;
+/**
+ * A night's jobs finish within minutes; a daily job still 'running' after
+ * this didn't finish (its jobs ran out of attempts, or weren't all added).
+ */
+export const NIGHTLY_MAX_MS = 6 * 3600 * 1000;
 
 export class SyncRun {
   readonly plaidCalls: PlaidCall[] = [];
@@ -47,7 +48,7 @@ export class SyncRun {
   error: { code: string | null; message: string } | null = null;
   /** Shown with the run: why it was skipped, or something worth knowing. */
   note: string | null = null;
-  private readonly id = crypto.randomUUID();
+  readonly id: string;
   private readonly deps: Deps;
   private readonly tenant: Tenant;
   private readonly connectionId: string;
@@ -56,7 +57,9 @@ export class SyncRun {
   private readonly startedAt: number;
   private begun = false;
 
-  constructor(deps: Deps, tenant: Tenant, connectionId: string, action: SyncAction, trigger: SyncTrigger) {
+  /** `id`: given when the run spans several jobs (a history load), so each can find its row. */
+  constructor(deps: Deps, tenant: Tenant, connectionId: string, action: SyncAction, trigger: SyncTrigger, id: string = crypto.randomUUID()) {
+    this.id = id;
     this.deps = deps;
     this.tenant = tenant;
     this.connectionId = connectionId;
@@ -94,7 +97,12 @@ export class SyncRun {
    */
   async begin(): Promise<void> {
     if (this.begun) return;
-    await this.tenant.db.insert(syncRuns).values({ ...this.values('running'), finishedAt: this.startedAt });
+    // A job running again (after being stopped part-way) starts its row afresh.
+    const values = { ...this.values('running'), finishedAt: this.startedAt };
+    await this.tenant.db
+      .insert(syncRuns)
+      .values(values)
+      .onConflictDoUpdate({ target: syncRuns.id, set: values, setWhere: eq(syncRuns.householdId, this.tenant.householdId) });
     this.begun = true;
   }
 
@@ -103,7 +111,7 @@ export class SyncRun {
    * `skipped`, the run looked but had nothing to do (`note` says why).
    * Completes the row begin() wrote, if any.
    */
-  statement(outcome: 'ok' | 'skipped' = 'ok'): BatchItem<'sqlite'> {
+  statement(outcome: 'ok' | 'skipped' | 'running' = 'ok'): BatchItem<'sqlite'> {
     const values = this.values(outcome);
     return this.tenant.db
       .insert(syncRuns)
@@ -165,7 +173,9 @@ export class SyncRun {
 
 /**
  * Mark runs still 'running' for this connection as stopped part-way. Call
- * holding the connection's lease: no run of it can be going on then.
+ * holding the connection's lease: no run of it can be going on then. History
+ * loads aren't included: they run as several jobs over time (not under the
+ * lease throughout), and their jobs record a stopped attempt themselves.
  */
 export async function closeInterruptedRuns(deps: Deps, tenant: Tenant, connectionId: string): Promise<number> {
   const closed = await tenant.db
@@ -176,33 +186,40 @@ export async function closeInterruptedRuns(deps: Deps, tenant: Tenant, connectio
       errorMessage: INTERRUPTED_MESSAGE,
       finishedAt: deps.now().getTime(),
     })
-    .where(tenant.scope(syncRuns, eq(syncRuns.connectionId, connectionId), eq(syncRuns.outcome, 'running')))
+    .where(tenant.scope(syncRuns, eq(syncRuns.connectionId, connectionId), eq(syncRuns.outcome, 'running'), ne(syncRuns.action, 'history')))
     .returning({ id: syncRuns.id });
   return closed.length;
 }
 
 /**
- * History work (a history load or filling missed days) for this connection
- * was stopped part-way MAX_INTERRUPTED_HISTORY times in a row: retrying on
- * its own would only be stopped again, every time. Skipped runs don't count.
+ * Complete a run that spans several jobs (begun by one, finished by another):
+ * its outcome, and counts added to those recorded so far. Returns the
+ * statement in an array, for the batch that writes the run's last data (a
+ * Drizzle statement is "thenable": returned bare from an async function, it
+ * would run on the spot).
  */
-export async function historyKeepsStopping(tenant: Tenant, connectionId: string): Promise<boolean> {
-  const recent = await tenant.db
-    .select({ errorCode: syncRuns.errorCode })
-    .from(syncRuns)
-    .where(tenant.scope(syncRuns, eq(syncRuns.connectionId, connectionId), eq(syncRuns.action, 'history'), ne(syncRuns.outcome, 'skipped')))
-    .orderBy(desc(syncRuns.startedAt), desc(sql`rowid`))
-    .limit(MAX_INTERRUPTED_HISTORY);
-  return recent.length === MAX_INTERRUPTED_HISTORY && recent.every((run) => run.errorCode === INTERRUPTED);
-}
-
-/** Runs (all households) found stopped part-way since `since`: a count, for the nightly report. */
-export async function interruptedSince(deps: Deps, since: number): Promise<number> {
-  const [row] = await deps.db
-    .select({ count: sql<number>`count(*)` })
-    .from(syncRuns)
-    .where(and(eq(syncRuns.errorCode, INTERRUPTED), gte(syncRuns.finishedAt, since)));
-  return row?.count ?? 0;
+export async function completeRunStatements(
+  deps: Deps,
+  tenant: Tenant,
+  runId: string,
+  values: { counts?: Record<string, number>; error?: { code: string | null; message: string } | null; note?: string | null },
+): Promise<BatchItem<'sqlite'>[]> {
+  const [row] = await tenant.db.select({ counts: syncRuns.counts, note: syncRuns.note }).from(syncRuns).where(tenant.scope(syncRuns, eq(syncRuns.id, runId)));
+  const counts = { ...(row?.counts ?? {}) };
+  for (const [key, value] of Object.entries(values.counts ?? {})) counts[key] = (counts[key] ?? 0) + value;
+  return [
+    tenant.db
+      .update(syncRuns)
+      .set({
+        outcome: values.error ? 'error' : 'ok',
+      errorCode: values.error?.code ?? null,
+      errorMessage: values.error?.message.slice(0, 500) ?? null,
+        note: values.note === undefined ? (row?.note ?? null) : values.note,
+        counts,
+        finishedAt: deps.now().getTime(),
+      })
+      .where(tenant.scope(syncRuns, eq(syncRuns.id, runId))),
+  ];
 }
 
 /** Where a page of activity ends: entries sort by start time (newest first), then kind, then id. */
@@ -285,7 +302,7 @@ export async function householdActivity(deps: Deps, tenant: Tenant, cursor: Acti
     })),
     ...snapshots.map(({ householdId: _householdId, ...snapshot }) => ({ kind: 'snapshot' as const, ...snapshot })),
     ...jobs.map(({ status, ...job }) => {
-      const stopped = status === 'interrupted' || (status === 'running' && now - job.startedAt > JOB_MAX_MS);
+      const stopped = status === 'interrupted' || (status === 'running' && now - job.startedAt > NIGHTLY_MAX_MS);
       return { kind: 'nightly' as const, ...job, state: stopped ? ('interrupted' as const) : status === 'running' ? ('running' as const) : ('finished' as const) };
     }),
   ].sort((a, b) => compareEntries({ ...a, id: entryId(a) }, { ...b, id: entryId(b) }));
