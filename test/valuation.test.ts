@@ -34,7 +34,7 @@ describe('daily closes', () => {
     expect(prices.calls).toHaveLength(1);
   });
 
-  it('survives provider failures', async () => {
+  it('survives provider failures, and says which tickers failed', async () => {
     const deps = await createTestDeps({
       prices: {
         name: 'failing',
@@ -43,7 +43,7 @@ describe('daily closes', () => {
         },
       },
     });
-    await expect(ensureCloses(deps, ['VTI'], '2026-09-01', '2026-09-10')).resolves.toBeUndefined();
+    await expect(ensureCloses(deps, ['VTI'], '2026-09-01', '2026-09-10')).resolves.toEqual({ failed: ['VTI'], rateLimited: false });
   });
 });
 

@@ -12,8 +12,9 @@ import { runJob } from '../server/services/jobHandlers';
 import { snapshotHousehold } from '../server/services/snapshots';
 import { syncConnection } from '../server/services/sync';
 import { marketDate } from '../shared/dates';
+import { ProviderHttpError } from '../server/adapters/marketData';
 import { account, closes, fakePlaid, fakePrices, holding, security } from './fakes';
-import { client, createHousehold, createTestDeps, flush } from './helpers';
+import { client, createHousehold, createTestDeps, flush, settle } from './helpers';
 
 const buy = (id: string, accountId: string, securityId: string, date: string, quantity: number, price: number) =>
   ({
@@ -138,5 +139,70 @@ describe('history progress', () => {
     // Another household sees none of it.
     const other = await createHousehold(deps, 'Other', 'other@example.com');
     expect((await client(deps, other.cookie)('/api/connections')).body.connections).toEqual([]);
+  });
+});
+
+describe('history prices', () => {
+  async function linked(failure: () => Error | null) {
+    const plaid = fakePlaid({
+      accounts: [account('brk', 'investment', 3000)],
+      securities: [security('s-vti', 'VTI', 'etf', 100), security('s-bnd', 'BND', 'etf', 70)],
+      holdings: [holding('brk', 's-vti', 20, 100), holding('brk', 's-bnd', 10, 70)],
+      transactions: [buy('t1', 'brk', 's-vti', '2026-03-15', 10, 80)] as never,
+    });
+    const prices = fakePrices({ VTI: closes('2024-09-01', 800, 60, 0.05), BND: closes('2024-09-01', 800, 65, 0.01) });
+    const working = prices.dailyCloses;
+    prices.dailyCloses = async (ticker, start, end) => {
+      const error = ticker === 'VTI' ? failure() : null;
+      if (error) throw error;
+      return working(ticker, start, end);
+    };
+    const deps = await createTestDeps({ plaid, prices });
+    const home = await createHousehold(deps, 'Home', 'me@example.com');
+    const api = client(deps, home.cookie);
+    await api('/api/plaid/exchange', { method: 'POST', json: { publicToken: 'p', kind: 'investments' } });
+    const state = async () => {
+      const [connection] = await deps.db.select().from(schema.connections);
+      const runs = await deps.db.select().from(schema.syncRuns).where(eq(schema.syncRuns.action, 'history'));
+      const backfilled = await deps.db.select().from(schema.holdingDaily).where(eq(schema.holdingDaily.source, 'backfill'));
+      const priceJobs = await deps.db.select().from(schema.jobs).where(eq(schema.jobs.type, 'history_prices'));
+      return { connection, runs, backfilled, priceJobs };
+    };
+    return { deps, api, state };
+  }
+
+  it("fails the load, writing nothing, when a ticker's prices can't be fetched; Reload history then builds it", async () => {
+    let down = true;
+    const { deps, api, state } = await linked(() => (down ? new Error('Tiingo HTTP 500') : null));
+    await settle(deps);
+    const failed = await state();
+    expect(failed.priceJobs.find((job) => (job.payload.tickers as string[]).includes('VTI'))).toMatchObject({ status: 'failed', attempts: 3, errorCode: 'PRICES_UNAVAILABLE' });
+    expect(failed.connection.backfillStatus).toBe('failed'); // offers Reload history
+    expect(failed.runs).toHaveLength(1);
+    expect(failed.runs[0]).toMatchObject({ outcome: 'error', errorCode: 'PRICES_UNAVAILABLE' });
+    expect(failed.backfilled).toEqual([]); // no history estimated without VTI's closes
+
+    down = false;
+    expect((await api(`/api/connections/${failed.connection.id}/backfill`, { method: 'POST' })).body.queued).toBe(true);
+    await settle(deps);
+    const rebuilt = await state();
+    expect(rebuilt.connection.backfillStatus).toBe('done');
+    expect(rebuilt.runs.map((run) => run.outcome).sort()).toEqual(['error', 'ok']);
+    expect(rebuilt.backfilled.length).toBeGreaterThan(700);
+    expect(rebuilt.backfilled.every((row) => !row.estimated)).toBe(true);
+  });
+
+  it('waits out a rate limit without using up attempts', async () => {
+    let limited = 2;
+    const { deps, state } = await linked(() => (limited-- > 0 ? new ProviderHttpError('Tiingo VTI', 429) : null));
+    await flush(deps);
+    const waiting = (await state()).priceJobs.find((job) => (job.payload.tickers as string[]).includes('VTI'))!;
+    expect(waiting).toMatchObject({ status: 'queued', attempts: 0 });
+    expect(waiting.runAfter - deps.now().getTime()).toBe(30 * 60 * 1000);
+    await settle(deps);
+    const done = await state();
+    expect(done.connection.backfillStatus).toBe('done');
+    expect(done.runs[0]).toMatchObject({ outcome: 'ok' });
+    expect(done.backfilled.every((row) => !row.estimated)).toBe(true);
   });
 });
