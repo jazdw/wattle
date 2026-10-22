@@ -3,7 +3,8 @@ import { describe, expect, it } from 'vitest';
 import * as schema from '../server/db/schema';
 import type { Deps } from '../server/ports';
 import { account, closes, fakeFx, fakePlaid, fakePrices, fakeQuotes, holding, security } from './fakes';
-import { client, createHousehold, createTestDeps, flush, nightly, TODAY } from './helpers';
+import { runDaily } from '../server/services/jobs';
+import { client, createHousehold, createTestDeps, flush, nightly, settle, TODAY } from './helpers';
 
 async function household(options: Partial<Deps> = {}) {
   const deps = await createTestDeps(options);
@@ -324,6 +325,47 @@ describe('daily job', () => {
     expect(failed.errors[0]).toContain('network down');
     const rows = await deps.db.select().from(schema.accountDaily).where(eq(schema.accountDaily.householdId, other.householdId));
     expect(rows.some((row) => row.date === TODAY)).toBe(true);
+  });
+
+  it('a second cron trigger for the same night joins the first instead of starting another', async () => {
+    const plaid = fakePlaid({ accounts: [account('chk', 'depository', 50)] });
+    const { deps, api } = await household({ plaid });
+    await api('/api/plaid/exchange', { method: 'POST', json: { publicToken: 'p', kind: 'account' } });
+    await flush(deps);
+    const first = await runDaily(deps);
+    const second = await runDaily(deps);
+    expect(second.id).toBe(first.id);
+    await settle(deps);
+    const runs = await deps.db.select().from(schema.jobRuns);
+    expect(runs.map((run) => run.status)).toEqual(['ok']); // not marked stopped by the second
+    expect((await deps.db.select().from(schema.jobs).where(eq(schema.jobs.type, 'sync'))).length).toBe(1);
+  });
+
+  it("queues the night's jobs before the upkeep, so a cron stopped during it still syncs; upkeep errors are added however late", async () => {
+    const plaid = fakePlaid({ accounts: [account('chk', 'depository', 50)] });
+    let releaseFx!: (error: Error) => void;
+    const working = fakeFx();
+    let stuck = false;
+    const fx = { name: 'stuck-fx', rates: (...args: Parameters<typeof working.rates>) => (stuck ? new Promise<never>((_, reject) => (releaseFx = reject)) : working.rates(...args)) };
+    const { deps, api } = await household({ plaid, fx });
+    await api('/api/plaid/exchange', { method: 'POST', json: { publicToken: 'p', kind: 'account' } });
+    await flush(deps);
+    stuck = true;
+    const later = deps.now().getTime() + 86400_000; // a new day, so FX needs fetching
+    deps.now = () => new Date(later);
+    const cron = runDaily(deps); // stuck in the FX fetch, as if stopped there
+    await expect.poll(async () => (await deps.db.select().from(schema.jobs).where(eq(schema.jobs.type, 'nightly_finish'))).length).toBe(1);
+    await settle(deps);
+    const [finished] = await deps.db.select().from(schema.jobRuns);
+    expect(finished.status).toBe('ok');
+    const sync = (await deps.db.select().from(schema.syncRuns).where(eq(schema.syncRuns.action, 'sync'))).at(-1)!;
+    expect(sync.trigger).toBe('nightly');
+    // The upkeep's failure arrives after the night's jobs finished it: still recorded.
+    releaseFx(new Error('FX provider down'));
+    await cron;
+    const [late] = await deps.db.select().from(schema.jobRuns);
+    expect(late.status).toBe('errors');
+    expect(late.errors.join(' ')).toContain("FX rates: couldn't be fetched");
   });
 
   it('refresh syncs and snapshots for the signed-in household', async () => {

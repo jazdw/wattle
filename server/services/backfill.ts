@@ -18,7 +18,7 @@
  * never overwrite synced, imported or manual rows, and every job can run
  * again safely.
  */
-import { and, eq, gte, inArray, isNull, lt, max, min, or, sql } from 'drizzle-orm';
+import { and, eq, gte, inArray, isNull, lt, max, min, notLike, or, sql } from 'drizzle-orm';
 import type { BatchItem } from 'drizzle-orm/batch';
 import { addDays, dateRange, marketDate, type IsoDate } from '../../shared/dates';
 import { PlaidApiError } from '../adapters/plaid';
@@ -103,19 +103,27 @@ function backfillStatusStatement(tenant: Tenant, connectionId: string, status: C
 }
 
 /** After a fill of missed days: wait before the next if it failed (its days stay carried forward), else none. */
-function missedRetryStatement(deps: Deps, tenant: Tenant, connectionId: string, failed: boolean) {
+export function missedRetryStatement(deps: Deps, tenant: Tenant, connectionId: string, failed: boolean) {
   return tenant.db
     .update(connections)
     .set({ missedRetryAt: failed ? deps.now().getTime() + MISSED_RETRY_MS : null })
     .where(tenant.scope(connections, eq(connections.id, connectionId)));
 }
 
-/** A history job of this connection is queued, waiting or running. */
-async function historyUnderway(tenant: Tenant, connectionId: string): Promise<boolean> {
+/** A history job of this connection is queued, waiting or running (other than run `except`'s, whose ids start history:<run>:). */
+async function historyUnderway(tenant: Tenant, connectionId: string, except?: string): Promise<boolean> {
   const [row] = await tenant.db
     .select({ id: jobs.id })
     .from(jobs)
-    .where(tenant.scope(jobs, eq(jobs.connectionId, connectionId), inArray(jobs.type, HISTORY_JOBS), inArray(jobs.status, ['waiting', 'queued', 'running'])))
+    .where(
+      tenant.scope(
+        jobs,
+        eq(jobs.connectionId, connectionId),
+        inArray(jobs.type, HISTORY_JOBS),
+        inArray(jobs.status, ['waiting', 'queued', 'running']),
+        ...(except ? [notLike(jobs.id, `history:${except}:%`)] : []),
+      ),
+    )
     .limit(1);
   return Boolean(row);
 }
@@ -230,12 +238,17 @@ async function involvedSecurities(tenant: Tenant, accountId: string, start: IsoD
  */
 export async function planHistory({ deps, tenant, job, renew }: JobContext): Promise<Record<string, unknown>> {
   const plan = job.payload as unknown as PlanPayload;
-  const connection = await getConnection(tenant, plan.connectionId);
-  if (!connection || !isActive(connection)) return { skipped: 'not syncing' };
+  const found = await getConnection(tenant, plan.connectionId);
+  if (!found || !isActive(found)) return { skipped: 'not syncing' };
   // Often queued by a sync still finishing: wait a moment for its lease.
-  const lease = await Lease.acquireWaiting(deps, tenant, connectionLease(connection.id));
+  const lease = await Lease.acquireWaiting(deps, tenant, connectionLease(found.id));
   if (!lease) throw new RetryLater(BUSY_RETRY_SECONDS, 'The connection is busy.');
   try {
+    // Read again under the lease (a sync or another plan may have just changed it).
+    const connection = await getConnection(tenant, found.id);
+    if (!connection || !isActive(connection)) return { skipped: 'not syncing' };
+    // Two plans queued at the same moment: the second finds the first's jobs (added under this lease) and stands down.
+    if (await historyUnderway(tenant, connection.id, plan.runId)) return { skipped: 'another history run is underway' };
     const startedAt = deps.now().getTime();
     const today = marketDate(deps.now());
     const run = new SyncRun(deps, tenant, connection.id, 'history', plan.trigger, plan.runId);
@@ -300,7 +313,8 @@ export async function planHistory({ deps, tenant, job, renew }: JobContext): Pro
       if (from < earliest) earliest = from;
       for (const [blockFrom, blockTo] of windows(from, today, daysPerBlock(deps, involved.length))) {
         const block: BlockPayload = { connectionId: connection.id, runId: plan.runId, accountId, mode: plan.mode, start: from, end: today, from: blockFrom, to: blockTo };
-        specs.push({ type: 'history_block', payload: { ...block }, connectionId: connection.id, groupId: blocksGroup(plan.runId) });
+        // Fixed ids: a plan run again (stopped after adding them) adds none twice.
+        specs.push({ id: `history:${plan.runId}:block:${accountId}:${blockFrom}`, type: 'history_block', payload: { ...block }, connectionId: connection.id, groupId: blocksGroup(plan.runId) });
       }
     }
     const perJob = Math.min(MAX_TICKERS_PER_JOB, Math.max(1, Math.floor(deps.config.jobChunkRows / CLOSES_PER_TICKER)));
@@ -308,9 +322,11 @@ export async function planHistory({ deps, tenant, job, renew }: JobContext): Pro
     const priceSpecs: JobSpec[] = [];
     for (let index = 0; index < tickerList.length; index += perJob) {
       const prices: PricesPayload = { tickers: tickerList.slice(index, index + perJob), start: earliest, end: today };
-      priceSpecs.push({ type: 'history_prices', payload: { ...prices }, connectionId: connection.id, groupId: pricesGroup(plan.runId) });
+      priceSpecs.push({ id: `history:${plan.runId}:prices:${index}`, type: 'history_prices', payload: { ...prices }, connectionId: connection.id, groupId: pricesGroup(plan.runId) });
     }
     if (priceSpecs.length > 0) for (const spec of specs) spec.waitsFor = pricesGroup(plan.runId);
+    // A report still outstanding (this plan asked for it on an attempt that was then stopped, or an earlier one did) is waited for too.
+    if (connection.assetReportTokenEnc) reportRequested = true;
     const finish: FinishPayload = { connectionId: connection.id, mode: plan.mode, runId: plan.runId, startedAt, reportRequested };
     if (specs.length > 0) run.count('parts', specs.length);
 
@@ -537,12 +553,13 @@ export async function finishHistory({ deps, tenant, job, renew }: JobContext): P
         .update(connections)
         .set({
           // Still waiting for the bank's report, if one was asked for and it
-          // hasn't been collected meanwhile (checked as this writes).
+          // hasn't been collected (or given up, failing the load) meanwhile:
+          // checked as this writes.
           backfillStatus:
             failed > 0
               ? 'failed'
               : finish.reportRequested
-                ? sql`case when ${connections.assetReportTokenEnc} is not null then 'running' else 'done' end`
+                ? sql`case when ${connections.assetReportTokenEnc} is not null then 'running' when ${connections.backfillStatus} = 'failed' then 'failed' else 'done' end`
                 : connection.hasInvestments
                   ? 'done'
                   : 'skipped',
