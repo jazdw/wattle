@@ -11,6 +11,24 @@ const card = (title: string) => screen.getByText(title, { selector: 'h3' }).clos
 const accountRow = (name: string) => screen.getByText(name).closest('li') as HTMLElement;
 
 describe('Accounts page', () => {
+  it('offers Reload history only for a login whose history stopped retrying (or failed)', async () => {
+    const first = renderPage(<Accounts />);
+    await screen.findByText('Travel Card');
+    expect(screen.queryByRole('button', { name: 'Reload history' })).not.toBeInTheDocument();
+    first.unmount();
+
+    server.use(
+      http.get('*/api/status', () =>
+        HttpResponse.json({ nightly: null, interrupted: [], historyStopped: [{ connectionId: 'c-northwind', institutionName: 'Northwind' }] }),
+      ),
+    );
+    const { user } = renderPage(<Accounts />);
+    const button = await screen.findByRole('button', { name: 'Reload history' });
+    expect(card('Northwind')).toContainElement(button);
+    await user.click(button);
+    await expect.poll(() => sent('POST /api/connections/c-northwind/backfill').length).toBe(1);
+  });
+
   it('lists connections with status, owner and their accounts', async () => {
     renderPage(<Accounts />);
     await screen.findByText('Travel Card');

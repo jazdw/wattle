@@ -116,3 +116,10 @@ export const importHoldingsSchema = z.object({
     .max(20000),
   overwrite: z.boolean().default(false),
 });
+
+/** Where a page of the household's activity ends (GET /api/activity?after=…). */
+export const activityCursorSchema = z.object({
+  startedAt: z.number().int(),
+  kind: z.enum(['run', 'snapshot', 'nightly']),
+  id: z.string().max(100),
+});

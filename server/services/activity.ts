@@ -13,12 +13,13 @@
  * still-running row into an INTERRUPTED error (closeInterruptedRuns), since
  * nothing else can be running then.
  */
-import { and, desc, eq, gte, lt, ne, sql } from 'drizzle-orm';
+import { and, asc, desc, eq, gt, gte, lt, lte, ne, or, sql, type SQL } from 'drizzle-orm';
+import type { SQLiteColumn } from 'drizzle-orm/sqlite-core';
 import type { BatchItem } from 'drizzle-orm/batch';
-import type { SyncChange, SyncRunSummary } from '../../shared/types';
+import type { ActivityEntry, ActivityResponse, SyncChange, SyncRunSummary } from '../../shared/types';
 import { PlaidApiError, type PlaidApi, type PlaidCall } from '../adapters/plaid';
 import { runBatch } from '../db/batch';
-import { jobRuns, priceRuns, syncRuns, type SYNC_ACTIONS, type SYNC_TRIGGERS } from '../db/schema';
+import { connections, jobRuns, priceRuns, snapshotRuns, syncRuns, type SYNC_ACTIONS, type SYNC_TRIGGERS } from '../db/schema';
 import type { Tenant } from '../db/tenant';
 import type { Deps } from '../ports';
 import { describeError } from '../lib/errors';
@@ -32,6 +33,9 @@ const MAX_CHANGES = 500;
 const RETENTION_DAYS = 730;
 /** Error code of a run that was stopped part-way. */
 export const INTERRUPTED = 'INTERRUPTED';
+export const INTERRUPTED_MESSAGE = 'Stopped before finishing, most likely by a Worker limit (CPU time, run time or requests). Its finished steps are kept.';
+/** Longer than a Cron Trigger may run: a daily job still 'running' after this was stopped. */
+export const JOB_MAX_MS = 20 * 60 * 1000;
 /** History work stopped part-way this many times in a row isn't retried on its own. */
 export const MAX_INTERRUPTED_HISTORY = 3;
 
@@ -169,7 +173,7 @@ export async function closeInterruptedRuns(deps: Deps, tenant: Tenant, connectio
     .set({
       outcome: 'error',
       errorCode: INTERRUPTED,
-      errorMessage: 'Stopped before finishing, most likely by a Worker limit (CPU time, run time or requests). Its finished steps are kept.',
+      errorMessage: INTERRUPTED_MESSAGE,
       finishedAt: deps.now().getTime(),
     })
     .where(tenant.scope(syncRuns, eq(syncRuns.connectionId, connectionId), eq(syncRuns.outcome, 'running')))
@@ -199,6 +203,97 @@ export async function interruptedSince(deps: Deps, since: number): Promise<numbe
     .from(syncRuns)
     .where(and(eq(syncRuns.errorCode, INTERRUPTED), gte(syncRuns.finishedAt, since)));
   return row?.count ?? 0;
+}
+
+/** Where a page of activity ends: entries sort by start time (newest first), then kind, then id. */
+export interface ActivityCursor {
+  startedAt: number;
+  kind: ActivityEntry['kind'];
+  id: string;
+}
+
+const KIND_ORDER: ActivityEntry['kind'][] = ['run', 'snapshot', 'nightly'];
+const entryId = (entry: ActivityEntry) => (entry.kind === 'run' ? entry.run.id : entry.id);
+
+function compareEntries(a: { startedAt: number; kind: ActivityEntry['kind']; id: string }, b: typeof a): number {
+  return b.startedAt - a.startedAt || KIND_ORDER.indexOf(a.kind) - KIND_ORDER.indexOf(b.kind) || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0);
+}
+
+/** Rows of one kind that sort after the cursor (several entries can share a start time). */
+function afterCursor(cursor: ActivityCursor | null, kind: ActivityEntry['kind'], startedAt: SQLiteColumn, id: SQLiteColumn): SQL | undefined {
+  if (!cursor) return undefined;
+  const order = KIND_ORDER.indexOf(kind) - KIND_ORDER.indexOf(cursor.kind);
+  if (order < 0) return lt(startedAt, cursor.startedAt);
+  if (order > 0) return lte(startedAt, cursor.startedAt);
+  return or(lt(startedAt, cursor.startedAt), and(eq(startedAt, cursor.startedAt), gt(id, cursor.id)));
+}
+
+/**
+ * A page of the household's activity after `cursor`, newest first: every
+ * login's runs, every snapshot, and the nightly job (shared by all
+ * households: only its date and whether it finished are shown).
+ */
+export async function householdActivity(deps: Deps, tenant: Tenant, cursor: ActivityCursor | null, limit: number): Promise<ActivityResponse> {
+  const now = deps.now().getTime();
+  const names = new Map(
+    (await tenant.db.select({ id: connections.id, name: connections.institutionName }).from(connections).where(tenant.scope(connections))).map((row) => [
+      row.id,
+      row.name ?? 'A login',
+    ]),
+  );
+  const runs = await tenant.db
+    .select({
+      id: syncRuns.id,
+      connectionId: syncRuns.connectionId,
+      action: syncRuns.action,
+      trigger: syncRuns.trigger,
+      startedAt: syncRuns.startedAt,
+      finishedAt: syncRuns.finishedAt,
+      outcome: syncRuns.outcome,
+      errorCode: syncRuns.errorCode,
+      errorMessage: syncRuns.errorMessage,
+      note: syncRuns.note,
+      plaidCalls: syncRuns.plaidCalls,
+      counts: syncRuns.counts,
+      changes: syncRuns.changes,
+      truncated: syncRuns.truncated,
+    })
+    .from(syncRuns)
+    .where(tenant.scope(syncRuns, afterCursor(cursor, 'run', syncRuns.startedAt, syncRuns.id)))
+    .orderBy(desc(syncRuns.startedAt), asc(syncRuns.id))
+    .limit(limit);
+  const snapshots = await tenant.db
+    .select()
+    .from(snapshotRuns)
+    .where(tenant.scope(snapshotRuns, afterCursor(cursor, 'snapshot', snapshotRuns.startedAt, snapshotRuns.id)))
+    .orderBy(desc(snapshotRuns.startedAt), asc(snapshotRuns.id))
+    .limit(limit);
+  const jobs = await deps.db
+    .select({ id: jobRuns.id, date: jobRuns.date, status: jobRuns.status, startedAt: jobRuns.startedAt, finishedAt: jobRuns.finishedAt })
+    .from(jobRuns)
+    .where(afterCursor(cursor, 'nightly', jobRuns.startedAt, jobRuns.id))
+    .orderBy(desc(jobRuns.startedAt), asc(jobRuns.id))
+    .limit(limit);
+
+  const entries: ActivityEntry[] = [
+    ...runs.map(({ connectionId, ...run }) => ({
+      kind: 'run' as const,
+      startedAt: run.startedAt,
+      connectionId,
+      institutionName: names.get(connectionId) ?? 'A login',
+      run,
+    })),
+    ...snapshots.map(({ householdId: _householdId, ...snapshot }) => ({ kind: 'snapshot' as const, ...snapshot })),
+    ...jobs.map(({ status, ...job }) => {
+      const stopped = status === 'interrupted' || (status === 'running' && now - job.startedAt > JOB_MAX_MS);
+      return { kind: 'nightly' as const, ...job, state: stopped ? ('interrupted' as const) : status === 'running' ? ('running' as const) : ('finished' as const) };
+    }),
+  ].sort((a, b) => compareEntries({ ...a, id: entryId(a) }, { ...b, id: entryId(b) }));
+  // Each source gave at most `limit` after the cursor, so the first `limit` merged are complete.
+  const page = entries.slice(0, limit);
+  const more = entries.length > limit || runs.length === limit || snapshots.length === limit || jobs.length === limit;
+  const last = page.at(-1);
+  return { entries: page, next: more && last ? { startedAt: last.startedAt, kind: last.kind, id: entryId(last) } : null };
 }
 
 /** A connection's most recent runs, newest first. */
@@ -233,5 +328,6 @@ export async function pruneLogs(deps: Deps): Promise<void> {
     deps.db.delete(syncRuns).where(lt(syncRuns.startedAt, cutoff)),
     deps.db.delete(priceRuns).where(lt(priceRuns.startedAt, cutoff)),
     deps.db.delete(jobRuns).where(lt(jobRuns.startedAt, cutoff)),
+    deps.db.delete(snapshotRuns).where(lt(snapshotRuns.startedAt, cutoff)),
   ]);
 }

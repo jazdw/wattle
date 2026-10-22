@@ -25,7 +25,7 @@ export function StatusBanner() {
   if (data.nightly?.state === 'interrupted') messages.push(`The nightly update of ${data.nightly.date} was stopped before it finished.`);
   if (data.nightly?.state === 'late') messages.push(`The nightly update hasn't run since ${data.nightly.date}.`);
   for (const login of data.historyStopped) {
-    messages.push(`${login.institutionName}: history was stopped part-way several times in a row, so it no longer retries on its own. Open its Activity to reload it.`);
+    messages.push(`${login.institutionName}: history was stopped part-way several times in a row, so it no longer retries on its own. Use Reload history on its Accounts card to try again.`);
   }
   const stopped = new Set(data.historyStopped.map((login) => login.connectionId));
   const latest = new Map<string, StatusResponse['interrupted'][number]>();
@@ -42,8 +42,8 @@ export function StatusBanner() {
             <li key={message}>{message}</li>
           ))}
         </ul>
-        <Link to="/accounts" className="mt-1 inline-block underline">
-          Accounts
+        <Link to="/activity" className="mt-1 inline-block underline">
+          See Activity
         </Link>
       </Alert>
     </div>

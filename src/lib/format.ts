@@ -19,6 +19,11 @@ export function longDate(date: string): string {
   });
 }
 
+/** Date and time, e.g. "Oct 8, 2026, 10:00 PM". */
+export function dateTime(epochMs: number): string {
+  return new Date(epochMs).toLocaleString(undefined, { dateStyle: 'medium', timeStyle: 'short' });
+}
+
 export function relativeTime(epochMs: number | null): string {
   if (!epochMs) return 'never';
   const minutes = Math.round((Date.now() - epochMs) / 60_000);
