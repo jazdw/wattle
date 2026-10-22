@@ -1,6 +1,6 @@
 import { desc, eq, sql } from 'drizzle-orm';
 import { describe, expect, it } from 'vitest';
-import type { SyncRunSummary } from '../shared/types';
+import type { ActivityResponse, SyncRunSummary } from '../shared/types';
 import * as schema from '../server/db/schema';
 import { Tenant } from '../server/db/tenant';
 import type { Deps } from '../server/ports';
@@ -162,6 +162,57 @@ describe('nightly job log', () => {
     const syncs = await deps.db.select().from(schema.syncRuns);
     expect(syncs.length).toBeGreaterThan(0);
     expect(syncs.every((run) => run.trigger === 'nightly')).toBe(true);
+  });
+});
+
+describe('household activity', () => {
+  it("lists the household's runs, snapshots and nightly jobs, newest first, and none of another household's", async () => {
+    const { runDaily } = await import('../server/services/jobs');
+    const { deps, api, connection } = await linked();
+    const later = deps.now().getTime() + 86400_000;
+    deps.now = () => new Date(later);
+    await runDaily(deps);
+
+    const { entries, next } = (await api('/api/activity')).body as ActivityResponse;
+    expect(next).toBeNull();
+    const kinds = new Set(entries.map((entry) => entry.kind));
+    expect(kinds).toEqual(new Set(['run', 'snapshot', 'nightly']));
+    expect(entries.map((entry) => entry.startedAt)).toEqual([...entries.map((entry) => entry.startedAt)].sort((a, b) => b - a));
+    const nightlySnapshot = entries.find((entry) => entry.kind === 'snapshot' && entry.trigger === 'nightly');
+    expect(nightlySnapshot).toMatchObject({ outcome: 'ok', accounts: 1, holdings: 2, date: '2026-10-09' });
+    expect(entries.find((entry) => entry.kind === 'nightly')).toMatchObject({ state: 'finished', date: '2026-10-09' });
+    expect(entries.find((entry) => entry.kind === 'run')).toMatchObject({ connectionId: connection.id, institutionName: 'Vanguard' });
+    expect(JSON.stringify(entries)).not.toContain('householdId');
+
+    // Another household sees the shared nightly job, but none of these runs or snapshots.
+    const other = await createHousehold(deps, 'Other', 'other@example.com');
+    const theirs = (await client(deps, other.cookie)('/api/activity')).body as ActivityResponse;
+    expect(theirs.entries.map((entry) => entry.kind)).toEqual(['nightly']);
+  });
+
+  it('pages back without skipping entries that started at the same moment', async () => {
+    const { api } = await linked(); // the test clock stands still: every entry has the same start time
+    const all = ((await api('/api/activity')).body as ActivityResponse).entries;
+    expect(all.length).toBeGreaterThanOrEqual(3);
+    const seen = [];
+    let next: ActivityResponse['next'] = null;
+    do {
+      const page = (await api(`/api/activity?limit=2${next ? `&after=${encodeURIComponent(JSON.stringify(next))}` : ''}`)).body as ActivityResponse;
+      seen.push(...page.entries);
+      next = page.next;
+    } while (next);
+    expect(seen).toEqual(all);
+    expect((await api('/api/activity?after=nonsense')).status).toBe(400);
+  });
+
+  it('marks a snapshot left running as stopped part-way when the next one starts', async () => {
+    const { deps, home, api } = await linked();
+    const tenant = new Tenant(deps.db, home.householdId);
+    const at = deps.now().getTime() - 60_000;
+    await deps.db.insert(schema.snapshotRuns).values({ id: 'stuck', householdId: home.householdId, date: TODAY, trigger: 'change', startedAt: at, finishedAt: at, outcome: 'running' });
+    await snapshotHousehold(deps, tenant, TODAY);
+    const entries = ((await api('/api/activity')).body as ActivityResponse).entries;
+    expect(entries.find((entry) => entry.kind === 'snapshot' && entry.id === 'stuck')).toMatchObject({ outcome: 'error', errorCode: 'INTERRUPTED' });
   });
 });
 

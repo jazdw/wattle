@@ -4,6 +4,7 @@ import { Hono } from 'hono';
 import { suggestClassification } from '../../shared/classify';
 import { marketDate, newYorkClock } from '../../shared/dates';
 import {
+  activityCursorSchema,
   householdPatchSchema,
   importBalancesSchema,
   importHoldingsSchema,
@@ -21,6 +22,7 @@ import type { AppEnv } from '../env';
 import { HttpError, notFound, readBody, requestCurrency } from '../lib/http';
 import { cacheGetMany, cacheSetMany } from '../services/cache';
 import { loadHistory, RANGES, type Range } from '../services/history';
+import { householdActivity, type ActivityCursor } from '../services/activity';
 import { backgroundStatus } from '../services/jobs';
 import { activeTarget, loadPortfolio } from '../services/portfolio';
 import { stableId } from '../services/ids';
@@ -59,6 +61,21 @@ portfolioRoutes.get('/history', async (c) => {
   if (group === 'holding' && !accountId) throw new HttpError(400, 'accountId is required for holdings.');
   return c.json(await loadHistory(c.env.deps, tenant, { range, group, currency, accountId }));
 });
+
+/** The household's activity log, newest first; `after` (a page's `next`, as JSON) pages back. */
+portfolioRoutes.get('/activity', async (c) => {
+  const limit = Math.min(200, Math.max(1, Number(c.req.query('limit')) || 100));
+  return c.json(await householdActivity(c.env.deps, c.get('tenant'), readCursor(c.req.query('after')), limit));
+});
+
+function readCursor(value: string | undefined): ActivityCursor | null {
+  if (!value) return null;
+  try {
+    return activityCursorSchema.parse(JSON.parse(value));
+  } catch {
+    throw new HttpError(400, 'Invalid activity cursor.');
+  }
+}
 
 /** Background work that didn't finish (the nightly job, stopped runs), for the warning banner. */
 portfolioRoutes.get('/status', async (c) => c.json(await backgroundStatus(c.env.deps, c.get('tenant'))));

@@ -28,7 +28,7 @@ async function setup() {
 describe('tenant isolation', () => {
   it('rejects unauthenticated requests', async () => {
     const deps = await createTestDeps();
-    for (const path of ['/api/accounts', '/api/portfolio', '/api/history', '/api/securities', '/api/connections', '/api/auth/me', '/api/quotes', '/api/targets']) {
+    for (const path of ['/api/accounts', '/api/portfolio', '/api/history', '/api/securities', '/api/connections', '/api/auth/me', '/api/quotes', '/api/targets', '/api/status', '/api/activity']) {
       expect((await client(deps)(path)).status, path).toBe(401);
     }
     const writes: [string, string][] = [

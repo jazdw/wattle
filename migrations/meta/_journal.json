@@ -29,6 +29,13 @@
       "when": 1792595060079,
       "tag": "0003_job_status",
       "breakpoints": true
+    },
+    {
+      "idx": 4,
+      "version": "6",
+      "when": 1792596971492,
+      "tag": "0004_snapshot_runs",
+      "breakpoints": true
     }
   ]
 }
