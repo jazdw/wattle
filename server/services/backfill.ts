@@ -30,6 +30,7 @@ import { reconstructHistory } from './backfillCore';
 import { completeRunStatements, SyncRun, type SyncTrigger } from './activity';
 import { encryptToken, loadTokenKeys, tokenAad } from './crypto';
 import { enqueue, RetryLater, type JobContext, type JobSpec, type JobType } from './jobRunner';
+import { queueReportCollection } from './assetReports';
 import { closeLookup, ensureCloses, ensureFx } from './pricing';
 import { connectionLease, Lease } from './lease';
 import { accessTokenFor, getConnection, HISTORY_DAYS, isActive, type ConnectionRow } from './sync';
@@ -82,6 +83,8 @@ const MAX_TICKERS_PER_JOB = 40;
 const PRICE_LOOKBACK_DAYS = 21;
 /** A busy connection (a sync running) is tried again after this. */
 const BUSY_RETRY_SECONDS = 30;
+/** A requested asset report is first looked for after this (Plaid takes from seconds to minutes). */
+const REPORT_FIRST_CHECK_SECONDS = 60;
 /** A rate-limited price provider (Tiingo allows 50 requests an hour) is asked again after this... */
 const RATE_LIMITED_RETRY_SECONDS = 30 * 60;
 /** ...for at most this long before the price job fails. */
@@ -313,6 +316,11 @@ export async function planHistory({ deps, tenant, job, renew }: JobContext): Pro
         waitsFor: specs.length > 0 ? blocksGroup(plan.runId) : priceSpecs.length > 0 ? pricesGroup(plan.runId) : null,
       },
     ]);
+    // Check for the report without waiting for Plaid's webhook (none reaches a local app) or the next sync.
+    if (reportRequested) {
+      const latest = await getConnection(tenant, connection.id);
+      if (latest) await queueReportCollection(deps, tenant, latest, plan.trigger, REPORT_FIRST_CHECK_SECONDS);
+    }
     return { prices: priceSpecs.length, blocks: specs.length, reportRequested };
   } finally {
     await lease.forceRelease();
@@ -506,8 +514,16 @@ export async function finishHistory({ deps, tenant, job, renew }: JobContext): P
       tenant.db
         .update(connections)
         .set({
-          // Still waiting for the bank's report, if one was asked for.
-          backfillStatus: failed > 0 ? 'failed' : finish.reportRequested ? 'running' : connection.hasInvestments ? 'done' : 'skipped',
+          // Still waiting for the bank's report, if one was asked for and it
+          // hasn't been collected meanwhile (checked as this writes).
+          backfillStatus:
+            failed > 0
+              ? 'failed'
+              : finish.reportRequested
+                ? sql`case when ${connections.assetReportTokenEnc} is not null then 'running' else 'done' end`
+                : connection.hasInvestments
+                  ? 'done'
+                  : 'skipped',
           ...(connection.hasInvestments ? { historyAsOf: marketDate(deps.now()) } : {}),
           // A late transaction that arrived during this load needs another.
           historyStaleAt: sql`case when ${connections.historyStaleAt} < ${finish.startedAt} then null else ${connections.historyStaleAt} end`,
