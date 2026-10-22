@@ -166,7 +166,8 @@ export function Accounts() {
                     )}
                     {connection.historyProgress ? (
                       <Badge variant="outline">
-                        Loading history… {connection.historyProgress.done} of {connection.historyProgress.total}
+                        Loading history…
+                        {connection.historyProgress.total > 0 && ` ${connection.historyProgress.done} of ${connection.historyProgress.total}`}
                       </Badge>
                     ) : (
                       BACKFILL_TEXT[connection.backfillStatus] && <Badge variant="outline">{BACKFILL_TEXT[connection.backfillStatus]}</Badge>

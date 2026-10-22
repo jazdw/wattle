@@ -128,7 +128,7 @@ describe('history progress', () => {
       const [job] = await deps.db.select().from(schema.jobs).where(eq(schema.jobs.type, type as 'history_plan'));
       await runJob(deps, job.id);
     };
-    expect(await progress()).toBeNull(); // not planned yet
+    expect(await progress()).toEqual({ done: 0, total: 0 }); // queued, not planned yet
     await run('history_plan');
     const planned = await progress();
     expect(planned.done).toBe(0);

@@ -150,16 +150,18 @@ export async function queueHistory(
 
 /**
  * Progress of the history loads underway, by connection: of their price and
- * block jobs, how many have finished.
+ * block jobs, how many have finished. A load whose plan hasn't run yet shows
+ * as 0 of 0, so a page that asked for it sees it underway straight away.
  */
 export async function historyProgress(tenant: Tenant): Promise<Map<string, { done: number; total: number }>> {
-  const underway = tenant.db
-    .selectDistinct({ groupId: jobs.groupId })
+  const underway = await tenant.db
+    .selectDistinct({ type: jobs.type, groupId: jobs.groupId, connectionId: jobs.connectionId })
     .from(jobs)
-    .where(tenant.scope(jobs, inArray(jobs.type, ['history_prices', 'history_block']), inArray(jobs.status, ['waiting', 'queued', 'running'])));
-  // A load's price and block groups share its run id: history:<run>:prices / :blocks.
-  const runs = new Set((await underway).flatMap((row) => (row.groupId ? [row.groupId.split(':').slice(0, 2).join(':')] : [])));
+    .where(tenant.scope(jobs, inArray(jobs.type, ['history_plan', 'history_prices', 'history_block']), inArray(jobs.status, ['waiting', 'queued', 'running'])));
   const progress = new Map<string, { done: number; total: number }>();
+  for (const row of underway) if (row.type === 'history_plan' && row.connectionId) progress.set(row.connectionId, { done: 0, total: 0 });
+  // A load's price and block groups share its run id: history:<run>:prices / :blocks.
+  const runs = new Set(underway.flatMap((row) => (row.type !== 'history_plan' && row.groupId ? [row.groupId.split(':').slice(0, 2).join(':')] : [])));
   if (runs.size === 0) return progress;
   const parts = await tenant.db
     .select({ connectionId: jobs.connectionId, groupId: jobs.groupId, status: jobs.status })
