@@ -1,11 +1,9 @@
-import { X } from 'lucide-react';
 import { useMemo, useState } from 'react';
 import { CATEGORIES, type Category } from '../../shared/taxonomy';
 import type { HistoryGroup, HistoryResponse } from '../../shared/types';
 import { Legend, TimeSeriesChart } from '../components/charts';
 import { foldSeries, type ChartSeries } from '../lib/series';
 import { PageHeader } from '../components/Layout';
-import { Button } from '../components/ui/button';
 import { Card, CardContent } from '../components/ui/card';
 import { NativeSelect } from '../components/ui/input';
 import { EmptyState, Skeleton, Td, Th } from '../components/ui/misc';
@@ -88,26 +86,19 @@ export function Growth() {
               ]}
               onChange={setView}
             />
-            <div className="ml-auto flex items-center gap-1">
-              <div className="w-56">
-                <NativeSelect value={accountId ?? ''} onChange={(event) => setAccountId(event.target.value || null)} aria-label="Account">
-                  <option value="">All accounts</option>
-                  {byType.map((entry) => (
-                    <optgroup key={entry.type} label={ACCOUNT_TYPE_LABELS[entry.type] ?? entry.type}>
-                      {entry.accounts.map((candidate) => (
-                        <option key={candidate.id} value={candidate.id}>
-                          {candidate.name}
-                        </option>
-                      ))}
-                    </optgroup>
-                  ))}
-                </NativeSelect>
-              </div>
-              {accountId && (
-                <Button variant="ghost" size="icon" onClick={() => setAccountId(null)} aria-label="Show all accounts">
-                  <X />
-                </Button>
-              )}
+            <div className="ml-auto w-56">
+              <NativeSelect value={accountId ?? ''} onChange={(event) => setAccountId(event.target.value || null)} aria-label="Account">
+                <option value="">All accounts</option>
+                {byType.map((entry) => (
+                  <optgroup key={entry.type} label={ACCOUNT_TYPE_LABELS[entry.type] ?? entry.type}>
+                    {entry.accounts.map((candidate) => (
+                      <option key={candidate.id} value={candidate.id}>
+                        {candidate.name}
+                      </option>
+                    ))}
+                  </optgroup>
+                ))}
+              </NativeSelect>
             </div>
           </div>
 
