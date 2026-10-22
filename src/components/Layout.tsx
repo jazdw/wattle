@@ -23,18 +23,52 @@ export function Logo({ className }: { className?: string }) {
   return <img src="/logo.svg" alt="" className={cn('size-8 rounded-lg', className)} />;
 }
 
-function Brand() {
+/** In the phone's top bar the name gives way to the currency switch on the narrowest screens. */
+function Brand({ topBar }: { topBar?: boolean }) {
   return (
     <div className="flex items-center gap-2">
       <Logo />
-      <span className="text-lg font-semibold tracking-tight">Wattle Wealth</span>
+      <span className={cn('whitespace-nowrap text-lg font-semibold tracking-tight', topBar && 'hidden min-[360px]:inline')}>Wattle Wealth</span>
     </div>
   );
 }
 
-/** The page links, the currency switch and who is signed in: the desktop sidebar, and the phone menu. */
-function NavPanel({ onNavigate }: { onNavigate?: () => void }) {
-  const { me, currency, setCurrency, logout } = useAuth();
+function CurrencySwitch() {
+  const { currency, setCurrency } = useAuth();
+  return (
+    <Segmented
+      value={currency}
+      options={[
+        { value: 'USD', label: 'USD' },
+        { value: 'AUD', label: 'AUD' },
+      ]}
+      onChange={setCurrency}
+    />
+  );
+}
+
+function SignOut({ label }: { label: boolean }) {
+  const { logout } = useAuth();
+  return (
+    <button
+      type="button"
+      onClick={() => void logout()}
+      aria-label="Sign out"
+      className="flex items-center gap-2 rounded-md px-2.5 py-1.5 text-sm text-muted-foreground hover:bg-muted"
+    >
+      <LogOut className="size-4" />
+      {label && <span>Sign out</span>}
+    </button>
+  );
+}
+
+/**
+ * The page links and who is signed in, for the desktop sidebar and the phone
+ * menu; the sidebar also holds the currency switch and Sign out, which the
+ * phone keeps in its top bar.
+ */
+function NavPanel({ onNavigate, sidebar }: { onNavigate?: () => void; sidebar?: boolean }) {
+  const { me } = useAuth();
   const connections = useConnections();
   // A disconnected login was set aside on purpose; it needs nothing.
   const broken = connections.data?.connections.filter((connection) => connection.status !== 'ok' && connection.status !== 'disconnected') ?? [];
@@ -62,14 +96,7 @@ function NavPanel({ onNavigate }: { onNavigate?: () => void }) {
         ))}
       </nav>
       <div className="flex flex-col items-stretch gap-3">
-        <Segmented
-          value={currency}
-          options={[
-            { value: 'USD', label: 'USD' },
-            { value: 'AUD', label: 'AUD' },
-          ]}
-          onChange={setCurrency}
-        />
+        {sidebar && <CurrencySwitch />}
         {me && (
           <div className="flex min-w-0 items-center gap-2 border-t px-2 pt-3" title={`Signed in as ${me.user.email}`}>
             <Avatar name={me.user.name} picture={me.user.picture} className="size-7 text-xs" />
@@ -79,14 +106,7 @@ function NavPanel({ onNavigate }: { onNavigate?: () => void }) {
             </div>
           </div>
         )}
-        <button
-          type="button"
-          onClick={() => void logout()}
-          className="flex items-center gap-2 rounded-md px-2.5 py-1.5 text-sm text-muted-foreground hover:bg-muted"
-        >
-          <LogOut className="size-4" />
-          <span>Sign out</span>
-        </button>
+        {sidebar && <SignOut label />}
       </div>
     </>
   );
@@ -109,7 +129,7 @@ function PhoneBar() {
           <DialogPrimitive.Overlay className="fade-in fixed inset-0 z-50 bg-black/40 backdrop-blur-[1px]" />
           <DialogPrimitive.Content className="drawer-in fixed inset-y-0 left-0 z-50 flex w-64 max-w-[85vw] flex-col gap-4 border-r bg-card px-3 py-4 shadow-lg">
             <DialogPrimitive.Title className="sr-only">Menu</DialogPrimitive.Title>
-            <DialogPrimitive.Description className="sr-only">Pages, currency and sign out</DialogPrimitive.Description>
+            <DialogPrimitive.Description className="sr-only">Pages</DialogPrimitive.Description>
             <div className="flex items-center justify-between px-2">
               <Brand />
               <DialogPrimitive.Close className="rounded-sm p-1 opacity-70 hover:opacity-100" aria-label="Close menu">
@@ -120,7 +140,11 @@ function PhoneBar() {
           </DialogPrimitive.Content>
         </DialogPrimitive.Portal>
       </DialogPrimitive.Root>
-      <Brand />
+      <Brand topBar />
+      <div className="ml-auto flex items-center gap-1">
+        <CurrencySwitch />
+        <SignOut label={false} />
+      </div>
     </header>
   );
 }
@@ -133,7 +157,7 @@ export function Layout() {
         <div className="px-2">
           <Brand />
         </div>
-        <NavPanel />
+        <NavPanel sidebar />
       </aside>
       <main className="mx-auto w-full max-w-6xl px-4 py-5 sm:px-6 sm:py-8">
         <StatusBanner />
