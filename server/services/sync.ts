@@ -14,9 +14,9 @@ import { chunkRows, inChunks, runAtomic } from '../db/batch';
 import { accounts, connections, holdings, investmentTransactions, securities } from '../db/schema';
 import type { Tenant } from '../db/tenant';
 import type { Deps } from '../ports';
-import { closeInterruptedRuns, historyKeepsStopping, MAX_INTERRUPTED_HISTORY, SyncRun, type SyncTrigger } from './activity';
+import { closeInterruptedRuns, SyncRun, type SyncTrigger } from './activity';
 import { collectPendingReport } from './assetReports';
-import { fillMissedDays, runHistoryLoad } from './backfill';
+import { queueDueHistory } from './backfill';
 import { BusyError, connectionLease, holdWhile, Lease, snapshotLease } from './lease';
 import { decryptToken, encryptToken, loadTokenKeys, tokenAad } from './crypto';
 import { stableId } from './ids';
@@ -254,24 +254,10 @@ export async function syncConnection(
 }
 
 /**
- * The work a sync can leave for later: collect a ready bank report, run a
- * due history load, fill missed days. The nightly job runs this for each
- * connection after every sync and snapshot is done, so the heavy history
- * work can't stop those if it's cut short.
- */
-export async function runPendingWork(deps: Deps, tenant: Tenant, connectionId: string, trigger: SyncTrigger): Promise<void> {
-  const connection = await getConnection(tenant, connectionId);
-  if (!connection || !isActive(connection)) return;
-  const lease = await Lease.acquire(deps, tenant, connectionLease(connectionId));
-  // Busy: whoever holds it does this same work before releasing.
-  if (!lease) return;
-  await underConnectionLease(deps, tenant, connectionId, trigger, lease, {}, async () => undefined);
-}
-
-/**
  * Run `first` holding the connection's lease, then: collect a ready bank
- * report, run a due history load, and sync again while notes arrive. Every
- * path that changes a connection's data goes through here.
+ * report, queue history work that's due (./backfill: it runs as jobs), and
+ * sync again while notes arrive. Every path that changes a connection's data
+ * goes through here.
  */
 export async function underConnectionLease<T>(
   deps: Deps,
@@ -279,7 +265,7 @@ export async function underConnectionLease<T>(
   connectionId: string,
   trigger: SyncTrigger,
   lease: Lease,
-  options: { history?: boolean; stopIf?: (result: T) => boolean; reportJustRequested?: boolean },
+  options: { history?: boolean; stopIf?: (result: T) => boolean },
   first: () => Promise<T>,
 ): Promise<T> {
   let result: T | undefined;
@@ -297,35 +283,11 @@ export async function underConnectionLease<T>(
     }
     const latest = await getConnection(tenant, connectionId);
     if (!latest || !isActive(latest)) return;
-    // (Not straight after requesting one: Plaid takes a while to build it.)
-    if (latest.assetReportTokenEnc && !(run === 1 && options.reportJustRequested)) {
-      await collectPendingReport(deps, tenant, latest, trigger, lease);
-    }
-    const afterReport = await getConnection(tenant, connectionId);
-    if (options.history !== false && afterReport && historyDue(afterReport)) {
-      if (trigger !== 'manual' && (await historyKeepsStopping(tenant, connectionId))) {
-        await new SyncRun(deps, tenant, connectionId, 'history', trigger).skipped(HISTORY_STOPPED_NOTE);
-      } else {
-        await runHistoryLoad(deps, tenant, afterReport.id, trigger, lease, null);
-      }
-    }
-    // Days the syncs missed, from the stored balances.
-    if (options.history !== false) await fillMissedDays(deps, tenant, connectionId, trigger, lease);
+    if (latest.assetReportTokenEnc) await collectPendingReport(deps, tenant, latest, trigger, lease);
+    // A history load, rebuild or days the syncs missed, as jobs.
+    if (options.history !== false) await queueDueHistory(deps, tenant, connectionId, trigger);
   });
   return result as T;
-}
-
-export const HISTORY_STOPPED_NOTE = `History work was stopped part-way ${MAX_INTERRUPTED_HISTORY} times in a row, so it no longer runs on its own. Use Reload history to try again.`;
-
-/**
- * A history load is due: never run; abandoned part-way ("running" while we
- * hold the lease means nobody is running it, unless it's a bank connection
- * waiting for its report); or invalidated by a late transaction.
- */
-function historyDue(connection: ConnectionRow): boolean {
-  if (connection.backfillStatus === 'pending') return true;
-  if (connection.backfillStatus === 'running') return connection.assetReportTokenEnc === null;
-  return connection.hasInvestments && connection.historyStaleAt !== null;
 }
 
 /** One fetch-then-write pass. Logs itself; throws (after logging) on unexpected errors. */

@@ -1,32 +1,89 @@
 /**
- * History backfill when a connection is first linked. A login can have both:
+ * A connection's history, built by background jobs (./jobRunner). A login can
+ * have both:
  *  - with Investments: investment accounts rebuilt from investment
- *    transactions + daily closes (see backfillCore.ts);
+ *    transactions + daily closes (./backfillCore);
  *  - with Assets: the other accounts' Plaid Asset Report `historical_balances`
  *    (up to 731 days), requested here and collected later (./assetReports).
- * Backfilled rows never overwrite synced, imported or manual rows, so a load
- * that fails part-way is safe to re-run: the rows are written in chunks, and
- * the outcome (status + log row) atomically at the end.
  *
- * Later, days the syncs missed (balances carried forward as estimates) are
- * filled the same ways, for just those days (fillMissedDays).
+ * A history load (linking, Reload history), a rebuild (a late transaction) and
+ * a fill of days the syncs missed all run as:
+ *   history_plan    decide the work; ask for the asset report; for a rebuild,
+ *                   drop the previous estimate
+ *   history_prices  daily closes for a few tickers each (Tiingo)
+ *   history_block   one investment account, one window of days each, sized to
+ *                   about JOB_CHUNK_ROWS rows
+ *   history_finish  record the outcome; queue today's snapshot
+ * Blocks wait for the prices, and the finish for the blocks. Backfilled rows
+ * never overwrite synced, imported or manual rows, and every job can run
+ * again safely.
  */
 import { and, eq, gte, inArray, isNull, lt, max, or, sql } from 'drizzle-orm';
 import type { BatchItem } from 'drizzle-orm/batch';
 import { addDays, dateRange, marketDate, type IsoDate } from '../../shared/dates';
 import { PlaidApiError } from '../adapters/plaid';
-import { chunkRows, runAtomic, runBatch } from '../db/batch';
-import { accountDaily, accounts, connections, holdingDaily, holdings, investmentTransactions, securities } from '../db/schema';
+import { chunkRows, inChunks, runAtomic, runBatch } from '../db/batch';
+import { accountDaily, accounts, connections, holdingDaily, holdings, investmentTransactions, jobs, securities, syncRuns } from '../db/schema';
 import type { Tenant } from '../db/tenant';
 import type { Deps } from '../ports';
 import { reconstructHistory } from './backfillCore';
-import { historyKeepsStopping, SyncRun, type SyncTrigger } from './activity';
+import { completeRunStatements, SyncRun, type SyncTrigger } from './activity';
 import { encryptToken, loadTokenKeys, tokenAad } from './crypto';
+import { enqueue, RetryLater, type JobContext, type JobSpec, type JobType } from './jobRunner';
 import { closeLookup, ensureCloses, ensureFx } from './pricing';
-import { connectionLease, Lease, LeaseLostError } from './lease';
-import { accessTokenFor, getConnection, HISTORY_DAYS, HISTORY_STOPPED_NOTE, isActive, underConnectionLease, type ConnectionRow } from './sync';
+import { connectionLease, Lease } from './lease';
+import { accessTokenFor, getConnection, HISTORY_DAYS, isActive, type ConnectionRow } from './sync';
 import { isCashSecurity, priceOn } from './valuation';
-import { describeError } from '../lib/errors';
+
+/** A first load (or Reload history), a rebuild after a late transaction, or days the syncs missed. */
+export type HistoryMode = 'load' | 'rebuild' | 'missed';
+
+interface PlanPayload {
+  connectionId: string;
+  mode: HistoryMode;
+  trigger: SyncTrigger;
+  webhookUrl: string | null;
+  runId: string;
+}
+
+interface PricesPayload {
+  tickers: string[];
+  start: IsoDate;
+  end: IsoDate;
+}
+
+interface BlockPayload {
+  connectionId: string;
+  accountId: string;
+  mode: HistoryMode;
+  /** The rebuild walks from `end` back to `start`... */
+  start: IsoDate;
+  end: IsoDate;
+  /** ...and writes the days from `from` to `to`. */
+  from: IsoDate;
+  to: IsoDate;
+}
+
+interface FinishPayload {
+  connectionId: string;
+  mode: HistoryMode;
+  runId: string;
+  startedAt: number;
+  reportRequested: boolean;
+}
+
+const HISTORY_JOBS: JobType[] = ['history_plan', 'history_prices', 'history_block', 'history_finish'];
+/** About how many daily closes one ticker's two years add (trading days). */
+const CLOSES_PER_TICKER = 520;
+/** Price jobs stay well under Workers Free's 50 outside requests per invocation. */
+const MAX_TICKERS_PER_JOB = 40;
+/** Closes looked up before a block's first day, to carry a price over holidays and gaps. */
+const PRICE_LOOKBACK_DAYS = 21;
+/** A busy connection (a sync running) is tried again after this. */
+const BUSY_RETRY_SECONDS = 30;
+
+const pricesGroup = (runId: string) => `history:${runId}:prices`;
+const blocksGroup = (runId: string) => `history:${runId}:blocks`;
 
 function backfillStatusStatement(tenant: Tenant, connectionId: string, status: ConnectionRow['backfillStatus']) {
   return tenant.db
@@ -35,140 +92,226 @@ function backfillStatusStatement(tenant: Tenant, connectionId: string, status: C
     .where(tenant.scope(connections, eq(connections.id, connectionId)));
 }
 
-/**
- * Load (or reload) a connection's history now, under its lease. If the
- * connection is busy, mark the load as due and leave a note: the holder runs
- * it before releasing. `webhookUrl` is where Plaid should report a finished
- * asset report (from the request origin, so no hostname is configured).
- */
-export async function backfillConnection(
-  deps: Deps,
-  tenant: Tenant,
-  connectionId: string,
-  webhookUrl: string | null,
-  trigger: SyncTrigger,
-): Promise<void> {
-  const connection = await getConnection(tenant, connectionId);
-  if (!connection || !isActive(connection)) return;
-  const key = connectionLease(connection.id);
-  let lease = await Lease.acquire(deps, tenant, key);
-  if (!lease) {
-    // Due: a load that never ran is "pending"; a reload is marked stale.
-    await (connection.hasInvestments && connection.backfillStatus === 'done'
-      ? tenant.db.update(connections).set({ historyStaleAt: deps.now().getTime() }).where(tenant.scope(connections, eq(connections.id, connection.id)))
-      : backfillStatusStatement(tenant, connection.id, 'pending'));
-    await Lease.leaveNote(deps, tenant, key);
-    // The holder may have released just before the note: then run it ourselves.
-    lease = await Lease.acquire(deps, tenant, key);
-    if (!lease) {
-      await new SyncRun(deps, tenant, connection.id, 'history', trigger).skipped('The connection was busy; the history load runs when that finishes.');
-      return;
-    }
-  }
-  await underConnectionLease(deps, tenant, connection.id, trigger, lease, { reportJustRequested: connection.hasBalanceHistory }, () =>
-    runHistoryLoad(deps, tenant, connection.id, trigger, lease, webhookUrl),
-  );
+/** A history job of this connection is queued, waiting or running. */
+async function historyUnderway(tenant: Tenant, connectionId: string): Promise<boolean> {
+  const [row] = await tenant.db
+    .select({ id: jobs.id })
+    .from(jobs)
+    .where(tenant.scope(jobs, eq(jobs.connectionId, connectionId), inArray(jobs.type, HISTORY_JOBS), inArray(jobs.status, ['waiting', 'queued', 'running'])))
+    .limit(1);
+  return Boolean(row);
 }
 
 /**
- * The history load itself; the caller holds the connection's lease (renewed
- * before every write). Investment history is rebuilt from transactions and
- * daily closes; with Assets an asset report is requested (collected later)
- * for the other accounts. A rebuild after a late transaction redoes only the
- * investment history.
- * Rows are written in chunks (insert-or-ignore, so a load that dies part-way
- * is safe to re-run), and the outcome with its log row atomically at the end.
- * Failures are logged, not thrown, except losing the lease.
+ * Queue a history load, rebuild or missed-day fill, unless one is underway.
+ * `webhookUrl` is where Plaid reports a finished asset report (from the
+ * request origin, so no hostname is configured).
  */
-export async function runHistoryLoad(
+export async function queueHistory(
   deps: Deps,
   tenant: Tenant,
   connectionId: string,
+  mode: HistoryMode,
   trigger: SyncTrigger,
-  lease: Lease,
-  webhookUrl: string | null,
-): Promise<void> {
+  webhookUrl: string | null = null,
+): Promise<boolean> {
+  if (await historyUnderway(tenant, connectionId)) return false;
+  const runId = crypto.randomUUID();
+  const payload: PlanPayload = { connectionId, mode, trigger, webhookUrl, runId };
+  await enqueue(deps, tenant, [{ id: `history:${runId}:plan`, type: 'history_plan', payload: { ...payload }, connectionId }]);
+  return true;
+}
+
+/**
+ * A history load is due: never run; abandoned part-way ("running" with no
+ * report outstanding and no jobs underway); or invalidated by a late
+ * transaction.
+ */
+function historyDue(connection: ConnectionRow): HistoryMode | null {
+  if (connection.backfillStatus === 'pending') return 'load';
+  if (connection.backfillStatus === 'running' && connection.assetReportTokenEnc === null) return 'load';
+  if (connection.hasInvestments && connection.historyStaleAt !== null && connection.backfillStatus === 'done') return 'rebuild';
+  return null;
+}
+
+/**
+ * After a sync: queue the history work it found due, a load or rebuild, or a
+ * fill of days the syncs missed (not before the first load is in, nor while
+ * a report is outstanding).
+ */
+export async function queueDueHistory(deps: Deps, tenant: Tenant, connectionId: string, trigger: SyncTrigger): Promise<void> {
   const connection = await getConnection(tenant, connectionId);
-  if (!connection) return;
-  const startedAt = deps.now().getTime();
-  const today = marketDate(deps.now());
-  const run = new SyncRun(deps, tenant, connection.id, 'history', trigger);
+  if (!connection || !isActive(connection) || (await historyUnderway(tenant, connectionId))) return;
+  const due = historyDue(connection);
+  if (due) {
+    await queueHistory(deps, tenant, connectionId, due, trigger);
+    return;
+  }
+  if (connection.status !== 'ok' || connection.backfillStatus !== 'done' || connection.assetReportTokenEnc) return;
+  if (await missedDays(tenant, connection, marketDate(deps.now()))) await queueHistory(deps, tenant, connectionId, 'missed', trigger);
+}
+
+/** Days per block for an account holding about `positions` securities. */
+function daysPerBlock(deps: Deps, positions: number): number {
+  return Math.min(731, Math.max(7, Math.floor(deps.config.jobChunkRows / Math.max(1, positions))));
+}
+
+/** [from, to] windows covering start..end, newest first, `size` days each. */
+function windows(start: IsoDate, end: IsoDate, size: number): [IsoDate, IsoDate][] {
+  const result: [IsoDate, IsoDate][] = [];
+  for (let to = end; to >= start; to = addDays(to, -size)) {
+    const from = addDays(to, -(size - 1));
+    result.push([from < start ? start : from, to]);
+  }
+  return result;
+}
+
+/** The securities an account held from `start` on: today's holdings plus any it traded. */
+async function involvedSecurities(tenant: Tenant, accountId: string, start: IsoDate): Promise<string[]> {
+  const held = await tenant.db.select({ id: holdings.securityId }).from(holdings).where(tenant.scope(holdings, eq(holdings.accountId, accountId)));
+  const traded = await tenant.db
+    .selectDistinct({ id: investmentTransactions.securityId })
+    .from(investmentTransactions)
+    .where(tenant.scope(investmentTransactions, eq(investmentTransactions.accountId, accountId), gte(investmentTransactions.date, start)));
+  return [...new Set([...held.map((row) => row.id), ...traded.flatMap((row) => (row.id ? [row.id] : []))])];
+}
+
+/**
+ * history_plan: decide the work and queue it. Holds the connection's lease
+ * while it asks for the asset report and (for a rebuild) drops the previous
+ * estimate, so a sync can't run in between.
+ */
+export async function planHistory({ deps, tenant, job, renew }: JobContext): Promise<Record<string, unknown>> {
+  const plan = job.payload as unknown as PlanPayload;
+  const connection = await getConnection(tenant, plan.connectionId);
+  if (!connection || !isActive(connection)) return { skipped: 'not syncing' };
+  // Often queued by a sync still finishing: wait a moment for its lease.
+  const lease = await Lease.acquireWaiting(deps, tenant, connectionLease(connection.id));
+  if (!lease) throw new RetryLater(BUSY_RETRY_SECONDS, 'The connection is busy.');
   try {
-    await lease.renew();
-    await run.begin();
-    await backfillStatusStatement(tenant, connection.id, 'running');
-    await ensureFx(deps, addDays(today, -HISTORY_DAYS), today);
-    const rebuild = connection.historyStaleAt !== null && connection.backfillStatus === 'done';
+    const startedAt = deps.now().getTime();
+    const today = marketDate(deps.now());
+    const run = new SyncRun(deps, tenant, connection.id, 'history', plan.trigger, plan.runId);
     const outcome: BatchItem<'sqlite'>[] = [];
-    // Two years, asked for on the first load: a rebuild only redoes investments.
-    const report = connection.hasBalanceHistory && !rebuild ? await requestBalanceHistory(deps, tenant, connection, webhookUrl, run, 731) : null;
-    if (report) outcome.push(...report.statements);
-    if (connection.hasInvestments) {
-      const accountRows = await tenant.db
-        .select({ id: accounts.id, type: accounts.type })
-        .from(accounts)
-        .where(tenant.scope(accounts, eq(accounts.connectionId, connection.id), eq(accounts.isHidden, false)));
-      // With Assets, the bank's balance history covers the other accounts.
-      const accountIds = accountRows.filter((row) => !connection.hasBalanceHistory || row.type === 'investment').map((row) => row.id);
-      if (rebuild && accountIds.length > 0) {
-        // Rebuild: drop the previous estimate (only backfilled rows; synced,
-        // imported and manual ones stay) and reconstruct with every transaction.
-        run.note = 'Rebuilt because a transaction dated before the previous history arrived later.';
-        await lease.renew();
-        await runAtomic(tenant.db, [
-          tenant.db.delete(accountDaily).where(tenant.scope(accountDaily, inArray(accountDaily.accountId, accountIds), eq(accountDaily.source, 'backfill'))),
-          tenant.db.delete(holdingDaily).where(tenant.scope(holdingDaily, inArray(holdingDaily.accountId, accountIds), eq(holdingDaily.source, 'backfill'))),
-        ]);
+    // Investment accounts to rebuild, each from its first day.
+    let investments: { accountId: string; from: IsoDate }[] = [];
+    let reportRequested = false;
+
+    if (plan.mode === 'missed') {
+      const missed = await missedDays(tenant, connection, today);
+      if (!missed) return { skipped: 'nothing missed' };
+      run.note = `Filling days missed since ${missed.from}.`;
+      await run.begin();
+      if (missed.bankFrom && !connection.assetReportTokenEnc) {
+        const report = await requestBalanceHistory(deps, tenant, connection, null, run, Math.min(731, dateRange(missed.bankFrom, today).length));
+        outcome.push(...report.statements);
+        reportRequested = report.requested;
       }
-      for (const accountId of accountIds) run.count('days', await backfillInvestmentAccount(deps, tenant, accountId, lease));
-      outcome.push(
-        tenant.db
-          .update(connections)
-          .set({
-            // Still waiting for the bank's report, if one was asked for.
-            backfillStatus: report?.requested ? 'running' : 'done',
-            historyAsOf: today,
-            // A late transaction that arrived during this load needs another.
-            historyStaleAt: sql`case when ${connections.historyStaleAt} < ${startedAt} then null else ${connections.historyStaleAt} end`,
-          })
-          .where(tenant.scope(connections, eq(connections.id, connection.id))),
-      );
-    } else if (!report?.requested) {
-      outcome.push(backfillStatusStatement(tenant, connection.id, 'skipped'));
+      investments = missed.investments;
+    } else {
+      await run.begin();
+      outcome.push(backfillStatusStatement(tenant, connection.id, 'running'));
+      await ensureFx(deps, addDays(today, -HISTORY_DAYS), today);
+      // Two years, asked for on the first load (not again if this plan is running a second time).
+      if (plan.mode === 'load' && connection.hasBalanceHistory && !connection.assetReportTokenEnc) {
+        const report = await requestBalanceHistory(deps, tenant, connection, plan.webhookUrl, run, 731);
+        outcome.push(...report.statements);
+        reportRequested = report.requested;
+      }
+      if (connection.hasInvestments) {
+        const accountRows = await tenant.db
+          .select({ id: accounts.id, type: accounts.type })
+          .from(accounts)
+          .where(tenant.scope(accounts, eq(accounts.connectionId, connection.id), eq(accounts.isHidden, false)));
+        // With Assets, the bank's balance history covers the other accounts.
+        const accountIds = accountRows.filter((row) => !connection.hasBalanceHistory || row.type === 'investment').map((row) => row.id);
+        if (plan.mode === 'rebuild' && accountIds.length > 0) {
+          // Drop the previous estimate (only backfilled rows; synced, imported
+          // and manual ones stay) and reconstruct with every transaction.
+          run.note = 'Rebuilt because a transaction dated before the previous history arrived later.';
+          outcome.push(
+            tenant.db.delete(accountDaily).where(tenant.scope(accountDaily, inArray(accountDaily.accountId, accountIds), eq(accountDaily.source, 'backfill'))),
+            tenant.db.delete(holdingDaily).where(tenant.scope(holdingDaily, inArray(holdingDaily.accountId, accountIds), eq(holdingDaily.source, 'backfill'))),
+          );
+        }
+        investments = accountIds.map((accountId) => ({ accountId, from: addDays(today, -HISTORY_DAYS) }));
+      }
     }
+
+    // The work: closes for every public ticker involved, then each account in windows.
+    const securityRows = await tenant.db
+      .select({ id: securities.id, ticker: securities.ticker, isPublic: securities.isPublic })
+      .from(securities)
+      .where(tenant.scope(securities));
+    const tickerOf = new Map(securityRows.flatMap((row) => (row.isPublic && row.ticker ? [[row.id, row.ticker] as const] : [])));
+    const tickers = new Set<string>();
+    const specs: JobSpec[] = [];
+    let earliest: IsoDate = today;
+    for (const { accountId, from } of investments) {
+      const involved = await involvedSecurities(tenant, accountId, from);
+      for (const id of involved) if (tickerOf.has(id)) tickers.add(tickerOf.get(id)!);
+      if (from < earliest) earliest = from;
+      for (const [blockFrom, blockTo] of windows(from, today, daysPerBlock(deps, involved.length))) {
+        const block: BlockPayload = { connectionId: connection.id, accountId, mode: plan.mode, start: from, end: today, from: blockFrom, to: blockTo };
+        specs.push({ type: 'history_block', payload: { ...block }, connectionId: connection.id, groupId: blocksGroup(plan.runId) });
+      }
+    }
+    const perJob = Math.min(MAX_TICKERS_PER_JOB, Math.max(1, Math.floor(deps.config.jobChunkRows / CLOSES_PER_TICKER)));
+    const tickerList = [...tickers].sort();
+    const priceSpecs: JobSpec[] = [];
+    for (let index = 0; index < tickerList.length; index += perJob) {
+      const prices: PricesPayload = { tickers: tickerList.slice(index, index + perJob), start: earliest, end: today };
+      priceSpecs.push({ type: 'history_prices', payload: { ...prices }, connectionId: connection.id, groupId: pricesGroup(plan.runId) });
+    }
+    if (priceSpecs.length > 0) for (const spec of specs) spec.waitsFor = pricesGroup(plan.runId);
+    const finish: FinishPayload = { connectionId: connection.id, mode: plan.mode, runId: plan.runId, startedAt, reportRequested };
+    if (specs.length > 0) run.count('parts', specs.length);
+
+    await renew();
     await lease.renew();
-    await runAtomic(tenant.db, [...outcome, run.statement()]);
-  } catch (error) {
-    console.error('History load failed', describeError(error));
-    await run.failed(error);
-    if (error instanceof LeaseLostError) throw error;
-    await backfillStatusStatement(tenant, connection.id, 'failed');
+    await runAtomic(tenant.db, [...outcome, run.statement('running')]);
+    await enqueue(deps, tenant, [
+      ...priceSpecs,
+      ...specs,
+      {
+        id: `history:${plan.runId}:finish`,
+        type: 'history_finish',
+        payload: { ...finish },
+        connectionId: connection.id,
+        waitsFor: specs.length > 0 ? blocksGroup(plan.runId) : priceSpecs.length > 0 ? pricesGroup(plan.runId) : null,
+      },
+    ]);
+    return { prices: priceSpecs.length, blocks: specs.length, reportRequested };
+  } finally {
+    await lease.forceRelease();
   }
 }
 
-/* ------------------------------------------------------------------ */
-/* Investment accounts                                                 */
-/* ------------------------------------------------------------------ */
+/** history_prices: daily closes for a few tickers over the load's days. */
+export async function historyPrices({ deps, job }: JobContext): Promise<Record<string, unknown>> {
+  const { tickers, start, end } = job.payload as unknown as PricesPayload;
+  await ensureCloses(deps, tickers, start, end);
+  return { tickers: tickers.length };
+}
 
 /**
- * Rebuild an investment account's daily history from today's holdings back
- * through its transactions. With `from`, only from that day, replacing the
- * balances carried forward (estimated) while syncs were missed.
+ * history_block: rebuild one investment account's days from `from` to `to`
+ * (walking from today's holdings back through its transactions) and write
+ * them. A load inserts what's missing; a missed-day fill also replaces the
+ * balances carried forward while syncs were missed, in the same batch.
  */
-export async function backfillInvestmentAccount(deps: Deps, tenant: Tenant, accountId: string, lease?: Lease, from?: IsoDate): Promise<number> {
+export async function historyBlock({ deps, tenant, job, renew }: JobContext): Promise<Record<string, unknown>> {
+  const block = job.payload as unknown as BlockPayload;
   const [account] = await tenant.db
     .select()
     .from(accounts)
-    .where(tenant.scope(accounts, eq(accounts.id, accountId)));
-  if (!account || account.isHidden) return 0;
-
-  const end = marketDate(deps.now());
-  const start = from ?? addDays(end, -HISTORY_DAYS);
+    .where(tenant.scope(accounts, eq(accounts.id, block.accountId)));
+  if (!account || account.isHidden) return { days: 0 };
 
   const current = await tenant.db
     .select({ securityId: holdings.securityId, quantity: holdings.quantity })
     .from(holdings)
-    .where(tenant.scope(holdings, eq(holdings.accountId, accountId)));
+    .where(tenant.scope(holdings, eq(holdings.accountId, account.id)));
   const transactions = await tenant.db
     .select({
       date: investmentTransactions.date,
@@ -177,37 +320,37 @@ export async function backfillInvestmentAccount(deps: Deps, tenant: Tenant, acco
       amount: investmentTransactions.amount,
     })
     .from(investmentTransactions)
-    .where(tenant.scope(investmentTransactions, eq(investmentTransactions.accountId, accountId), gte(investmentTransactions.date, start)));
-
-  const securityRows = await tenant.db
-    .select({
-      id: securities.id,
-      ticker: securities.ticker,
-      type: securities.type,
-      isPublic: securities.isPublic,
-      lastPrice: securities.lastPrice,
-      lastPriceDate: securities.lastPriceDate,
-    })
-    .from(securities)
-    .where(tenant.scope(securities));
-  const securityById = new Map(securityRows.map((security) => [security.id, security]));
-
+    .where(tenant.scope(investmentTransactions, eq(investmentTransactions.accountId, account.id), gte(investmentTransactions.date, block.start)));
   const involved = new Set([...current.map((row) => row.securityId), ...transactions.flatMap((row) => (row.securityId ? [row.securityId] : []))]);
-  const tickers = [...involved].flatMap((id) => {
-    const security = securityById.get(id);
-    return security?.isPublic && security.ticker ? [security.ticker] : [];
-  });
-  await ensureCloses(deps, tickers, start, end);
-  const closes = await closeLookup(deps, tickers, start, end);
-
+  const securityRows = [];
+  for (const chunk of inChunks([...involved])) {
+    securityRows.push(
+      ...(await tenant.db
+        .select({
+          id: securities.id,
+          ticker: securities.ticker,
+          type: securities.type,
+          isPublic: securities.isPublic,
+          lastPrice: securities.lastPrice,
+          lastPriceDate: securities.lastPriceDate,
+        })
+        .from(securities)
+        .where(tenant.scope(securities, inArray(securities.id, chunk)))),
+    );
+  }
+  const securityById = new Map(securityRows.map((security) => [security.id, security]));
+  const tickers = securityRows.flatMap((security) => (security.isPublic && security.ticker ? [security.ticker] : []));
+  const closes = await closeLookup(deps, tickers, addDays(block.from, -PRICE_LOOKBACK_DAYS), block.to);
   const cashSecurity = [...involved].find((id) => {
     const security = securityById.get(id);
     return security ? isCashSecurity(security) : false;
   });
 
   const days = reconstructHistory({
-    start,
-    end,
+    start: block.start,
+    end: block.end,
+    emitFrom: block.from,
+    emitTo: block.to,
     holdings: current,
     transactions,
     cashSecurityId: cashSecurity ?? null,
@@ -216,11 +359,10 @@ export async function backfillInvestmentAccount(deps: Deps, tenant: Tenant, acco
       return security ? priceOn(security, date, closes) : null;
     },
   });
-
   const holdingRows = days.flatMap((day) =>
     day.positions.map((position) => ({
       householdId: tenant.householdId,
-      accountId,
+      accountId: account.id,
       securityId: position.securityId,
       date: day.date,
       quantity: position.quantity,
@@ -233,44 +375,113 @@ export async function backfillInvestmentAccount(deps: Deps, tenant: Tenant, acco
   );
   const accountRows = days.map((day) => ({
     householdId: tenant.householdId,
-    accountId,
+    accountId: account.id,
     date: day.date,
     balance: day.total,
     currency: account.currency,
     source: 'backfill' as const,
     estimated: day.estimated,
   }));
-
   const inserts = [
     ...chunkRows(holdingDaily, holdingRows).map((chunk) => tenant.db.insert(holdingDaily).values(chunk).onConflictDoNothing()),
     ...chunkRows(accountDaily, accountRows).map((chunk) => tenant.db.insert(accountDaily).values(chunk).onConflictDoNothing()),
   ];
-  // Today's row comes from the regular snapshot.
-  await lease?.renew();
-  if (!from) {
-    await runBatch(tenant.db, inserts);
-    return accountRows.length;
+
+  // Written holding the connection's lease, like every change to its data.
+  const lease = await Lease.acquireWaiting(deps, tenant, connectionLease(block.connectionId));
+  if (!lease) throw new RetryLater(BUSY_RETRY_SECONDS, 'The connection is busy.');
+  try {
+    await renew();
+    await lease.renew();
+    if (block.mode !== 'missed') {
+      // Today's row comes from the regular snapshot; existing rows stay.
+      await runBatch(tenant.db, inserts);
+      return { days: accountRows.length };
+    }
+    // Missed days: the carried-forward snapshot rows give way, with their
+    // positions, in the same batch (entered and imported ones stay).
+    const carriedRows = carriedForward(tenant, [account.id], block.from, addDays(block.to, 1) < block.end ? addDays(block.to, 1) : block.end);
+    const carried = (await tenant.db.select({ date: accountDaily.date }).from(accountDaily).where(carriedRows)).map((row) => row.date);
+    await runAtomic(tenant.db, [
+      ...(carried.length > 0
+        ? [
+            tenant.db
+              .delete(holdingDaily)
+              .where(tenant.scope(holdingDaily, eq(holdingDaily.accountId, account.id), eq(holdingDaily.source, 'sync'), inArray(holdingDaily.date, carried))),
+            tenant.db.delete(accountDaily).where(carriedRows),
+          ]
+        : []),
+      ...inserts,
+    ]);
+    return { days: accountRows.filter((row) => carried.includes(row.date)).length };
+  } finally {
+    await lease.forceRelease();
   }
-  // Missed days: the carried-forward snapshot rows give way, with their
-  // positions, in the same batch (entered and imported ones stay).
-  const carried = (
-    await tenant.db
-      .select({ date: accountDaily.date })
-      .from(accountDaily)
-      .where(carriedForward(tenant, [accountId], from, end))
-  ).map((row) => row.date);
-  await runAtomic(tenant.db, [
-    ...(carried.length > 0
-      ? [
-          tenant.db
-            .delete(holdingDaily)
-            .where(tenant.scope(holdingDaily, eq(holdingDaily.accountId, accountId), eq(holdingDaily.source, 'sync'), inArray(holdingDaily.date, carried))),
-          tenant.db.delete(accountDaily).where(carriedForward(tenant, [accountId], from, end)),
-        ]
-      : []),
-    ...inserts,
+}
+
+/**
+ * history_finish: add up the blocks and record the outcome with the run's log
+ * entry, atomically. Parts that failed (after their retries) fail the load,
+ * which offers Reload history. Then today's snapshot is redone.
+ */
+export async function finishHistory({ deps, tenant, job, renew }: JobContext): Promise<Record<string, unknown>> {
+  const finish = job.payload as unknown as FinishPayload;
+  const parts = await tenant.db
+    .select({ status: jobs.status, result: jobs.result })
+    .from(jobs)
+    .where(tenant.scope(jobs, eq(jobs.groupId, blocksGroup(finish.runId))));
+  const failed = parts.filter((part) => part.status === 'failed').length;
+  const days = parts.reduce((sum, part) => sum + (Number(part.result?.days) || 0), 0);
+  const connection = await getConnection(tenant, finish.connectionId);
+  if (!connection) return { days, failed };
+  const statements: BatchItem<'sqlite'>[] = [];
+  if (finish.mode !== 'missed') {
+    statements.push(
+      tenant.db
+        .update(connections)
+        .set({
+          // Still waiting for the bank's report, if one was asked for.
+          backfillStatus: failed > 0 ? 'failed' : finish.reportRequested ? 'running' : connection.hasInvestments ? 'done' : 'skipped',
+          ...(connection.hasInvestments ? { historyAsOf: marketDate(deps.now()) } : {}),
+          // A late transaction that arrived during this load needs another.
+          historyStaleAt: sql`case when ${connections.historyStaleAt} < ${finish.startedAt} then null else ${connections.historyStaleAt} end`,
+        })
+        .where(tenant.scope(connections, eq(connections.id, connection.id))),
+    );
+  }
+  statements.push(
+    ...(await completeRunStatements(deps, tenant, finish.runId, {
+      counts: days > 0 ? { days } : {},
+      error: failed > 0 ? { code: 'PARTS_FAILED', message: `${failed} of ${parts.length} parts of the history couldn't be built. Reload history to try again.` } : null,
+    })),
+  );
+  await renew();
+  await runAtomic(tenant.db, statements);
+  await enqueue(deps, tenant, [
+    { id: `history:${finish.runId}:snapshot`, type: 'snapshot', payload: { date: marketDate(deps.now()), trigger: 'change' } },
   ]);
-  return accountRows.filter((row) => carried.includes(row.date)).length;
+  return { days, failed };
+}
+
+/**
+ * A history plan or finish that failed for good (after its retries, or
+ * stopped part-way every time): record it on the run, and for a load mark the
+ * history failed, which offers Reload history.
+ */
+export async function historyFailed({ deps, tenant, job }: JobContext, error: { code: string | null; message: string }): Promise<void> {
+  const { connectionId, mode, runId, trigger } = job.payload as unknown as PlanPayload & FinishPayload;
+  const [logged] = await tenant.db.select({ id: syncRuns.id }).from(syncRuns).where(tenant.scope(syncRuns, eq(syncRuns.id, runId)));
+  const statements: BatchItem<'sqlite'>[] = [];
+  if (logged) {
+    statements.push(...(await completeRunStatements(deps, tenant, runId, { error })));
+  } else {
+    // The plan never got as far as logging the run.
+    const run = new SyncRun(deps, tenant, connectionId, 'history', trigger ?? 'nightly', runId);
+    run.error = { code: error.code, message: error.message.slice(0, 500) };
+    statements.push(run.statement());
+  }
+  if (mode !== 'missed') statements.push(backfillStatusStatement(tenant, connectionId, 'failed'));
+  await runAtomic(tenant.db, statements);
 }
 
 /** Snapshot rows that carried a balance forward because the sync was missed. */
@@ -346,47 +557,6 @@ export async function missedDays(tenant: Tenant, connection: ConnectionRow, toda
   const bankFrom = bankDays.sort()[0] ?? null;
   const from = [bankFrom, ...investments.map((row) => row.from)].filter((day): day is IsoDate => day !== null).sort()[0];
   return from ? { from, bankFrom, investments } : null;
-}
-
-/**
- * Fill the days syncs missed (a failed night, or disconnected meanwhile):
- * ask the bank for those days' balances (collected later, replacing only
- * carried-forward ones), and rebuild investment accounts from their
- * transactions for those days. Once per gap: days the bank has nothing for
- * stay estimated but are marked as asked (./assetReports). The caller holds
- * the connection's lease.
- */
-export async function fillMissedDays(deps: Deps, tenant: Tenant, connectionId: string, trigger: SyncTrigger, lease: Lease): Promise<void> {
-  const connection = await getConnection(tenant, connectionId);
-  // Not before the first history load is in, nor while a report is outstanding.
-  if (!connection || connection.status !== 'ok' || connection.backfillStatus !== 'done' || connection.assetReportTokenEnc) return;
-  const today = marketDate(deps.now());
-  const missed = await missedDays(tenant, connection, today);
-  if (!missed) return;
-  if (trigger !== 'manual' && (await historyKeepsStopping(tenant, connection.id))) {
-    await new SyncRun(deps, tenant, connection.id, 'history', trigger).skipped(HISTORY_STOPPED_NOTE);
-    return;
-  }
-
-  const run = new SyncRun(deps, tenant, connection.id, 'history', trigger);
-  run.note = `Filling days missed since ${missed.from}.`;
-  try {
-    await run.begin();
-    const outcome: BatchItem<'sqlite'>[] = [];
-    if (missed.bankFrom) {
-      const report = await requestBalanceHistory(deps, tenant, connection, null, run, Math.min(731, dateRange(missed.bankFrom, today).length));
-      outcome.push(...report.statements);
-    }
-    for (const { accountId, from } of missed.investments) {
-      run.count('days', await backfillInvestmentAccount(deps, tenant, accountId, lease, from));
-    }
-    await lease.renew();
-    await runAtomic(tenant.db, [...outcome, run.statement()]);
-  } catch (error) {
-    await run.failed(error);
-    if (error instanceof LeaseLostError) throw error;
-    console.error('Filling missed days failed', describeError(error));
-  }
 }
 
 /* ------------------------------------------------------------------ */

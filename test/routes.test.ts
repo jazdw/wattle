@@ -2,9 +2,8 @@ import { eq } from 'drizzle-orm';
 import { describe, expect, it } from 'vitest';
 import * as schema from '../server/db/schema';
 import type { Deps } from '../server/ports';
-import { runDaily } from '../server/services/jobs';
 import { account, closes, fakeFx, fakePlaid, fakePrices, fakeQuotes, holding, security } from './fakes';
-import { client, createHousehold, createTestDeps, flush, TODAY } from './helpers';
+import { client, createHousehold, createTestDeps, flush, nightly, TODAY } from './helpers';
 
 async function household(options: Partial<Deps> = {}) {
   const deps = await createTestDeps(options);
@@ -311,15 +310,16 @@ describe('daily job', () => {
     await client(deps, other.cookie)('/api/accounts', { method: 'POST', json: { name: 'Cash', type: 'depository', currency: 'USD', balance: 5 } });
 
     plaid.state.holdings = [holding('brk', 's', 11, 100)];
-    const report = await runDaily(deps);
-    expect(report).toMatchObject({ households: 2, errors: [] });
+    const report = await nightly(deps);
+    expect(report).toMatchObject({ households: 2, errors: [], status: 'ok' });
     expect((await api('/api/portfolio')).body.netWorth).toBe(1100_00);
 
-    // A broken provider is reported, and the other household is still snapshotted.
+    // A broken provider is retried, then reported, and the other household is still snapshotted.
     plaid.getAccounts = async () => {
       throw new Error('network down');
     };
-    const failed = await runDaily(deps);
+    const failed = await nightly(deps);
+    expect(failed.status).toBe('errors');
     expect(failed.errors).toHaveLength(1);
     expect(failed.errors[0]).toContain('network down');
     const rows = await deps.db.select().from(schema.accountDaily).where(eq(schema.accountDaily.householdId, other.householdId));
@@ -387,8 +387,7 @@ describe('nightly type lookup', () => {
     expect((await deps.db.select({ type: schema.securities.type }).from(schema.securities))[0].type).toBeNull();
 
     prices.describe = describe;
-    const { runDaily } = await import('../server/services/jobs');
-    await runDaily(deps);
+    await nightly(deps);
     const [row] = await deps.db.select({ type: schema.securities.type, name: schema.securities.name }).from(schema.securities);
     expect(row).toEqual({ type: 'etf', name: 'Vanguard FTSE Developed Markets ETF' });
   });

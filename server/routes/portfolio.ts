@@ -24,6 +24,7 @@ import { cacheGetMany, cacheSetMany } from '../services/cache';
 import { loadHistory, RANGES, type Range } from '../services/history';
 import { householdActivity, type ActivityCursor } from '../services/activity';
 import { backgroundStatus } from '../services/jobs';
+import { sweep } from '../services/jobRunner';
 import { activeTarget, loadPortfolio } from '../services/portfolio';
 import { stableId } from '../services/ids';
 import { Lease, targetsLease } from '../services/lease';
@@ -78,7 +79,12 @@ function readCursor(value: string | undefined): ActivityCursor | null {
 }
 
 /** Background work that didn't finish (the nightly job, stopped runs), for the warning banner. */
-portfolioRoutes.get('/status', async (c) => c.json(await backgroundStatus(c.env.deps, c.get('tenant'))));
+portfolioRoutes.get('/status', async (c) => {
+  // The app checks this every few minutes while open: also the moment to
+  // wake background jobs whose wake-up was lost (see services/jobRunner.ts).
+  await sweep(c.env.deps).catch((error: unknown) => console.warn('Job sweep failed', describeError(error)));
+  return c.json(await backgroundStatus(c.env.deps, c.get('tenant')));
+});
 
 /** Sync every connection now (rate-limited per connection) and refresh today's snapshot. */
 portfolioRoutes.post('/refresh', async (c) => {

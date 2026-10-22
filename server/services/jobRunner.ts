@@ -82,6 +82,12 @@ export interface JobContext {
 
 export type JobHandler = (context: JobContext) => Promise<Record<string, unknown> | void>;
 export type JobHandlers = Record<JobType, JobHandler>;
+/**
+ * Called once a job has failed for good (out of attempts, or stopped part-way
+ * every time), to record that where people will see it. Best effort.
+ */
+export type FailureHandler = (context: JobContext, error: { code: string | null; message: string }) => Promise<void>;
+export type FailureHandlers = Partial<Record<JobType, FailureHandler>>;
 
 /** What the caller of a run should do with the wake-up: nothing, or try again after a while. */
 export interface JobOutcome {
@@ -91,9 +97,17 @@ export interface JobOutcome {
 
 /** Add jobs for a household (insert-or-ignore) and wake a runner for those that can run. */
 export async function enqueue(deps: Deps, tenant: Tenant, specs: JobSpec[]): Promise<string[]> {
-  if (specs.length === 0) return [];
+  return enqueueForHouseholds(
+    deps,
+    specs.map((spec) => [tenant, spec]),
+  );
+}
+
+/** Add jobs for several households in one atomic batch, then wake a runner for those that can run. */
+export async function enqueueForHouseholds(deps: Deps, entries: [Tenant, JobSpec][]): Promise<string[]> {
+  if (entries.length === 0) return [];
   const now = deps.now().getTime();
-  const rows = specs.map((spec) => ({
+  const rows = entries.map(([tenant, spec]) => ({
     id: spec.id ?? crypto.randomUUID(),
     householdId: tenant.householdId,
     connectionId: spec.connectionId ?? null,
@@ -107,7 +121,7 @@ export async function enqueue(deps: Deps, tenant: Tenant, specs: JobSpec[]): Pro
     createdAt: now,
   }));
   // One statement per job (19 columns allow only five rows per insert anyway), all or none.
-  await runAtomic(tenant.db, rows.map((row) => tenant.db.insert(jobs).values(row).onConflictDoNothing()));
+  await runAtomic(deps.db, rows.map((row) => deps.db.insert(jobs).values(row).onConflictDoNothing()));
   await wakeQueued(deps, rows.filter((row) => row.status === 'queued'));
   return rows.map((row) => row.id);
 }
@@ -122,7 +136,7 @@ async function wakeQueued(deps: Deps, rows: { id: string; runAfter: number }[]):
 }
 
 /** Run one job by id with these handlers. Never throws for the job's own failure. */
-export async function runJobWith(deps: Deps, id: string, handlers: JobHandlers): Promise<JobOutcome> {
+export async function runJobWith(deps: Deps, id: string, handlers: JobHandlers, onFailed: FailureHandlers = {}): Promise<JobOutcome> {
   const now = deps.now().getTime();
   const token = crypto.randomUUID();
   const claim = (condition: ReturnType<typeof and>) =>
@@ -146,11 +160,15 @@ export async function runJobWith(deps: Deps, id: string, handlers: JobHandlers):
   }
   const tenant = new Tenant(deps.db, job.householdId);
   const mine = and(eq(jobs.id, id), eq(jobs.lockToken, token));
-
-  if (resumed && job.attempts > job.maxAttempts) {
-    await finish(deps, job, mine, { status: 'failed', errorCode: INTERRUPTED, errorMessage: INTERRUPTED_MESSAGE });
-    return {};
-  }
+  const failedForGood = async (errorCode: string | null, errorMessage: string) => {
+    console.error(`Job ${job.type} failed`, errorMessage);
+    await finish(deps, job, mine, { status: 'failed', errorCode, errorMessage });
+    try {
+      await onFailed[job.type]?.(context, { code: errorCode, message: errorMessage });
+    } catch (error) {
+      console.error(`Recording the failed ${job.type} job failed`, describeError(error));
+    }
+  };
 
   const context: JobContext = {
     deps,
@@ -165,6 +183,10 @@ export async function runJobWith(deps: Deps, id: string, handlers: JobHandlers):
       if (renewed.length === 0) throw new JobLostError(id);
     },
   };
+  if (resumed && job.attempts > job.maxAttempts) {
+    await failedForGood(INTERRUPTED, INTERRUPTED_MESSAGE);
+    return {};
+  }
   try {
     const result = await handlers[job.type](context);
     await finish(deps, job, mine, { status: 'done', result: result ?? null, errorCode: null, errorMessage: null });
@@ -192,8 +214,7 @@ export async function runJobWith(deps: Deps, id: string, handlers: JobHandlers):
         .where(mine);
       await deps.jobQueue.wake([id], delay);
     } else {
-      console.error(`Job ${job.type} failed`, message);
-      await finish(deps, job, mine, { status: 'failed', errorCode, errorMessage: message });
+      await failedForGood(errorCode, message);
     }
   }
   return {};

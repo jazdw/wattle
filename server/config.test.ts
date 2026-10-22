@@ -13,7 +13,7 @@ describe('config', () => {
   });
 
   it('only enables providers that have credentials', () => {
-    const none = depsFromEnv({}, {} as Db, NO_QUEUE, () => {});
+    const none = depsFromEnv({}, {} as Db, NO_QUEUE);
     expect([none.plaid, none.prices, none.quotes]).toEqual([null, null, null]);
     expect(none.fx).not.toBeNull();
 
@@ -21,12 +21,11 @@ describe('config', () => {
       { PLAID_CLIENT_ID: 'c', PLAID_SECRET: 's', PLAID_ENV: 'production', TIINGO_API_KEY: 't', FINNHUB_API_KEY: 'f' },
       {} as Db,
       NO_QUEUE,
-      () => {},
     );
     expect(all.plaid?.env).toBe('production');
     expect(all.prices).not.toBeNull();
     expect(all.quotes).not.toBeNull();
-    expect(depsFromEnv({ PLAID_CLIENT_ID: 'c', PLAID_SECRET: 's', PLAID_ENV: 'nonsense' }, {} as Db, NO_QUEUE, () => {}).plaid?.env).toBe('sandbox');
+    expect(depsFromEnv({ PLAID_CLIENT_ID: 'c', PLAID_SECRET: 's', PLAID_ENV: 'nonsense' }, {} as Db, NO_QUEUE).plaid?.env).toBe('sandbox');
   });
 
   it('never removes logins at Plaid unless PLAID_ALLOW_REMOVE is exactly true', () => {
@@ -43,7 +42,7 @@ describe('config', () => {
   });
 
   it('takes live quotes from Finnhub when its key is set, else Tiingo; QUOTE_PROVIDER overrides', () => {
-    const quotes = (env: Record<string, string>) => depsFromEnv(env, {} as Db, NO_QUEUE, () => {}).quotes;
+    const quotes = (env: Record<string, string>) => depsFromEnv(env, {} as Db, NO_QUEUE).quotes;
     // Finnhub has no bulk quote (no `quotes` method); Tiingo does.
     expect(quotes({ TIINGO_API_KEY: 't', FINNHUB_API_KEY: 'f' })?.quotes).toBeUndefined(); // Finnhub by default
     expect(quotes({ FINNHUB_API_KEY: 'f' })?.quotes).toBeUndefined();

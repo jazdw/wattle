@@ -29,7 +29,7 @@ import type { AppEnv } from '../env';
 import { HttpError, notFound, readBody, requestCurrency } from '../lib/http';
 import type { Deps, SecurityDescription } from '../ports';
 import { connectionActivity, SyncRun } from '../services/activity';
-import { backfillConnection } from '../services/backfill';
+import { queueHistory } from '../services/backfill';
 import { signedBalance, writeBalances } from '../services/balances';
 import { toCurrency } from '../services/portfolio';
 import { closeLookup, describeTickers, ensureRecentCloses, fxLookup } from '../services/pricing';
@@ -119,8 +119,8 @@ connectionRoutes.post('/:id/backfill', async (c) => {
   if (!connection) notFound('Connection not found.');
   const url = new URL(c.req.url);
   const hook = url.protocol === 'https:' ? `${url.origin}/api/plaid/webhook` : null;
-  deps.background(backfillConnection(deps, tenant, connection.id, hook, 'manual'));
-  return c.json({ ok: true });
+  const queued = await queueHistory(deps, tenant, connection.id, 'load', 'manual', hook);
+  return c.json({ ok: true, queued });
 });
 
 /** Resume syncing a disconnected login (same Plaid Item, so no new slot). */
