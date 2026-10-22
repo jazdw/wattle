@@ -6,15 +6,12 @@ import { marketDate, type IsoDate } from '../../shared/dates';
 import type { Deps } from '../ports';
 import type { SyncTrigger } from './activity';
 import { finishNightly } from './jobs';
+import { collectReport, collectReportAccount, finishReport, reportFailed } from './assetReports';
 import { finishHistory, historyBlock, historyFailed, historyPrices, planHistory } from './backfill';
 import { runJobWith, type FailureHandlers, type JobHandler, type JobHandlers, type JobOutcome } from './jobRunner';
 import { typeHandEnteredSecurities } from './securityTypes';
 import { snapshotHousehold } from './snapshots';
 import { syncConnection } from './sync';
-
-const notYet: JobHandler = async ({ job }) => {
-  throw new Error(`No handler for ${job.type} jobs yet.`);
-};
 
 /**
  * Sync one connection. Nightly, the household's snapshot is its own job
@@ -48,9 +45,9 @@ export const HANDLERS: JobHandlers = {
   history_prices: historyPrices,
   history_block: historyBlock,
   history_finish: finishHistory,
-  report_collect: notYet,
-  report_account: notYet,
-  report_finish: notYet,
+  report_collect: collectReport,
+  report_account: collectReportAccount,
+  report_finish: finishReport,
 };
 
 /**
@@ -60,6 +57,8 @@ export const HANDLERS: JobHandlers = {
 const ON_FAILED: FailureHandlers = {
   history_plan: historyFailed,
   history_finish: historyFailed,
+  report_collect: reportFailed,
+  report_finish: reportFailed,
 };
 
 /** Run one job by id (the Worker's queue handler, Node's loop, tests). */
