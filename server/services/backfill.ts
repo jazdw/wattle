@@ -18,7 +18,7 @@
  * never overwrite synced, imported or manual rows, and every job can run
  * again safely.
  */
-import { and, eq, gte, inArray, isNull, lt, max, or, sql } from 'drizzle-orm';
+import { and, eq, gte, inArray, isNull, lt, max, min, or, sql } from 'drizzle-orm';
 import type { BatchItem } from 'drizzle-orm/batch';
 import { addDays, dateRange, marketDate, type IsoDate } from '../../shared/dates';
 import { PlaidApiError } from '../adapters/plaid';
@@ -83,6 +83,8 @@ const MAX_TICKERS_PER_JOB = 40;
 const PRICE_LOOKBACK_DAYS = 21;
 /** A busy connection (a sync running) is tried again after this. */
 const BUSY_RETRY_SECONDS = 30;
+/** After a fill of missed days fails, the next waits this long. */
+const MISSED_RETRY_MS = 6 * 3600 * 1000;
 /** A requested asset report is first looked for after this (Plaid takes from seconds to minutes). */
 const REPORT_FIRST_CHECK_SECONDS = 60;
 /** A rate-limited price provider (Tiingo allows 50 requests an hour) is asked again after this... */
@@ -97,6 +99,14 @@ function backfillStatusStatement(tenant: Tenant, connectionId: string, status: C
   return tenant.db
     .update(connections)
     .set({ backfillStatus: status })
+    .where(tenant.scope(connections, eq(connections.id, connectionId)));
+}
+
+/** After a fill of missed days: wait before the next if it failed (its days stay carried forward), else none. */
+function missedRetryStatement(deps: Deps, tenant: Tenant, connectionId: string, failed: boolean) {
+  return tenant.db
+    .update(connections)
+    .set({ missedRetryAt: failed ? deps.now().getTime() + MISSED_RETRY_MS : null })
     .where(tenant.scope(connections, eq(connections.id, connectionId)));
 }
 
@@ -183,6 +193,8 @@ export async function queueDueHistory(deps: Deps, tenant: Tenant, connectionId: 
     return;
   }
   if (connection.status !== 'ok' || connection.backfillStatus !== 'done' || connection.assetReportTokenEnc) return;
+  // A fill that failed is tried again later, not on every sync (webhooks bring several a day).
+  if (connection.missedRetryAt !== null && connection.missedRetryAt > deps.now().getTime()) return;
   if (await missedDays(tenant, connection, marketDate(deps.now()))) await queueHistory(deps, tenant, connectionId, 'missed', trigger);
 }
 
@@ -471,7 +483,15 @@ export async function historyBlock({ deps, tenant, job, renew }: JobContext): Pr
         ? [
             tenant.db
               .delete(holdingDaily)
-              .where(tenant.scope(holdingDaily, eq(holdingDaily.accountId, account.id), eq(holdingDaily.source, 'sync'), inArray(holdingDaily.date, carried))),
+              // By subquery, not a list of dates: D1 allows 100 bound values per statement.
+              .where(
+                tenant.scope(
+                  holdingDaily,
+                  eq(holdingDaily.accountId, account.id),
+                  eq(holdingDaily.source, 'sync'),
+                  inArray(holdingDaily.date, tenant.db.select({ date: accountDaily.date }).from(accountDaily).where(carriedRows)),
+                ),
+              ),
             tenant.db.delete(accountDaily).where(carriedRows),
           ]
         : []),
@@ -486,9 +506,9 @@ export async function historyBlock({ deps, tenant, job, renew }: JobContext): Pr
 /**
  * history_finish: add up the blocks and record the outcome with the run's log
  * entry, atomically. Parts that failed (after their retries), prices or
- * blocks, fail the load, which offers Reload history (a missed-day fill
- * that failed leaves the carried-forward balances). Then today's snapshot is
- * redone.
+ * blocks, fail the load, which offers Reload history; a missed-day fill
+ * that failed leaves its days carried forward, for a sync after
+ * MISSED_RETRY_MS to fill. Then today's snapshot is redone.
  */
 export async function finishHistory({ deps, tenant, job, renew }: JobContext): Promise<Record<string, unknown>> {
   const finish = job.payload as unknown as FinishPayload;
@@ -501,7 +521,7 @@ export async function finishHistory({ deps, tenant, job, renew }: JobContext): P
   const days = parts.reduce((sum, part) => sum + (Number(part.result?.days) || 0), 0);
   const connection = await getConnection(tenant, finish.connectionId);
   if (!connection) return { days, failed };
-  const next = finish.mode === 'missed' ? 'Those days keep the balances carried forward.' : 'Reload history to try again.';
+  const next = finish.mode === 'missed' ? 'Those days keep their carried-forward balances until a later sync fills them.' : 'Reload history to try again.';
   const error =
     pricesFailed > 0
       ? { code: 'PRICES_UNAVAILABLE', message: `Prices for some of the holdings couldn't be loaded, so no history was written. ${next}` }
@@ -509,7 +529,9 @@ export async function finishHistory({ deps, tenant, job, renew }: JobContext): P
         ? { code: 'PARTS_FAILED', message: `${failed} of ${parts.length} parts of the history couldn't be built. ${next}` }
         : null;
   const statements: BatchItem<'sqlite'>[] = [];
-  if (finish.mode !== 'missed') {
+  if (finish.mode === 'missed') {
+    statements.push(missedRetryStatement(deps, tenant, connection.id, failed > 0));
+  } else {
     statements.push(
       tenant.db
         .update(connections)
@@ -562,7 +584,7 @@ export async function historyFailed({ deps, tenant, job }: JobContext, error: { 
     run.error = { code: error.code, message: error.message.slice(0, 500) };
     statements.push(run.statement());
   }
-  if (mode !== 'missed') statements.push(backfillStatusStatement(tenant, connectionId, 'failed'));
+  statements.push(mode === 'missed' ? missedRetryStatement(deps, tenant, connectionId, true) : backfillStatusStatement(tenant, connectionId, 'failed'));
   await runAtomic(tenant.db, statements);
 }
 
@@ -620,11 +642,29 @@ export async function missedDays(tenant: Tenant, connection: ConnectionRow, toda
     )
     .groupBy(accountDaily.accountId);
   const lastKnown = new Map(known.map((row) => [row.accountId, row.last]));
+  // Balances carried forward on days a sync was missed, still there because
+  // no fill has replaced them yet (or one failed): those days are missed too,
+  // even with known figures after them.
+  const carried = await tenant.db
+    .select({ accountId: accountDaily.accountId, first: min(accountDaily.date) })
+    .from(accountDaily)
+    .where(
+      carriedForward(
+        tenant,
+        accountRows.map((row) => row.id),
+        addDays(today, -HISTORY_DAYS),
+        today,
+      ),
+    )
+    .groupBy(accountDaily.accountId);
+  const firstCarried = new Map(carried.map((row) => [row.accountId, row.first]));
   // Today's balance has just been synced (the snapshot follows), so a gap is
-  // a day before yesterday with no known figure after it.
+  // a day before yesterday with no known figure after it, or a carried day.
   const firstMissed = (accountId: string): IsoDate | null => {
     const last = lastKnown.get(accountId);
-    return last && last < addDays(today, -1) ? addDays(last, 1) : null;
+    const gap = last && last < addDays(today, -1) ? addDays(last, 1) : null;
+    const days = [gap, firstCarried.get(accountId) ?? null].filter((day): day is IsoDate => day !== null).sort();
+    return days[0] ?? null;
   };
 
   // The same split as the first load: with Assets, the bank covers all but investment accounts.

@@ -137,6 +137,8 @@ export const connections = sqliteTable(
      * built: rebuild it. Cleared only by a rebuild that started after this.
      */
     historyStaleAt: integer('history_stale_at'),
+    /** A fill of missed days failed: the next isn't tried before then (each may ask the bank for a report). */
+    missedRetryAt: integer('missed_retry_at'),
     /** Encrypted Plaid asset_report_token while a balance-history report is pending. */
     assetReportTokenEnc: text('asset_report_token_enc'),
     /** Plaid asset_report_id of the pending report (matches the ASSETS webhook; not secret). */

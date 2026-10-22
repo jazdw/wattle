@@ -206,3 +206,80 @@ describe('history prices', () => {
     expect(done.backfilled.every((row) => !row.estimated)).toBe(true);
   });
 });
+
+describe('missed days', () => {
+  it('a fill that failed is found again by a later sync, not before the retry wait, and then fills every carried day', async () => {
+    const plaid = fakePlaid({
+      accounts: [account('brk', 'investment', 3000)],
+      securities: [security('s-vti', 'VTI', 'etf', 100)],
+      holdings: [holding('brk', 's-vti', 30, 100)],
+      transactions: [buy('t1', 'brk', 's-vti', '2026-03-15', 10, 80)] as never,
+    });
+    const prices = fakePrices({ VTI: closes('2024-09-01', 1100, 60, 0.05) });
+    const working = prices.dailyCloses;
+    let pricesDown = false;
+    prices.dailyCloses = async (ticker, start, end) => {
+      if (pricesDown) throw new Error('Tiingo HTTP 500');
+      return working(ticker, start, end);
+    };
+    const deps = await createTestDeps({ plaid, prices });
+    const home = await createHousehold(deps, 'Home', 'me@example.com');
+    const tenant = new Tenant(deps.db, home.householdId);
+    await client(deps, home.cookie)('/api/plaid/exchange', { method: 'POST', json: { publicToken: 'p', kind: 'investments' } });
+    await settle(deps);
+    const [connection] = await deps.db.select().from(schema.connections);
+    expect(connection.backfillStatus).toBe('done');
+
+    const start = deps.now().getTime();
+    const at = (ms: number) => (deps.now = () => new Date(ms));
+    const snapshot = () => snapshotHousehold(deps, tenant, marketDate(new Date(deps.now().getTime() - 5 * 3600_000)));
+    const carried = async () =>
+      (await deps.db.select().from(schema.accountDaily).where(eq(schema.accountDaily.source, 'sync'))).filter((row) => row.estimated).length;
+    const plans = async () => (await deps.db.select().from(schema.jobs).where(eq(schema.jobs.type, 'history_plan'))).length;
+    const sync = async () => {
+      await syncConnection(deps, tenant, connection.id, 'manual');
+      await settle(deps);
+    };
+
+    // 120 nights the syncs fail (and the price provider is down): each snapshot carries the balance forward.
+    pricesDown = true;
+    const workingHoldings = plaid.getHoldings;
+    plaid.getHoldings = async () => {
+      throw new Error('network down');
+    };
+    for (let night = 1; night <= 120; night += 1) {
+      at(start + night * 86400_000);
+      await syncConnection(deps, tenant, connection.id, 'nightly').catch(() => {});
+      await snapshot();
+    }
+    plaid.getHoldings = workingHoldings;
+    expect(await carried()).toBeGreaterThan(100);
+
+    // The sync works again, but the fill's prices don't: it fails, writing nothing.
+    at(start + 121 * 86400_000);
+    await sync();
+    await snapshot(); // a known figure after the gap
+    const failedRun = (await deps.db.select().from(schema.syncRuns).where(eq(schema.syncRuns.action, 'history'))).at(-1)!;
+    expect(failedRun).toMatchObject({ outcome: 'error', errorCode: 'PRICES_UNAVAILABLE' });
+    expect(await carried()).toBeGreaterThan(100);
+    const [afterFailure] = await deps.db.select().from(schema.connections);
+    expect(afterFailure.missedRetryAt).toBeGreaterThan(deps.now().getTime());
+
+    // An hour later: not tried again yet.
+    pricesDown = false;
+    const before = await plans();
+    at(deps.now().getTime() + 3600_000);
+    await sync();
+    expect(await plans()).toBe(before);
+
+    // After the wait, a sync finds the carried days (though a known day follows them) and fills them all.
+    at(deps.now().getTime() + 6 * 3600_000);
+    await sync();
+    expect(await plans()).toBe(before + 1);
+    expect(await carried()).toBe(0);
+    const filled = (await deps.db.select().from(schema.syncRuns).where(eq(schema.syncRuns.action, 'history'))).at(-1)!;
+    expect(filled).toMatchObject({ outcome: 'ok' });
+    const [done] = await deps.db.select().from(schema.connections);
+    expect(done.missedRetryAt).toBeNull();
+  });
+});
