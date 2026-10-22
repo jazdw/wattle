@@ -19,20 +19,48 @@ function checkParams(statement: unknown): void {
   if (count > D1_MAX_PARAMS) throw new Error(`Statement binds ${count} parameters; D1 allows ${D1_MAX_PARAMS}.`);
 }
 
+/**
+ * Database work, as D1 would count it: each execute or batch is one call (a
+ * request to D1 from the Worker), each statement in it a query, and rows
+ * changed by inserts, updates and deletes are rows written (before indexes).
+ */
+export interface DbStats {
+  calls: number;
+  statements: number;
+  rowsWritten: number;
+}
+
+const dbStatsByDeps = new WeakMap<Deps, DbStats>();
+
+/** The database work done through `deps` so far (since it was created, excluding migrations). */
+export function dbStats(deps: Deps): DbStats {
+  return { ...dbStatsByDeps.get(deps)! };
+}
+
 export async function createTestDeps(overrides: Partial<Deps> = {}): Promise<Deps> {
   const client = createClient({ url: ':memory:' });
   const execute = client.execute.bind(client);
   const batch = client.batch.bind(client);
-  client.execute = ((statement: Parameters<typeof execute>[0]) => {
+  const stats: DbStats = { calls: 0, statements: 0, rowsWritten: 0 };
+  client.execute = (async (statement: Parameters<typeof execute>[0]) => {
     checkParams(statement);
-    return execute(statement);
+    const result = await execute(statement);
+    stats.calls += 1;
+    stats.statements += 1;
+    stats.rowsWritten += result.rowsAffected;
+    return result;
   }) as typeof client.execute;
-  client.batch = ((statements: Parameters<typeof batch>[0], mode?: Parameters<typeof batch>[1]) => {
+  client.batch = (async (statements: Parameters<typeof batch>[0], mode?: Parameters<typeof batch>[1]) => {
     for (const statement of statements) checkParams(statement);
-    return batch(statements, mode);
+    const results = await batch(statements, mode);
+    stats.calls += 1;
+    stats.statements += statements.length;
+    for (const result of results) stats.rowsWritten += result.rowsAffected;
+    return results;
   }) as typeof client.batch;
   const db = drizzle(client, { schema });
   await migrate(db, { migrationsFolder: 'migrations' });
+  Object.assign(stats, { calls: 0, statements: 0, rowsWritten: 0 });
   const pending: Promise<unknown>[] = [];
   const deps: Deps = {
     db: db as unknown as Db,
@@ -49,6 +77,7 @@ export async function createTestDeps(overrides: Partial<Deps> = {}): Promise<Dep
     ...overrides,
   };
   pendingWork.set(deps, pending);
+  dbStatsByDeps.set(deps, stats);
   return deps;
 }
 

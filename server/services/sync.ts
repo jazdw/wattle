@@ -14,7 +14,7 @@ import { chunkRows, inChunks, runAtomic } from '../db/batch';
 import { accounts, connections, holdings, investmentTransactions, securities } from '../db/schema';
 import type { Tenant } from '../db/tenant';
 import type { Deps } from '../ports';
-import { SyncRun, type SyncTrigger } from './activity';
+import { closeInterruptedRuns, historyKeepsStopping, MAX_INTERRUPTED_HISTORY, SyncRun, type SyncTrigger } from './activity';
 import { collectPendingReport } from './assetReports';
 import { fillMissedDays, runHistoryLoad } from './backfill';
 import { BusyError, connectionLease, holdWhile, Lease, snapshotLease } from './lease';
@@ -254,6 +254,21 @@ export async function syncConnection(
 }
 
 /**
+ * The work a sync can leave for later: collect a ready bank report, run a
+ * due history load, fill missed days. The nightly job runs this for each
+ * connection after every sync and snapshot is done, so the heavy history
+ * work can't stop those if it's cut short.
+ */
+export async function runPendingWork(deps: Deps, tenant: Tenant, connectionId: string, trigger: SyncTrigger): Promise<void> {
+  const connection = await getConnection(tenant, connectionId);
+  if (!connection || !isActive(connection)) return;
+  const lease = await Lease.acquire(deps, tenant, connectionLease(connectionId));
+  // Busy: whoever holds it does this same work before releasing.
+  if (!lease) return;
+  await underConnectionLease(deps, tenant, connectionId, trigger, lease, {}, async () => undefined);
+}
+
+/**
  * Run `first` holding the connection's lease, then: collect a ready bank
  * report, run a due history load, and sync again while notes arrive. Every
  * path that changes a connection's data goes through here.
@@ -271,6 +286,9 @@ export async function underConnectionLease<T>(
   await holdWhile(lease, async (run) => {
     // Stopping releases the lease now (notes stay), so holdWhile ends too.
     if (run === 1) {
+      // Holding the lease, nothing else is running: a run still marked
+      // running was stopped part-way.
+      await closeInterruptedRuns(deps, tenant, connectionId);
       result = await first();
       if (options.stopIf?.(result)) return lease.forceRelease();
     } else {
@@ -285,13 +303,19 @@ export async function underConnectionLease<T>(
     }
     const afterReport = await getConnection(tenant, connectionId);
     if (options.history !== false && afterReport && historyDue(afterReport)) {
-      await runHistoryLoad(deps, tenant, afterReport.id, trigger, lease, null);
+      if (trigger !== 'manual' && (await historyKeepsStopping(tenant, connectionId))) {
+        await new SyncRun(deps, tenant, connectionId, 'history', trigger).skipped(HISTORY_STOPPED_NOTE);
+      } else {
+        await runHistoryLoad(deps, tenant, afterReport.id, trigger, lease, null);
+      }
     }
     // Days the syncs missed, from the stored balances.
     if (options.history !== false) await fillMissedDays(deps, tenant, connectionId, trigger, lease);
   });
   return result as T;
 }
+
+export const HISTORY_STOPPED_NOTE = `History work was stopped part-way ${MAX_INTERRUPTED_HISTORY} times in a row, so it no longer runs on its own. Use Reload history to try again.`;
 
 /**
  * A history load is due: never run; abandoned part-way ("running" while we
@@ -316,6 +340,7 @@ async function syncPass(
   const connection = (await getConnection(tenant, connectionId))!;
   const run = new SyncRun(deps, tenant, connection.id, 'sync', trigger);
   run.note = note;
+  await run.begin();
   const setConnection = (values: Partial<typeof connections.$inferInsert>) =>
     tenant.db.update(connections).set(values).where(tenant.scope(connections, eq(connections.id, connection.id)));
   try {

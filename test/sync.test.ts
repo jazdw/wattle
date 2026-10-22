@@ -9,6 +9,8 @@ import { backfillConnection } from '../server/services/backfill';
 import { saveCloses } from '../server/services/pricing';
 import { snapshotHousehold } from '../server/services/snapshots';
 import { syncConnection } from '../server/services/sync';
+import { runDaily } from '../server/services/jobs';
+import { marketDate } from '../shared/dates';
 import { account, closes, fakePlaid, fakePrices, holding, security } from './fakes';
 import { client, createHousehold, createTestDeps, flush, TODAY } from './helpers';
 
@@ -694,5 +696,117 @@ describe('missed days', () => {
       .from(schema.accountDaily)
       .where(and(eq(schema.accountDaily.accountId, brk.id), eq(schema.accountDaily.date, '2026-10-10')));
     expect(day.source).toBe('backfill');
+  });
+});
+
+describe('runs stopped part-way (a Worker limit, a crash)', () => {
+  /** A bank login whose history load is stuck asking for the report, as if the Worker had been stopped there. */
+  async function stuckBank() {
+    const plaid = fakePlaid({ accounts: [account('chk', 'depository', 1000)], itemProducts: ['assets'], historicalBalances: { chk: [] } });
+    const working = plaid.createAssetReport;
+    const stop = () => {
+      plaid.createAssetReport = async (...args) => {
+        plaid.state.calls.push('asset_report:create');
+        void args;
+        return new Promise(() => {}); // never returns: no more code runs, like a stopped Worker
+      };
+    };
+    stop();
+    const deps = await createTestDeps({ plaid });
+    const home = await createHousehold(deps, 'Home', 'me@example.com');
+    const api = client(deps, home.cookie);
+    await api('/api/plaid/exchange', { method: 'POST', json: { publicToken: 'p', kind: 'account' } });
+    await expect.poll(() => plaid.state.calls.includes('asset_report:create')).toBe(true);
+    const tenant = new Tenant(deps.db, home.householdId);
+    const [connection] = await deps.db.select().from(schema.connections);
+    const later = (minutes: number) => {
+      const at = deps.now().getTime() + minutes * 60_000;
+      deps.now = () => new Date(at);
+    };
+    const runs = async () =>
+      (await deps.db.select().from(schema.syncRuns).orderBy(schema.syncRuns.startedAt)).map((run) => ({ action: run.action, outcome: run.outcome, errorCode: run.errorCode, note: run.note }));
+    return { deps, plaid, api, tenant, connection, later, runs, stop, resume: () => (plaid.createAssetReport = working) };
+  }
+
+  it('records the stopped run as interrupted when the next run takes over, and retries the history load', async () => {
+    const { deps, api, tenant, connection, later, runs, resume } = await stuckBank();
+    expect((await runs()).find((run) => run.action === 'history')).toMatchObject({ outcome: 'running' });
+
+    later(3); // its lease runs out
+    resume();
+    await syncConnection(deps, tenant, connection.id, 'manual');
+    const history = (await runs()).filter((run) => run.action === 'history');
+    expect(history[0]).toMatchObject({ outcome: 'error', errorCode: 'INTERRUPTED' });
+    expect(history[1]).toMatchObject({ outcome: 'ok' }); // retried
+    const [after] = await deps.db.select().from(schema.connections);
+    expect(after.assetReportTokenEnc).not.toBeNull();
+
+    // Shown in the warning banner, to this household only.
+    const status = (await api('/api/status')).body;
+    expect(status.interrupted).toEqual([expect.objectContaining({ connectionId: connection.id, action: 'history', institutionName: 'Vanguard' })]);
+    expect(status.historyStopped).toEqual([]);
+    const other = await createHousehold(deps, 'Other', 'other@example.com');
+    expect((await client(deps, other.cookie)('/api/status')).body.interrupted).toEqual([]);
+  });
+
+  it('stops retrying history work stopped three times in a row, until you reload it', async () => {
+    const { deps, plaid, api, tenant, connection, later, runs } = await stuckBank();
+    for (let attempt = 2; attempt <= 3; attempt += 1) {
+      later(3);
+      void syncConnection(deps, tenant, connection.id, 'nightly'); // stuck again
+      await expect.poll(() => plaid.state.calls.filter((call) => call === 'asset_report:create').length).toBe(attempt);
+    }
+    later(3);
+    const asked = () => plaid.state.calls.filter((call) => call === 'asset_report:create').length;
+    await syncConnection(deps, tenant, connection.id, 'nightly');
+    expect(asked()).toBe(3); // not asked again
+    const history = (await runs()).filter((run) => run.action === 'history');
+    expect(history.slice(0, 3).every((run) => run.errorCode === 'INTERRUPTED')).toBe(true);
+    expect(history.at(-1)).toMatchObject({ outcome: 'skipped', note: expect.stringContaining('no longer runs on its own') });
+    expect((await api('/api/status')).body.historyStopped).toEqual([{ connectionId: connection.id, institutionName: 'Vanguard' }]);
+
+    // Reload history (Activity) still runs it.
+    expect((await api(`/api/connections/${connection.id}/backfill`, { method: 'POST' })).status).toBe(200);
+    await expect.poll(asked).toBe(4);
+  });
+
+  it('the nightly job syncs and snapshots everyone before history work, which then gets stuck', async () => {
+    const { deps, connection, later } = await stuckBank();
+    const other = await createHousehold(deps, 'Other', 'other@example.com');
+    const created = await client(deps, other.cookie)('/api/accounts', {
+      method: 'POST',
+      json: { name: 'House', type: 'property', currency: 'USD', balance: 500000, date: '2026-10-01' },
+    });
+    later(24 * 60); // the next night
+    void runDaily(deps); // its history pass gets stuck
+    await expect.poll(async () => (await deps.db.select().from(schema.jobRuns))[0]?.status).toBe('running');
+    const today = marketDate(deps.now());
+    const snapshot = async (accountId: string) =>
+      (await deps.db.select().from(schema.accountDaily).where(and(eq(schema.accountDaily.accountId, accountId), eq(schema.accountDaily.date, today))))[0];
+    const [chk] = await deps.db.select().from(schema.accounts).where(eq(schema.accounts.connectionId, connection.id));
+    await expect.poll(() => snapshot(created.body.id)).toBeTruthy();
+    expect(await snapshot(chk.id)).toMatchObject({ source: 'sync' });
+  });
+
+  it('marks a nightly job left running as interrupted, and reports it', async () => {
+    const deps = await createTestDeps();
+    const home = await createHousehold(deps, 'Home', 'me@example.com');
+    const api = client(deps, home.cookie);
+    const startedAt = deps.now().getTime() - 25 * 3600_000;
+    await deps.db.insert(schema.jobRuns).values({ id: 'j1', job: 'daily', date: '2026-10-07', startedAt, finishedAt: startedAt, status: 'running', households: 0, errors: [] });
+    expect((await api('/api/status')).body.nightly).toEqual({ date: '2026-10-07', state: 'interrupted' });
+
+    const report = await runDaily(deps);
+    expect(report.errors).toContain('The daily job of 2026-10-07 was stopped before finishing.');
+    const jobs = await deps.db.select({ date: schema.jobRuns.date, status: schema.jobRuns.status }).from(schema.jobRuns).orderBy(schema.jobRuns.startedAt);
+    expect(jobs).toEqual([
+      { date: '2026-10-07', status: 'interrupted' },
+      { date: '2026-10-08', status: 'errors' },
+    ]);
+    expect((await api('/api/status')).body.nightly).toEqual({ date: '2026-10-08', state: 'finished' });
+
+    const later = deps.now().getTime() + 27 * 3600_000;
+    deps.now = () => new Date(later);
+    expect((await api('/api/status')).body.nightly).toEqual({ date: '2026-10-08', state: 'late' });
   });
 });

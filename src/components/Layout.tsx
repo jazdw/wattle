@@ -2,6 +2,7 @@ import { ChartPie, Grid3x3, Landmark, LayoutDashboard, LineChart, List, LogOut, 
 import { Suspense } from 'react';
 import { NavLink, Outlet } from 'react-router-dom';
 import { useConnections } from '../hooks/queries';
+import { StatusBanner } from './StatusBanner';
 import { useAuth } from '../hooks/useAuth';
 import { cn } from '../lib/utils';
 import { Avatar } from './ui/misc';
@@ -82,6 +83,7 @@ export function Layout() {
         </div>
       </aside>
       <main className="mx-auto w-full max-w-6xl px-4 py-5 sm:px-6 sm:py-8">
+        <StatusBanner />
         <Suspense fallback={<div className="h-96 animate-pulse rounded-lg bg-muted" />}>
           <Outlet />
         </Suspense>
