@@ -46,9 +46,10 @@ export function Growth() {
   const [accountId, setAccountId] = useState<string | null>(null);
   const accounts = useAccounts();
 
-  const group: HistoryGroup = accountId ? 'holding' : view;
-  const history = useHistory(range, group, accountId ?? undefined);
   const account = accounts.data?.accounts.find((candidate) => candidate.id === accountId);
+  // A chosen account shows its holdings if it has any, otherwise its balance.
+  const group: HistoryGroup = account ? (account.holdingCount > 0 ? 'holding' : 'account') : view;
+  const history = useHistory(range, group, account?.id);
 
   const series = useMemo(() => {
     if (!history.data) return [];
@@ -66,7 +67,7 @@ export function Growth() {
     return { ...item, first, last, change: last - first, percent: first ? (last - first) / Math.abs(first) : 0 };
   });
 
-  const drillable = (accounts.data?.accounts ?? []).filter((candidate) => !candidate.isHidden && candidate.holdingCount > 0);
+  const selectable = (accounts.data?.accounts ?? []).filter((candidate) => !candidate.isHidden);
 
   return (
     <>
@@ -83,7 +84,9 @@ export function Growth() {
                 <Button variant="ghost" size="sm" onClick={() => setAccountId(null)}>
                   <ChevronLeft /> All accounts
                 </Button>
-                <span className="font-medium">{account?.name} — holdings</span>
+                <span className="font-medium">
+                  {account?.name} — {group === 'holding' ? 'holdings' : 'balance'}
+                </span>
               </>
             ) : (
               <Segmented
@@ -100,10 +103,10 @@ export function Growth() {
               <NativeSelect
                 value={accountId ?? ''}
                 onChange={(event) => setAccountId(event.target.value || null)}
-                aria-label="Drill into an account's holdings"
+                aria-label="Select an account"
               >
-                <option value="">Drill into holdings…</option>
-                {drillable.map((candidate) => (
+                <option value="">Select an account</option>
+                {selectable.map((candidate) => (
                   <option key={candidate.id} value={candidate.id}>
                     {candidate.name}
                   </option>
@@ -147,9 +150,9 @@ export function Growth() {
               {rows.map((row) => (
                 <tr
                   key={row.key}
-                  className={group === 'account' && row.key !== '__other' ? 'cursor-pointer hover:bg-muted/50' : undefined}
+                  className={!account && group === 'account' && row.key !== '__other' ? 'cursor-pointer hover:bg-muted/50' : undefined}
                   onClick={() => {
-                    if (group === 'account' && drillable.some((candidate) => candidate.id === row.key)) setAccountId(row.key);
+                    if (!account && group === 'account' && selectable.some((candidate) => candidate.id === row.key)) setAccountId(row.key);
                   }}
                 >
                   <Td>
