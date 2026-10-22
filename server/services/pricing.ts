@@ -7,9 +7,11 @@ import { and, desc, eq, gte, inArray, lte, max, min, sql } from 'drizzle-orm';
 import { addDays, lastTradingDay, type IsoDate } from '../../shared/dates';
 import type { Currency, FxRates } from '../../shared/money';
 import type { BatchItem } from 'drizzle-orm/batch';
+import { ProviderHttpError } from '../adapters/marketData';
 import { chunkRows, inChunks, runAtomic } from '../db/batch';
 import { fxDaily, priceRuns, pricesDaily, type PriceCall, type PriceChange } from '../db/schema';
 import type { DailyClose, Deps, SecurityDescription } from '../ports';
+import { ProviderBackoffError } from './backoff';
 import { cacheGet, cacheGetMany, cacheSet, cacheSetMany } from './cache';
 import { describeError } from '../lib/errors';
 
@@ -221,13 +223,20 @@ export async function ensureRecentCloses(deps: Deps, tickers: string[], date: Is
   await cacheSetMany(deps, newlyUnknown.map((ticker) => [unknownKey(ticker), true]), UNKNOWN_TTL_SECONDS);
 }
 
+/** Tickers whose closes couldn't be fetched, and whether the provider was refusing for too many requests. */
+export interface CloseGaps {
+  failed: string[];
+  rateLimited: boolean;
+}
+
 /**
  * Make sure prices_daily covers [start, end] for each ticker (history
  * backfill), fetching only the missing edges. There's no bulk history
  * endpoint, so this is one request per ticker that needs it.
  */
-export async function ensureCloses(deps: Deps, tickers: string[], start: IsoDate, end: IsoDate): Promise<void> {
-  if (!deps.prices || tickers.length === 0) return;
+export async function ensureCloses(deps: Deps, tickers: string[], start: IsoDate, end: IsoDate): Promise<CloseGaps> {
+  const gaps: CloseGaps = { failed: [], rateLimited: false };
+  if (!deps.prices || tickers.length === 0) return gaps;
   const unique = normalise(tickers);
   const have = await coverage(deps, unique, end);
   const unknown = await knownUnknowns(deps, unique);
@@ -250,12 +259,19 @@ export async function ensureCloses(deps: Deps, tickers: string[], start: IsoDate
     }
     for (const [from, to] of ranges) {
       if (from > to) continue;
+      // Once the provider says "too many requests", asking again only makes it worse.
+      if (gaps.rateLimited) {
+        gaps.failed.push(ticker);
+        break;
+      }
       let closes: DailyClose[];
       try {
         closes = await run.call({ provider: prices.name, endpoint: 'daily', tickers: [ticker], from, to }, () => prices.dailyCloses(ticker, from, to), (result) => result.length);
       } catch (error) {
         console.warn('Price fetch failed', ticker, describeError(error));
-        continue;
+        gaps.failed.push(ticker);
+        gaps.rateLimited ||= (error instanceof ProviderHttpError && error.status === 429) || error instanceof ProviderBackoffError;
+        break;
       }
       if (closes.length === 0 && !stored) {
         newlyUnknown.push(ticker);
@@ -264,12 +280,13 @@ export async function ensureCloses(deps: Deps, tickers: string[], start: IsoDate
       for (const close of closes) rows.push({ ticker, date: close.date, close: close.close, currency: 'USD', source: 'tiingo' });
     }
   }
-  if (run.calls.length === 0) {
+  if (run.calls.length === 0 && gaps.failed.length === 0) {
     await run.skipped(`All ${unique.length} tickers already cover ${start} to ${end} (or are unknown to the provider).`);
-    return;
+    return gaps;
   }
   await saveFetchedCloses(deps, run, rows);
   await cacheSetMany(deps, newlyUnknown.map((ticker) => [unknownKey(ticker), true]), UNKNOWN_TTL_SECONDS);
+  return gaps;
 }
 
 /** Remember what a ticker is for a month (it rarely changes). */

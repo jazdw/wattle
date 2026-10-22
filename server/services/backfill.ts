@@ -54,6 +54,7 @@ interface PricesPayload {
 
 interface BlockPayload {
   connectionId: string;
+  runId: string;
   accountId: string;
   mode: HistoryMode;
   /** The rebuild walks from `end` back to `start`... */
@@ -81,6 +82,10 @@ const MAX_TICKERS_PER_JOB = 40;
 const PRICE_LOOKBACK_DAYS = 21;
 /** A busy connection (a sync running) is tried again after this. */
 const BUSY_RETRY_SECONDS = 30;
+/** A rate-limited price provider (Tiingo allows 50 requests an hour) is asked again after this... */
+const RATE_LIMITED_RETRY_SECONDS = 30 * 60;
+/** ...for at most this long before the price job fails. */
+const RATE_LIMITED_GIVE_UP_MS = 24 * 3600 * 1000;
 
 const pricesGroup = (runId: string) => `history:${runId}:prices`;
 const blocksGroup = (runId: string) => `history:${runId}:blocks`;
@@ -279,7 +284,7 @@ export async function planHistory({ deps, tenant, job, renew }: JobContext): Pro
       for (const id of involved) if (tickerOf.has(id)) tickers.add(tickerOf.get(id)!);
       if (from < earliest) earliest = from;
       for (const [blockFrom, blockTo] of windows(from, today, daysPerBlock(deps, involved.length))) {
-        const block: BlockPayload = { connectionId: connection.id, accountId, mode: plan.mode, start: from, end: today, from: blockFrom, to: blockTo };
+        const block: BlockPayload = { connectionId: connection.id, runId: plan.runId, accountId, mode: plan.mode, start: from, end: today, from: blockFrom, to: blockTo };
         specs.push({ type: 'history_block', payload: { ...block }, connectionId: connection.id, groupId: blocksGroup(plan.runId) });
       }
     }
@@ -314,11 +319,33 @@ export async function planHistory({ deps, tenant, job, renew }: JobContext): Pro
   }
 }
 
-/** history_prices: daily closes for a few tickers over the load's days. */
+/**
+ * history_prices: daily closes for some tickers over the load's days. A
+ * ticker that couldn't be fetched fails the attempt (and so is retried):
+ * history built without its closes would be estimated, and look right. While
+ * the provider is refusing for too many requests, it waits without using up
+ * attempts, for up to a day.
+ */
 export async function historyPrices({ deps, job }: JobContext): Promise<Record<string, unknown>> {
   const { tickers, start, end } = job.payload as unknown as PricesPayload;
-  await ensureCloses(deps, tickers, start, end);
+  const gaps = await ensureCloses(deps, tickers, start, end);
+  if (gaps.failed.length > 0) {
+    const message = `Couldn't load prices for ${gaps.failed.join(', ')}.`;
+    if (gaps.rateLimited && deps.now().getTime() - job.createdAt < RATE_LIMITED_GIVE_UP_MS) {
+      throw new RetryLater(RATE_LIMITED_RETRY_SECONDS, `${message} The price provider is limiting requests; trying again later.`);
+    }
+    throw Object.assign(new Error(message), { code: 'PRICES_UNAVAILABLE' });
+  }
   return { tickers: tickers.length };
+}
+
+/** The load's price jobs that failed for good (their tickers' history would only be estimated). */
+async function failedPriceJobs(tenant: Tenant, runId: string): Promise<number> {
+  const [row] = await tenant.db
+    .select({ count: sql<number>`count(*)` })
+    .from(jobs)
+    .where(tenant.scope(jobs, eq(jobs.groupId, pricesGroup(runId)), eq(jobs.status, 'failed')));
+  return row?.count ?? 0;
 }
 
 /**
@@ -329,6 +356,8 @@ export async function historyPrices({ deps, job }: JobContext): Promise<Record<s
  */
 export async function historyBlock({ deps, tenant, job, renew }: JobContext): Promise<Record<string, unknown>> {
   const block = job.payload as unknown as BlockPayload;
+  // Without its prices the history would be wrong but look right: write nothing, and the finish fails the load.
+  if (await failedPriceJobs(tenant, block.runId)) return { days: 0, skipped: 'prices' };
   const [account] = await tenant.db
     .select()
     .from(accounts)
@@ -448,8 +477,10 @@ export async function historyBlock({ deps, tenant, job, renew }: JobContext): Pr
 
 /**
  * history_finish: add up the blocks and record the outcome with the run's log
- * entry, atomically. Parts that failed (after their retries) fail the load,
- * which offers Reload history. Then today's snapshot is redone.
+ * entry, atomically. Parts that failed (after their retries), prices or
+ * blocks, fail the load, which offers Reload history (a missed-day fill
+ * that failed leaves the carried-forward balances). Then today's snapshot is
+ * redone.
  */
 export async function finishHistory({ deps, tenant, job, renew }: JobContext): Promise<Record<string, unknown>> {
   const finish = job.payload as unknown as FinishPayload;
@@ -457,10 +488,18 @@ export async function finishHistory({ deps, tenant, job, renew }: JobContext): P
     .select({ status: jobs.status, result: jobs.result })
     .from(jobs)
     .where(tenant.scope(jobs, eq(jobs.groupId, blocksGroup(finish.runId))));
-  const failed = parts.filter((part) => part.status === 'failed').length;
+  const pricesFailed = await failedPriceJobs(tenant, finish.runId);
+  const failed = parts.filter((part) => part.status === 'failed').length + pricesFailed;
   const days = parts.reduce((sum, part) => sum + (Number(part.result?.days) || 0), 0);
   const connection = await getConnection(tenant, finish.connectionId);
   if (!connection) return { days, failed };
+  const next = finish.mode === 'missed' ? 'Those days keep the balances carried forward.' : 'Reload history to try again.';
+  const error =
+    pricesFailed > 0
+      ? { code: 'PRICES_UNAVAILABLE', message: `Prices for some of the holdings couldn't be loaded, so no history was written. ${next}` }
+      : failed > 0
+        ? { code: 'PARTS_FAILED', message: `${failed} of ${parts.length} parts of the history couldn't be built. ${next}` }
+        : null;
   const statements: BatchItem<'sqlite'>[] = [];
   if (finish.mode !== 'missed') {
     statements.push(
@@ -479,7 +518,7 @@ export async function finishHistory({ deps, tenant, job, renew }: JobContext): P
   statements.push(
     ...(await completeRunStatements(deps, tenant, finish.runId, {
       counts: days > 0 ? { days } : {},
-      error: failed > 0 ? { code: 'PARTS_FAILED', message: `${failed} of ${parts.length} parts of the history couldn't be built. Reload history to try again.` } : null,
+      error,
     })),
   );
   await renew();

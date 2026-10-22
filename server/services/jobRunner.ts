@@ -47,7 +47,11 @@ export interface JobSpec {
   payload: Record<string, unknown>;
   connectionId?: string | null;
   groupId?: string | null;
-  /** Wait until this group has no unfinished jobs. */
+  /**
+   * Wait until this group has no unfinished jobs. Add the group's jobs in the
+   * same call (or earlier): one added after the group has finished doesn't
+   * hold back what was already released.
+   */
   waitsFor?: string | null;
   /** Not before (epoch ms). */
   runAfter?: number;
@@ -123,6 +127,10 @@ export async function enqueueForHouseholds(deps: Deps, entries: [Tenant, JobSpec
   // One statement per job (19 columns allow only five rows per insert anyway), all or none.
   await runAtomic(deps.db, rows.map((row) => deps.db.insert(jobs).values(row).onConflictDoNothing()));
   await wakeQueued(deps, rows.filter((row) => row.status === 'queued'));
+  // The group may have finished while these were being added (its last job's
+  // release ran before they existed): check now. Whichever of the two runs
+  // second sees both, so a waiting job is never left behind.
+  await releaseWaiting(deps, rows.flatMap((row) => (row.waitsFor ? [row.waitsFor] : [])));
   return rows.map((row) => row.id);
 }
 
