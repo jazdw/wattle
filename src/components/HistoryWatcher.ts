@@ -4,7 +4,7 @@ import type { ConnectionsResponse } from '../../shared/types';
 import { connectionsQuery } from '../hooks/queries';
 
 const loadingHistory = (data: ConnectionsResponse | undefined) =>
-  data?.connections.some((connection) => connection.backfillStatus === 'pending' || connection.backfillStatus === 'running') ?? false;
+  data?.connections.some((connection) => connection.historyProgress !== null || connection.backfillStatus === 'pending' || connection.backfillStatus === 'running') ?? false;
 
 /**
  * While a connection's history is loading (in the background on the server),
