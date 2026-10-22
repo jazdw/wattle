@@ -1,5 +1,5 @@
 import { useMutation, useQueryClient } from '@tanstack/react-query';
-import { EyeOff, History, Layers, Link2, ListChecks, Pencil, Plus, RefreshCw, RotateCcw, Unplug, Upload } from 'lucide-react';
+import { EyeOff, History, Layers, Link2, ListChecks, Pencil, Plus, RefreshCw, RotateCcw, SquareCheckBig, Unplug, Upload } from 'lucide-react';
 import { useState } from 'react';
 import { Link } from 'react-router-dom';
 import type { AccountSummary, ConnectionSummary } from '../../shared/types';
@@ -159,6 +159,11 @@ export function Accounts() {
                   <CardTitle className="flex items-center gap-2">
                     {connection.institutionName ?? 'Institution'}
                     <Badge variant={connection.status === 'ok' ? 'outline' : 'danger'}>{STATUS_TEXT[connection.status]}</Badge>
+                    {connection.newAccountsAvailable && connection.status === 'ok' && (
+                      <Badge variant="warning" title="The institution has accounts you haven't shared with Wattle. Choose accounts to add them.">
+                        New accounts available
+                      </Badge>
+                    )}
                     {connection.historyProgress ? (
                       <Badge variant="outline">
                         Loading history… {connection.historyProgress.done} of {connection.historyProgress.total}
@@ -179,6 +184,18 @@ export function Accounts() {
                   <Button variant="outline" size="sm" onClick={() => sync.mutate(connection.id)} disabled={sync.isPending}>
                     <RefreshCw className={sync.isPending && sync.variables === connection.id ? 'animate-spin' : undefined} /> Sync
                   </Button>
+                  {connection.status === 'ok' && (
+                    <PlaidLinkButton
+                      kind={connection.kind}
+                      connectionId={connection.id}
+                      chooseAccounts
+                      icon={<SquareCheckBig />}
+                      label="Choose accounts"
+                      variant={connection.newAccountsAvailable ? 'accent' : 'outline'}
+                      size="sm"
+                      onError={setError}
+                    />
+                  )}
                   {connection.status === 'ok' && connection.backfillStatus === 'failed' && (
                     <Button variant="outline" size="sm" onClick={() => reloadHistory.mutate(connection.id)} disabled={reloadHistory.isPending}>
                       <RotateCcw /> Reload history

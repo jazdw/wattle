@@ -27,9 +27,10 @@ const REVIEWED: Record<string, Record<string, string>> = {
     jobs: "moving a waiting report check's run_after to now: one conditional update; the job runner's claim still decides who runs it",
   },
   'server/routes/plaid.ts': {
-    connections: 'webhooks: status via statusStatement (newest wins), consent warning column; no lease needed',
+    connections: 'webhooks: status via statusStatement (newest wins), consent warning and new-accounts columns; no lease needed',
   },
   'server/routes/accounts.ts': {
+    connections: 'accounts chosen: clears only the new-accounts notice, and only one from before the request (single conditional update; nothing else writes it but the webhook)',
     accounts: 'create: atomic; rename/owner/category: single update; hide: connection + snapshot leases; delete: account lease',
     accountDaily: 'hide/purge: connection + snapshot leases',
     holdingDaily: 'hide/purge: connection + snapshot leases',

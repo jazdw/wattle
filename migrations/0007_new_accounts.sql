@@ -1,0 +1,1 @@
+ALTER TABLE `connections` ADD `new_accounts_at` integer;

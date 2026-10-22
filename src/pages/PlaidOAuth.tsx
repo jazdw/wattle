@@ -20,6 +20,7 @@ function Resume({ pending }: { pending: PendingLink }) {
   const [error, setError] = useState<string | null>(null);
   const link = usePlaidLink({
     connectionId: pending.connectionId,
+    chooseAccounts: pending.chooseAccounts,
     onError: setError,
     onLinked: () => navigate('/accounts', { replace: true }),
   });

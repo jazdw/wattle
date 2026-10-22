@@ -15,11 +15,15 @@ export const classificationSchema = z.object({
   styles: weights(STYLES).optional(),
 });
 
-export const linkTokenSchema = z.object({
-  kind: z.enum(['account', 'investments']),
-  /** Re-authenticate an existing connection (update mode). */
-  connectionId: z.string().optional(),
-});
+export const linkTokenSchema = z
+  .object({
+    kind: z.enum(['account', 'investments']),
+    /** Re-authenticate an existing connection (update mode). */
+    connectionId: z.string().optional(),
+    /** With connectionId: choose which of its accounts Wattle may see (add or remove). */
+    chooseAccounts: z.boolean().optional(),
+  })
+  .refine((body) => !body.chooseAccounts || body.connectionId, { message: 'Choosing accounts needs a connection.' });
 
 export const exchangeSchema = z.object({
   publicToken: z.string().min(1),

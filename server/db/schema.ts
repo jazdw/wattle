@@ -124,6 +124,8 @@ export const connections = sqliteTable(
     consentExpiresAt: integer('consent_expires_at'),
     /** Plaid warned the login's consent is ending (PENDING_EXPIRATION / PENDING_DISCONNECT); cleared by re-linking. */
     consentWarningAt: integer('consent_warning_at'),
+    /** Plaid said the login has accounts not yet shared with Wattle (NEW_ACCOUNTS_AVAILABLE); cleared once accounts are chosen. */
+    newAccountsAt: integer('new_accounts_at'),
     lastSyncedAt: integer('last_synced_at'),
     /** Last day covered by stored investment transactions. */
     txnSyncedThrough: text('txn_synced_through'),
