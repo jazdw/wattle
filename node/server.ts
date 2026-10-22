@@ -17,7 +17,10 @@ import * as schema from '../server/db/schema';
 import { createApp } from '../server/app';
 import { depsFromEnv } from '../server/config';
 import { describeError } from '../server/lib/errors';
-import type { Db } from '../server/ports';
+import { localJobQueue } from '../server/adapters/jobQueues';
+import type { Db, Deps } from '../server/ports';
+import { runJob } from '../server/services/jobHandlers';
+import { dueJobs, sweep } from '../server/services/jobRunner';
 import { runDaily } from '../server/services/jobs';
 
 const client = createClient({ url: process.env.DATABASE_URL ?? 'file:wattle.db' });
@@ -30,9 +33,15 @@ await migrate(db, { migrationsFolder: 'migrations' });
 const env = { ...process.env };
 if (env.ALLOW_DEV_LOGIN !== '1') delete env.DEV_LOGIN_EMAILS;
 
-const deps = depsFromEnv(env, db as unknown as Db, (work) => {
-  void work.catch((error) => console.error('Background work failed', describeError(error)));
+// Background jobs run in this process: due ones one at a time, swept every minute.
+const jobQueue = localJobQueue(
+  () => dueJobs(deps),
+  (id) => runJob(deps, id),
+);
+const deps: Deps = depsFromEnv(env, db as unknown as Db, jobQueue, (work) => {
+  void work.catch((error: unknown) => console.error('Background work failed', describeError(error)));
 });
+setInterval(() => void sweep(deps).then(() => jobQueue.drain()), 60_000);
 
 // Static files first (the built SPA), then the API, then index.html for client routes.
 const app = createApp();

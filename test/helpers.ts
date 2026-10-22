@@ -6,6 +6,8 @@ import { createApp } from '../server/app';
 import { createSession } from '../server/auth/routes';
 import * as schema from '../server/db/schema';
 import type { Deps, Db } from '../server/ports';
+import { runJob } from '../server/services/jobHandlers';
+import { dueJobs } from '../server/services/jobRunner';
 
 export const ORIGIN = 'http://localhost';
 export const TEST_KEY = btoa(String.fromCharCode(...new Uint8Array(32).map((_, index) => index)));
@@ -62,31 +64,60 @@ export async function createTestDeps(overrides: Partial<Deps> = {}): Promise<Dep
   await migrate(db, { migrationsFolder: 'migrations' });
   Object.assign(stats, { calls: 0, statements: 0, rowsWritten: 0 });
   const pending: Promise<unknown>[] = [];
+  const wakes: { ids: string[]; delaySeconds?: number }[] = [];
   const deps: Deps = {
     db: db as unknown as Db,
-    config: { devLoginEmails: [], quoteCacheSeconds: 300, tokenEncKey: TEST_KEY, plaidAllowRemove: false },
+    config: { devLoginEmails: [], quoteCacheSeconds: 300, tokenEncKey: TEST_KEY, plaidAllowRemove: false, jobChunkRows: 1_000 },
     plaid: null,
     prices: null,
     quotes: null,
     fx: null,
     now: () => new Date('2026-10-09T02:00:00Z'),
     sleep: async () => {},
+    // Wake-ups are recorded; tests run due jobs with flush() (or runDueJobs).
+    jobQueue: {
+      wake: async (ids, delaySeconds) => {
+        wakes.push({ ids, delaySeconds });
+      },
+    },
     background: (work) => {
       pending.push(work);
     },
     ...overrides,
   };
   pendingWork.set(deps, pending);
+  wakesByDeps.set(deps, wakes);
   dbStatsByDeps.set(deps, stats);
   return deps;
 }
 
 const pendingWork = new WeakMap<Deps, Promise<unknown>[]>();
+const wakesByDeps = new WeakMap<Deps, { ids: string[]; delaySeconds?: number }[]>();
 
-/** Wait for work handed to `deps.background` (post-link backfills, webhook syncs). */
+/** The runner wake-ups `deps` asked for so far. */
+export function wakes(deps: Deps): { ids: string[]; delaySeconds?: number }[] {
+  return [...(wakesByDeps.get(deps) ?? [])];
+}
+
+/** Run jobs that are due now, including those they add or release, until none is left. */
+export async function runDueJobs(deps: Deps, run: (id: string) => Promise<unknown> = (id) => runJob(deps, id)): Promise<number> {
+  let ran = 0;
+  for (let round = 0; round < 1_000; round += 1) {
+    const ids = await dueJobs(deps);
+    if (ids.length === 0) return ran;
+    for (const id of ids) {
+      await run(id);
+      ran += 1;
+    }
+  }
+  throw new Error('Jobs kept becoming due: a job that never settles?');
+}
+
+/** Finish background work: work handed to `deps.background`, then every due job. */
 export async function flush(deps: Deps): Promise<void> {
   const pending = pendingWork.get(deps) ?? [];
   while (pending.length > 0) await pending.shift();
+  await runDueJobs(deps);
 }
 
 /** Today's market date for the fixed test clock (2026-10-08 in New York). */
