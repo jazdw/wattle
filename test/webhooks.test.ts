@@ -109,7 +109,10 @@ describe('Plaid webhooks', () => {
     const historyBefore = (await deps.db.select().from(schema.syncRuns)).filter((run) => run.action === 'history').length;
     const chosen = await api(`/api/connections/${before.id}/accounts-chosen`, { method: 'POST' });
     expect(chosen.body).toMatchObject({ added: 1, historyQueued: true });
+    // Before its plan has run, the load already shows, so the page keeps watching.
+    expect((await api('/api/connections')).body.connections[0].historyProgress).toEqual({ done: 0, total: 0 });
     await flush(deps);
+    expect((await api('/api/connections')).body.connections[0].historyProgress).toBeNull();
     const rows = await deps.db.select().from(schema.accounts);
     expect(rows.find((row) => row.externalId === 'ira')).toMatchObject({ missingSince: null });
     expect(rows.find((row) => row.externalId === 'brk')?.missingSince).not.toBeNull();
