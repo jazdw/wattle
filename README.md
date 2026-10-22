@@ -53,9 +53,10 @@ migrations/  drizzle-kit SQL, applied by Wrangler (D1) or Drizzle's migrator (li
 - **Session cookies.** Over HTTPS they're `__Host-` cookies, which only this exact host can set, so another subdomain can't plant a session.
 - **Webhook checks.** The webhook is public. A webhook naming an item or report Wattle Wealth doesn't have is dropped before its signature is checked, so forged ones can't make it ask Plaid for verification keys. For the rest: key ids must be well-formed, an id Plaid had no key for isn't asked about again for five minutes, and each instance makes at most 10 lookups a minute (Plaid's real key is normally cached).
 - **Background jobs** (`services/jobRunner.ts`). Work that doesn't happen while someone waits runs as small jobs, each in an invocation of its own, so each has the platform's limits to itself (Workers Free: 10 ms of CPU, 50 outside requests):
-  - The `jobs` table is the record. The platform only wakes a runner for a job id: a Cloudflare Queue (`wattle-jobs`, one job per message) on Workers, the process's own loop on Node. A lost wake-up is recovered by the sweep, which runs nightly and whenever the app checks `/api/status`, so nothing depends on the queue keeping its messages.
+  - The `jobs` table is the record. The platform only wakes a runner: a Cloudflare Queue (`wattle-jobs`, one message per job, one job run per message) on Workers, the process's own loop on Node.
+  - Each wake-up runs the fairest due job, not the one its message named: from the household with the fewest jobs running, then the one whose last job started longest ago. So one household's history load takes turns with everyone else's nightly syncs, and nobody waits while a runner is free. A lost wake-up is recovered by the sweep, which runs nightly and whenever the app checks `/api/status`, so nothing depends on the queue keeping its messages.
   - A job is claimed by one conditional update and holds a lock it renews before each write, like a lease. A failed attempt is retried after 1, 5, then 30 minutes; one stopped part-way (its lock ran out) runs again. After three attempts it fails for good: shown in the warning banner and on the Activity page, and a failed history load offers **Reload history**.
-  - Jobs that belong together share a group; a job can wait for a group and is queued when that group has no unfinished jobs.
+  - Jobs that belong together share a group; a job can wait for a group and is queued when that group has no unfinished jobs (checked when each of its jobs finishes and when the waiting job is added, so neither order loses it). A group's jobs fail "for good" without holding up what waits for them; that job decides what the failures mean (a history load with failed parts fails, and writes nothing if its prices failed).
   - `JOB_CHUNK_ROWS` (default 1,000) sets about how many rows one job builds. Building a row costs about 6.6 µs of CPU, so the default stays inside Workers Free; raise it on Workers Paid for fewer, larger jobs.
 - **Daily job** (cron `0 2 * * *` UTC, after US close). The cron does the light upkeep (FX rates, pruning, the sweep) and adds the night's jobs: a `sync` per active login, then per household a `snapshot` waiting for its syncs (one `account_daily` and one `holding_daily` row per account and holding), then `nightly_finish`, which completes the `job_runs` row with any job that failed. One household's failures never hold up another's. Manual and imported values are never overwritten.
 - **Runs stopped part-way.** A Worker stopped by a limit (CPU, run time, requests) runs no more code and can't log it, so it's found afterwards:
@@ -90,7 +91,8 @@ migrations/  drizzle-kit SQL, applied by Wrangler (D1) or Drizzle's migrator (li
 - **Missed days.** Each night's snapshot records the day's balance. Which figure wins for a day:
   - A linked account's balance reported that day is the bank's figure, and replaces anything entered or imported for it.
   - If a sync fails (or the login is disconnected), the last balance is carried forward and marked *estimated*.
-  - After each sync, each account's last day covered by the institution's figure (a reported balance or bank history) is checked. Days after it, up to yesterday, were missed. Recorded and imported days don't count, since the fill never replaces them.
+  - After each sync, each account's last day covered by the institution's figure (a reported balance or bank history) is checked. Days after it, up to yesterday, were missed, and so is any day still carrying a balance forward (a fill that failed leaves those, even with known days after them). Recorded and imported days don't count, since the fill never replaces them.
+  - A fill that fails is tried again by the first sync at least 6 hours later (`missed_retry_at`), not by every webhook sync in between: a bank fill asks Plaid for a new report each time.
   - Bank accounts on an Assets login: a small asset report is requested for just those days. Its balances replace the estimates, but never reported, entered or imported days.
   - Investment accounts: they're rebuilt for just those days from the transactions that arrived since, so a trade made during the gap shows up.
   - Each gap is asked for once. Days the bank has no figure for keep the carried-forward balance, still estimated, relabelled as bank history (`backfill`), so they count as covered and aren't asked for again.
@@ -227,7 +229,7 @@ npm run build
 DATABASE_URL=file:wattle.db PORT=8787 GOOGLE_CLIENT_ID=… TOKEN_ENC_KEY=… npm run node:start
 ```
 
-Background jobs run in the same process: due jobs one at a time, swept every minute.
+Background jobs run in the same process: the fairest due job, one at a time, swept every minute.
 
 ## Future improvements
 
