@@ -11,6 +11,7 @@ import {
   pruneJobsStatement,
   RetryLater,
   runJobWith,
+  runNextWith,
   sweep,
   type JobHandler,
   type JobHandlers,
@@ -199,6 +200,49 @@ describe('job runner', () => {
   });
 });
 
+describe('fair picking', () => {
+  async function households() {
+    const deps = await createTestDeps();
+    const big = new Tenant(deps.db, (await createHousehold(deps, 'Big', 'big@example.com')).householdId);
+    const small = new Tenant(deps.db, (await createHousehold(deps, 'Small', 'small@example.com')).householdId);
+    const name = (householdId: string) => (householdId === big.householdId ? 'big' : 'small');
+    return { deps, big, small, name };
+  }
+
+  it("takes turns between households, whatever was added first or which job a wake-up named", async () => {
+    const { deps, big, small, name } = await households();
+    await enqueue(deps, big, Array.from({ length: 5 }, (_, index) => ({ id: `big-${index}`, type: 'history_block' as const, payload: {} })));
+    deps.now = ((at) => () => new Date(at))(deps.now().getTime() + 1000);
+    await enqueue(deps, small, [{ id: 'small-0', type: 'sync', payload: {} }, { id: 'small-1', type: 'snapshot', payload: {} }]);
+    const order: string[] = [];
+    const handlers = handlersFor(async ({ tenant }) => void order.push(name(tenant.householdId)));
+    for (let tick = 1; ; tick += 1) {
+      deps.now = ((at) => () => new Date(at))(deps.now().getTime() + 1000); // each starts later than the last
+      if (!(await runNextWith(deps, handlers)).claimed) break;
+    }
+    expect(order).toEqual(['big', 'small', 'big', 'small', 'big', 'big', 'big']);
+  });
+
+  it('prefers a household with nothing running, then waits for a held job only as long as its lock', async () => {
+    const { deps, big, small, name } = await households();
+    await enqueue(deps, big, [{ id: 'held', type: 'history_block', payload: {} }, { id: 'big-next', type: 'history_block', payload: {} }]);
+    void runJobWith(deps, 'held', handlersFor(() => new Promise(() => {}))); // still running
+    await expect.poll(async () => (await deps.db.select().from(schema.jobs).where(eq(schema.jobs.id, 'held')))[0].status).toBe('running');
+    deps.now = ((at) => () => new Date(at))(deps.now().getTime() + 1000);
+    await enqueue(deps, small, [{ id: 'small-0', type: 'sync', payload: {} }]);
+    const order: string[] = [];
+    const handlers = handlersFor(async ({ tenant, job }) => void order.push(`${name(tenant.householdId)}:${job.id}`));
+    await runNextWith(deps, handlers);
+    await runNextWith(deps, handlers);
+    expect(order).toEqual(['small:small-0', 'big:big-next']);
+    // Nothing due now; the held job's lock runs out in about LEASE_MS.
+    const outcome = await runNextWith(deps, handlers);
+    expect(outcome.claimed).toBeUndefined();
+    expect(outcome.retryInSeconds).toBeGreaterThan(LEASE_MS / 1000 - 5);
+    expect(outcome.retryInSeconds).toBeLessThanOrEqual(LEASE_MS / 1000 + 1);
+  });
+});
+
 describe('job queues', () => {
   it('Cloudflare: one message per job, in batches of 100, delays clamped to 24 hours', async () => {
     const sent: { body: { id: string }; delaySeconds?: number }[][] = [];
@@ -210,31 +254,28 @@ describe('job queues', () => {
     expect(sent[2][0]).toEqual({ body: { id: 'late' }, delaySeconds: 86_400 });
   });
 
-  it("Cloudflare: acks a run, retries a job that can't run yet, and retries after a runner failure", async () => {
+  it('Cloudflare: one run per message; acks it, keeps it while a held job may need picking up, and after a runner failure', async () => {
     const calls: string[] = [];
     const message = (id: string) => ({
       body: { id },
       ack: () => calls.push(`ack ${id}`),
       retry: (options?: { delaySeconds?: number }) => calls.push(`retry ${id} ${options?.delaySeconds}`),
     });
-    await consumeJobs({ messages: [message('ok'), message('busy'), message('broken')] }, async (id) => {
-      if (id === 'broken') throw new Error('D1 unavailable');
-      return id === 'busy' ? { retryInSeconds: 42 } : {};
-    });
-    expect(calls).toEqual(['ack ok', 'retry busy 42', 'retry broken 60']);
+    const outcomes = [async () => ({ claimed: true }), async () => ({ retryInSeconds: 42 }), async () => Promise.reject(new Error('D1 unavailable')), async () => ({})];
+    await consumeJobs({ messages: [message('ran'), message('held'), message('broken'), message('nothing')] }, () => outcomes.shift()!());
+    expect(calls).toEqual(['ack ran', 'retry held 42', 'retry broken 60', 'ack nothing']);
   });
 
-  it('local: a wake-up drains every due job, including ones added meanwhile', async () => {
+  it('local: a wake-up runs jobs until none is due, including ones added meanwhile', async () => {
     const due = ['a', 'b'];
     const ran: string[] = [];
-    const queue = localJobQueue(
-      async () => [...due],
-      async (id) => {
-        ran.push(id);
-        due.splice(due.indexOf(id), 1);
-        if (id === 'a') due.push('c');
-      },
-    );
+    const queue = localJobQueue(async () => {
+      const id = due.shift();
+      if (!id) return {};
+      ran.push(id);
+      if (id === 'a') due.push('c');
+      return { claimed: true };
+    });
     await queue.wake(['a']);
     await expect.poll(() => ran).toEqual(['a', 'b', 'c']);
     await queue.drain();

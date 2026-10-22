@@ -19,8 +19,8 @@ import { depsFromEnv } from '../server/config';
 import { describeError } from '../server/lib/errors';
 import { localJobQueue } from '../server/adapters/jobQueues';
 import type { Db, Deps } from '../server/ports';
-import { runJob } from '../server/services/jobHandlers';
-import { dueJobs, sweep } from '../server/services/jobRunner';
+import { runNextJob } from '../server/services/jobHandlers';
+import { sweep } from '../server/services/jobRunner';
 import { runDaily } from '../server/services/jobs';
 
 const client = createClient({ url: process.env.DATABASE_URL ?? 'file:wattle.db' });
@@ -33,11 +33,8 @@ await migrate(db, { migrationsFolder: 'migrations' });
 const env = { ...process.env };
 if (env.ALLOW_DEV_LOGIN !== '1') delete env.DEV_LOGIN_EMAILS;
 
-// Background jobs run in this process: due ones one at a time, swept every minute.
-const jobQueue = localJobQueue(
-  () => dueJobs(deps),
-  (id) => runJob(deps, id),
-);
+// Background jobs run in this process: the fairest due one at a time, swept every minute.
+const jobQueue = localJobQueue(() => runNextJob(deps));
 const deps: Deps = depsFromEnv(env, db as unknown as Db, jobQueue);
 setInterval(() => void sweep(deps).then(() => jobQueue.drain()), 60_000);
 

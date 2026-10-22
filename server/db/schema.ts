@@ -628,5 +628,8 @@ export const jobs = sqliteTable(
     index('jobs_group').on(table.groupId, table.status),
     index('jobs_waits_for').on(table.waitsFor),
     index('jobs_household').on(table.householdId, table.createdAt),
+    // Fair picking (jobRunner.dueJobs): each household's running jobs and last start.
+    index('jobs_household_status').on(table.householdId, table.status),
+    index('jobs_household_started').on(table.householdId, table.startedAt),
   ],
 );

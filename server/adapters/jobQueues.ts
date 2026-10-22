@@ -1,8 +1,9 @@
 /**
  * Ways to wake a runner for jobs (see services/jobRunner.ts). The jobs table
- * is the record; these only deliver "run job X".
+ * is the record; these only deliver "there's a job to run". The runner picks
+ * which one (the fairest due), so a message names a job only for the logs.
  *  - cloudflareJobQueue: a Cloudflare Queue (one message per job; the Worker's
- *    queue() handler runs it, each in its own invocation).
+ *    queue() handler runs one job per message, each in its own invocation).
  *  - localJobQueue: the process runs due jobs itself, one at a time (Node).
  * Typed structurally, so nothing here imports Cloudflare's types.
  */
@@ -43,14 +44,15 @@ export function cloudflareJobQueue(queue: QueueProducer): JobQueue {
 }
 
 /**
- * The Worker's queue() handler: run each message's job. A job that can't run
- * yet (another attempt holds it, or it isn't due) is retried after that wait;
- * one whose run failed unexpectedly (the database unreachable) after a minute.
+ * The Worker's queue() handler: run one job per message (`runNext`, the
+ * fairest due). When none could run but an attempt holds one, the message is
+ * kept for when that lock runs out (the attempt may have been stopped); when
+ * the run failed unexpectedly (the database unreachable), for a minute.
  */
-export async function consumeJobs(batch: QueueBatch, run: (id: string) => Promise<{ retryInSeconds?: number }>): Promise<void> {
+export async function consumeJobs(batch: QueueBatch, runNext: () => Promise<{ retryInSeconds?: number }>): Promise<void> {
   for (const message of batch.messages) {
     try {
-      const outcome = await run(message.body.id);
+      const outcome = await runNext();
       if (outcome.retryInSeconds) message.retry({ delaySeconds: clampDelay(outcome.retryInSeconds) });
       else message.ack();
     } catch (error) {
@@ -62,17 +64,22 @@ export async function consumeJobs(batch: QueueBatch, run: (id: string) => Promis
 
 /**
  * Run jobs in this process (Node): a wake-up schedules a drain, which runs
- * every due job one at a time until none is left. `due` lists runnable job
- * ids; `run` runs one.
+ * the fairest due job (`runNext`), one at a time, until none is left; a job
+ * held by an attempt is looked at again when its lock runs out.
  */
-export function localJobQueue(due: () => Promise<string[]>, run: (id: string) => Promise<unknown>): JobQueue & { drain(): Promise<void> } {
+export function localJobQueue(runNext: () => Promise<{ claimed?: boolean; retryInSeconds?: number }>): JobQueue & { drain(): Promise<void> } {
   let draining: Promise<void> | null = null;
   let again = false;
   const drainOnce = async () => {
     do {
       again = false;
-      for (const id of await due()) await run(id);
-    } while (again || (await due()).length > 0);
+      for (;;) {
+        const outcome = await runNext();
+        if (outcome.claimed) continue;
+        if (outcome.retryInSeconds) setTimeout(() => void drain(), outcome.retryInSeconds * 1000);
+        break;
+      }
+    } while (again);
   };
   const drain = (): Promise<void> => {
     if (draining) {

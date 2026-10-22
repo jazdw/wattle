@@ -15,6 +15,9 @@
  *  4. If it was the last unfinished job of its group, queue the jobs waiting
  *     for that group.
  *
+ * Wake-ups don't pick the job: each runs the fairest due one (runNextWith),
+ * so households take turns.
+ *
  * The sweep wakes jobs whose wake-up was lost (overdue, or locked by an
  * attempt that was stopped) and releases waiting jobs whose group finished
  * without releasing them. It runs nightly and whenever the app checks
@@ -95,6 +98,8 @@ export type FailureHandlers = Partial<Record<JobType, FailureHandler>>;
 
 /** What the caller of a run should do with the wake-up: nothing, or try again after a while. */
 export interface JobOutcome {
+  /** This call claimed the job and ran an attempt (whatever its result). */
+  claimed?: boolean;
   /** The job couldn't run yet (not due, or another attempt holds it). */
   retryInSeconds?: number;
 }
@@ -193,13 +198,13 @@ export async function runJobWith(deps: Deps, id: string, handlers: JobHandlers, 
   };
   if (resumed && job.attempts > job.maxAttempts) {
     await failedForGood(INTERRUPTED, INTERRUPTED_MESSAGE);
-    return {};
+    return { claimed: true };
   }
   try {
     const result = await handlers[job.type](context);
     await finish(deps, job, mine, { status: 'done', result: result ?? null, errorCode: null, errorMessage: null });
   } catch (error) {
-    if (error instanceof JobLostError) return {};
+    if (error instanceof JobLostError) return { claimed: true };
     // Asked to wait, or another run took the connection's lease mid-way: not a failed attempt.
     const later = error instanceof RetryLater ? error : error instanceof LeaseLostError ? new RetryLater(30, error.message) : null;
     if (later) {
@@ -209,7 +214,7 @@ export async function runJobWith(deps: Deps, id: string, handlers: JobHandlers, 
         .set({ status: 'queued', attempts: sql`${jobs.attempts} - 1`, runAfter, lockToken: null, lockedUntil: null, errorMessage: later.message })
         .where(mine);
       await deps.jobQueue.wake([id], later.seconds);
-      return {};
+      return { claimed: true };
     }
     const message = describeError(error).slice(0, 500);
     const code = (error as { code?: unknown }).code;
@@ -225,7 +230,7 @@ export async function runJobWith(deps: Deps, id: string, handlers: JobHandlers, 
       await failedForGood(errorCode, message);
     }
   }
-  return {};
+  return { claimed: true };
 }
 
 /** Record the job's end, then release what waits for its group. */
@@ -295,16 +300,46 @@ export async function sweep(deps: Deps): Promise<number> {
   return stuck.length;
 }
 
-/** Ids of jobs that can run now (Node's loop and tests pick them up this way). */
+/**
+ * Ids of jobs that can run now, fairest first: from the household with the
+ * fewest jobs running, then the one whose last job started longest ago (or
+ * never), then the longest due. So one household's many jobs (a history
+ * load) take turns with everyone else's, and a household waits for no one
+ * while a runner is free.
+ */
 export async function dueJobs(deps: Deps, limit = 50): Promise<string[]> {
   const now = deps.now().getTime();
+  const running = sql`(select count(*) from ${jobs} as busy where busy.household_id = ${jobs.householdId} and busy.status = 'running' and busy.locked_until >= ${now})`;
+  const lastStarted = sql`(select max(served.started_at) from ${jobs} as served where served.household_id = ${jobs.householdId})`;
   const rows = await deps.db
     .select({ id: jobs.id })
     .from(jobs)
     .where(or(and(eq(jobs.status, 'queued'), lte(jobs.runAfter, now)), and(eq(jobs.status, 'running'), lt(jobs.lockedUntil, now))))
-    .orderBy(jobs.runAfter, jobs.createdAt)
+    .orderBy(running, lastStarted, jobs.runAfter, jobs.createdAt)
     .limit(limit);
   return rows.map((row) => row.id);
+}
+
+/** Candidates tried per pick: others may claim the first ones at the same moment. */
+const PICK_CANDIDATES = 5;
+
+/**
+ * Run the fairest due job (see dueJobs), whichever job a wake-up named: a
+ * wake-up only says "there's work". When none is due but an attempt holds a
+ * job, asks to be tried again once that lock runs out, in case the attempt
+ * was stopped part-way.
+ */
+export async function runNextWith(deps: Deps, handlers: JobHandlers, onFailed: FailureHandlers = {}): Promise<JobOutcome> {
+  for (const id of await dueJobs(deps, PICK_CANDIDATES)) {
+    const outcome = await runJobWith(deps, id, handlers, onFailed);
+    if (outcome.claimed) return outcome;
+  }
+  const [held] = await deps.db
+    .select({ until: sql<number | null>`min(${jobs.lockedUntil})` })
+    .from(jobs)
+    .where(eq(jobs.status, 'running'));
+  const now = deps.now().getTime();
+  return held?.until && held.until >= now ? { retryInSeconds: Math.max(1, Math.ceil((held.until - now) / 1000) + 1) } : {};
 }
 
 /** A group's jobs that haven't finished. */
