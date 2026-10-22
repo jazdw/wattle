@@ -123,6 +123,7 @@ describe('work budgets (2 accounts, 30 positions, 500 transactions, 2 years)', (
       '/api/history?range=2Y&group=category': 10, // 8
       '/api/quotes': 4, // 3
       '/api/status': 5, // 4
+      '/api/activity': 5, // 4
     };
     for (const [path, budget] of Object.entries(budgets)) {
       const page = await measure(deps, outside, async () => expect((await api(path)).status).toBe(200));

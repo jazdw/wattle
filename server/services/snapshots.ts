@@ -12,11 +12,16 @@
  * change that finds a snapshot running leaves a note, and the running one goes
  * again: every change is followed by a snapshot that read it, so the last
  * snapshot written always reflects the latest data.
+ *
+ * Each snapshot is logged in snapshot_runs, written 'running' as it starts;
+ * the next snapshot to take the lease marks one left running as interrupted.
  */
 import { eq, inArray, sql } from 'drizzle-orm';
 import { marketDate, type IsoDate } from '../../shared/dates';
 import { chunkRows, runAtomic } from '../db/batch';
-import { accountDaily, accounts, holdingDaily, holdings, securities } from '../db/schema';
+import { accountDaily, accounts, holdingDaily, holdings, securities, snapshotRuns } from '../db/schema';
+import { describeError } from '../lib/errors';
+import { INTERRUPTED, INTERRUPTED_MESSAGE } from './activity';
 import type { Tenant } from '../db/tenant';
 import type { Deps } from '../ports';
 import { holdWhile, Lease, snapshotLease } from './lease';
@@ -27,6 +32,7 @@ export async function snapshotHousehold(
   deps: Deps,
   tenant: Tenant,
   date: IsoDate,
+  trigger: 'nightly' | 'change' = 'change',
 ): Promise<{ accounts: number; holdings: number; skipped?: boolean }> {
   const key = snapshotLease(tenant.householdId);
   let lease = await Lease.acquire(deps, tenant, key);
@@ -37,10 +43,30 @@ export async function snapshotHousehold(
     if (!lease) return { accounts: 0, holdings: 0, skipped: true };
   }
   const held = lease;
+  const id = crypto.randomUUID();
+  const startedAt = deps.now().getTime();
+  const logged = (values: Partial<typeof snapshotRuns.$inferInsert>) =>
+    tenant.db.update(snapshotRuns).set({ finishedAt: deps.now().getTime(), ...values }).where(tenant.scope(snapshotRuns, eq(snapshotRuns.id, id)));
+  await runAtomic(tenant.db, [
+    // Holding the lease, no other snapshot is running: one marked running was stopped part-way.
+    tenant.db
+      .update(snapshotRuns)
+      .set({ outcome: 'error', errorCode: INTERRUPTED, errorMessage: INTERRUPTED_MESSAGE, finishedAt: startedAt })
+      .where(tenant.scope(snapshotRuns, eq(snapshotRuns.outcome, 'running'))),
+    tenant.db
+      .insert(snapshotRuns)
+      .values({ id, householdId: tenant.householdId, date, trigger, startedAt, finishedAt: startedAt, outcome: 'running' }),
+  ]);
   let result = { accounts: 0, holdings: 0 };
-  await holdWhile(held, async () => {
-    result = await snapshotOnce(deps, tenant, date, held);
-  });
+  try {
+    await holdWhile(held, async () => {
+      result = await snapshotOnce(deps, tenant, date, held);
+    });
+  } catch (error) {
+    await logged({ outcome: 'error', errorMessage: describeError(error).slice(0, 500) }).catch(() => {});
+    throw error;
+  }
+  await logged({ outcome: 'ok', accounts: result.accounts, holdings: result.holdings });
   return result;
 }
 

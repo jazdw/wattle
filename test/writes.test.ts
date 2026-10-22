@@ -49,15 +49,17 @@ const REVIEWED: Record<string, Record<string, string>> = {
     accountDaily: 'snapshot lease, atomic',
     holdingDaily: 'snapshot lease, atomic',
     accounts: 'manual balances from holdings: snapshot lease, atomic with the rows',
+    snapshotRuns: 'log rows: written running under the snapshot lease (closing any left running, atomically), completed by id',
   },
   'server/services/lease.ts': { leases: 'the lease itself: conditional upserts and holder-checked updates' },
   'server/services/securityTypes.ts': {
     securities: 'nightly: fills type (and a ticker-only name) of hand-entered securities only where still unset; one batch',
   },
   'server/services/activity.ts': {
-    syncRuns: 'log rows, written in the batch of the change they record (or alone for skipped/failed runs)',
+    syncRuns: 'log rows, written in the batch of the change they record (or alone for skipped/failed runs); running rows closed under the connection lease',
     priceRuns: 'pruning old entries',
     jobRuns: 'pruning old entries',
+    snapshotRuns: 'pruning old entries',
   },
   'server/services/pricing.ts': {
     pricesDaily: 'public data; atomic with its price_runs row; last write wins with provider data',
@@ -65,7 +67,10 @@ const REVIEWED: Record<string, Record<string, string>> = {
     fxDaily: 'public data; insert-or-ignore, atomic with its log row',
   },
   'server/services/cache.ts': { kvCache: 'TTL cache; last write wins is fine' },
-  'server/services/jobs.ts': { jobRuns: 'one row per nightly run', sessions: 'pruning expired sessions' },
+  'server/services/jobs.ts': {
+    jobRuns: 'one row per nightly run, written running and completed by id; earlier rows left running marked interrupted',
+    sessions: 'pruning expired sessions',
+  },
   'server/auth/routes.ts': {
     users: 'single upsert on google_sub',
     households: 'first household has a fixed id (insert-or-ignore)',

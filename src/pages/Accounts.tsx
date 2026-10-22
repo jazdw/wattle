@@ -1,6 +1,7 @@
 import { useMutation, useQueryClient } from '@tanstack/react-query';
-import { EyeOff, History, Layers, Link2, Pencil, Plus, RefreshCw, Unplug, Upload } from 'lucide-react';
+import { EyeOff, History, Layers, Link2, ListChecks, Pencil, Plus, RefreshCw, RotateCcw, Unplug, Upload } from 'lucide-react';
 import { useState } from 'react';
+import { Link } from 'react-router-dom';
 import type { AccountSummary, ConnectionSummary } from '../../shared/types';
 import { api } from '../api';
 import { ActivityDialog } from '../components/ActivityDialog';
@@ -13,7 +14,7 @@ import { Button } from '../components/ui/button';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '../components/ui/card';
 import { Dialog, DialogContent } from '../components/ui/dialog';
 import { Alert, Skeleton } from '../components/ui/misc';
-import { useAccounts, useConnections } from '../hooks/queries';
+import { useAccounts, useConnections, useStatus } from '../hooks/queries';
 import { useAuth, useOwnerName } from '../hooks/useAuth';
 import { accountKind, money, relativeTime } from '../lib/format';
 
@@ -75,6 +76,14 @@ export function Accounts() {
     const found = accounts.data?.accounts.find((row) => row.id === id);
     return found ? `${found.name}${found.institutionName ? ` at ${found.institutionName}` : ''}` : 'another account';
   };
+  // History that failed, or stopped retrying after being stopped part-way, can be asked for again.
+  const status = useStatus();
+  const historyStopped = new Set(status.data?.historyStopped.map((login) => login.connectionId));
+  const reloadHistory = useMutation({
+    mutationFn: (id: string) => api(`/api/connections/${id}/backfill`, { method: 'POST' }),
+    onSuccess: () => void queryClient.invalidateQueries(),
+    onError: (caught) => setError(caught.message),
+  });
   const reconnect = useMutation({
     mutationFn: (id: string) => api(`/api/connections/${id}/reconnect`, { method: 'POST' }),
     onSuccess: () => void queryClient.invalidateQueries(),
@@ -113,6 +122,11 @@ export function Accounts() {
             </Button>
             <Button variant="outline" onClick={() => setImporting(true)}>
               <Upload /> Import CSV
+            </Button>
+            <Button variant="outline" asChild>
+              <Link to="/activity">
+                <ListChecks /> Activity
+              </Link>
             </Button>
           </>
         }
@@ -161,6 +175,11 @@ export function Accounts() {
                   <Button variant="outline" size="sm" onClick={() => sync.mutate(connection.id)} disabled={sync.isPending}>
                     <RefreshCw className={sync.isPending && sync.variables === connection.id ? 'animate-spin' : undefined} /> Sync
                   </Button>
+                  {connection.status === 'ok' && (connection.backfillStatus === 'failed' || historyStopped.has(connection.id)) && (
+                    <Button variant="outline" size="sm" onClick={() => reloadHistory.mutate(connection.id)} disabled={reloadHistory.isPending}>
+                      <RotateCcw /> Reload history
+                    </Button>
+                  )}
                   <Button variant="ghost" size="sm" onClick={() => setActivityFor(connection)}>
                     <History /> Activity
                   </Button>

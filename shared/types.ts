@@ -108,6 +108,30 @@ export interface AccountSummary {
   possibleDuplicateOf: string | null;
 }
 
+/** One entry in the household's activity: a login's run, a snapshot, or the nightly job. */
+export type ActivityEntry =
+  | { kind: 'run'; startedAt: number; connectionId: string; institutionName: string; run: SyncRunSummary }
+  | {
+      kind: 'snapshot';
+      id: string;
+      startedAt: number;
+      finishedAt: number;
+      date: string;
+      trigger: 'nightly' | 'change';
+      outcome: 'ok' | 'error' | 'running';
+      errorCode: string | null;
+      errorMessage: string | null;
+      accounts: number;
+      holdings: number;
+    }
+  | { kind: 'nightly'; id: string; startedAt: number; finishedAt: number; date: string; state: 'finished' | 'running' | 'interrupted' };
+
+export interface ActivityResponse {
+  entries: ActivityEntry[];
+  /** Where the next (older) page starts; null at the end. */
+  next: { startedAt: number; kind: ActivityEntry['kind']; id: string } | null;
+}
+
 /** Background work that didn't finish, for the warning shown on every page. */
 export interface StatusResponse {
   /**

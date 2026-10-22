@@ -454,6 +454,32 @@ export const syncRuns = sqliteTable(
   (table) => [index('sync_runs_connection_started').on(table.householdId, table.connectionId, table.startedAt)],
 );
 
+/**
+ * Each snapshot of a household's day (the nightly one, and redoing today's
+ * after a change): when, for which date, how many rows it wrote. Written
+ * 'running' as it starts, like sync_runs, so one stopped part-way shows.
+ * Household data, kept two years.
+ */
+export const snapshotRuns = sqliteTable(
+  'snapshot_runs',
+  {
+    id: text('id').primaryKey(),
+    householdId: text('household_id')
+      .notNull()
+      .references(() => households.id, { onDelete: 'cascade' }),
+    date: text('date').notNull(),
+    trigger: text('trigger', { enum: ['nightly', 'change'] }).notNull(),
+    startedAt: integer('started_at').notNull(),
+    finishedAt: integer('finished_at').notNull(),
+    outcome: text('outcome', { enum: ['ok', 'error', 'running'] }).notNull(),
+    errorCode: text('error_code'),
+    errorMessage: text('error_message'),
+    accounts: integer('accounts').notNull().default(0),
+    holdings: integer('holdings').notNull().default(0),
+  },
+  (table) => [index('snapshot_runs_started').on(table.householdId, table.startedAt)],
+);
+
 /** One price-provider call, as recorded in price_runs. */
 export interface PriceCall {
   provider: string;

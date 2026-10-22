@@ -16,7 +16,7 @@ import { connections, households, jobRuns, sessions, syncRuns } from '../db/sche
 import { Tenant } from '../db/tenant';
 import type { Deps } from '../ports';
 import { addDays, marketDate } from '../../shared/dates';
-import { historyKeepsStopping, INTERRUPTED, interruptedSince, pruneLogs } from './activity';
+import { historyKeepsStopping, INTERRUPTED, interruptedSince, JOB_MAX_MS, pruneLogs } from './activity';
 import { cachePrune } from './cache';
 import { ensureFx } from './pricing';
 import { typeHandEnteredSecurities } from './securityTypes';
@@ -24,8 +24,6 @@ import { snapshotHousehold } from './snapshots';
 import { activeConnections, runPendingWork, syncConnection } from './sync';
 import { describeError } from '../lib/errors';
 
-/** Longer than a Cron Trigger may run: a job still 'running' after this was stopped. */
-export const JOB_MAX_MS = 20 * 60 * 1000;
 
 export interface DailyReport {
   date: string;
@@ -80,7 +78,7 @@ export async function runDaily(deps: Deps): Promise<DailyReport> {
       errors.push(`types ${tenant.householdId}: ${describeError(error)}`);
     }
     try {
-      await snapshotHousehold(deps, tenant, date);
+      await snapshotHousehold(deps, tenant, date, 'nightly');
     } catch (error) {
       errors.push(`snapshot ${tenant.householdId}: ${describeError(error)}`);
     }
