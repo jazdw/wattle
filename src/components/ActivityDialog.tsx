@@ -62,7 +62,8 @@ function RunEntry({ run }: { run: SyncRunSummary }) {
         <summary className="flex cursor-pointer list-none flex-wrap items-center gap-x-2 gap-y-1">
           <span className="font-medium">{ACTION_TEXT[run.action]}</span>
           <span className="text-muted-foreground">({TRIGGER_TEXT[run.trigger]})</span>
-          {run.outcome === 'error' && <Badge variant="danger">{run.errorCode ?? 'Failed'}</Badge>}
+          {run.outcome === 'error' && <Badge variant="danger">{run.errorCode === 'INTERRUPTED' ? 'Stopped part-way' : (run.errorCode ?? 'Failed')}</Badge>}
+          {run.outcome === 'running' && <Badge variant="outline">Running</Badge>}
           {run.outcome === 'skipped' && <Badge variant="outline">Nothing to do</Badge>}
           {run.changes.length > 0 && <Badge variant="outline">{run.changes.length}{run.truncated ? '+' : ''} changes</Badge>}
           <span className="ml-auto text-xs text-muted-foreground">{dateTime(run.startedAt)}</span>

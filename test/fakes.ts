@@ -24,6 +24,10 @@ export interface PlaidState {
   /** Plaid couldn't build the report (after an ASSETS:ERROR webhook). */
   assetReportGetError: string | null;
   calls: string[];
+  /** Every call made to this fake Plaid (each is an outside request on Workers). */
+  requests: number;
+  /** Investment transactions per page (Plaid's is up to 500; small here to exercise paging). */
+  transactionsPageSize: number;
   /** Webhook verification keys asked for. */
   webhookKeyLookups: number;
   /** redirect_uri of each link token created (undefined when none was sent). */
@@ -87,6 +91,8 @@ export function fakePlaid(initial: Partial<PlaidState> = {}): PlaidApi & { state
     calls: [],
     linkRedirects: [],
     webhookKeyLookups: 0,
+    requests: 0,
+    transactionsPageSize: 2,
     assetReportDays: [],
     removed: [],
     ...initial,
@@ -139,7 +145,7 @@ export function fakePlaid(initial: Partial<PlaidState> = {}): PlaidApi & { state
     getInvestmentTransactions: async (_token, _start, _end, offset) => {
       guard('transactions');
       if (state.transactionsNotReady) throw new PlaidApiError(400, 'ITEM_ERROR', 'PRODUCT_NOT_READY', 'not ready');
-      const page = state.transactions.slice(offset, offset + 2);
+      const page = state.transactions.slice(offset, offset + state.transactionsPageSize);
       return {
         accounts: state.accounts,
         securities: state.securities,
@@ -179,6 +185,15 @@ export function fakePlaid(initial: Partial<PlaidState> = {}): PlaidApi & { state
       return (await webhookKeys()).jwk as never;
     },
   };
+  // Count every call: each is an outside request on Workers.
+  for (const key of Object.keys(api)) {
+    const value = (api as unknown as Record<string, unknown>)[key];
+    if (typeof value !== 'function' || key === 'scoped') continue;
+    (api as unknown as Record<string, unknown>)[key] = (...args: unknown[]) => {
+      state.requests += 1;
+      return (value as (...values: unknown[]) => unknown).apply(api, args);
+    };
+  }
   return api;
 }
 

@@ -412,6 +412,7 @@ export const fxDaily = sqliteTable(
 
 export const SYNC_ACTIONS = ['sync', 'history', 'balance_history', 'relink', 'disconnect', 'account'] as const;
 export const SYNC_TRIGGERS = ['link', 'webhook', 'nightly', 'manual', 'refresh'] as const;
+export const JOB_STATUSES = ['running', 'ok', 'errors', 'interrupted'] as const;
 
 /**
  * Every sync, history load and balance-history collection for a connection:
@@ -432,8 +433,12 @@ export const syncRuns = sqliteTable(
     trigger: text('trigger', { enum: SYNC_TRIGGERS }).notNull(),
     startedAt: integer('started_at').notNull(),
     finishedAt: integer('finished_at').notNull(),
-    /** 'skipped': looked, but had nothing to do (see `note`). */
-    outcome: text('outcome', { enum: ['ok', 'error', 'skipped'] }).notNull(),
+    /**
+     * 'skipped': looked, but had nothing to do (see `note`). 'running': written
+     * as the run starts; one still running when the next run takes the
+     * connection's lease was stopped part-way (it becomes an INTERRUPTED error).
+     */
+    outcome: text('outcome', { enum: ['ok', 'error', 'skipped', 'running'] }).notNull(),
     errorCode: text('error_code'),
     errorMessage: text('error_message'),
     /** Why a run was skipped, e.g. another sync was running. */
@@ -504,6 +509,11 @@ export const jobRuns = sqliteTable(
     date: text('date').notNull(),
     startedAt: integer('started_at').notNull(),
     finishedAt: integer('finished_at').notNull(),
+    /**
+     * Written 'running' as the job starts. One still 'running' when the next
+     * starts (or long after) was stopped part-way: 'interrupted'.
+     */
+    status: text('status', { enum: JOB_STATUSES }).notNull().default('ok'),
     households: integer('households').notNull(),
     errors: text('errors', { mode: 'json' }).$type<string[]>().notNull(),
   },

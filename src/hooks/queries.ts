@@ -7,6 +7,7 @@ import type {
   PortfolioResponse,
   QuotesResponse,
   SecurityRow,
+  StatusResponse,
   TargetResponse,
 } from '../../shared/types';
 import { api } from '../api';
@@ -47,6 +48,11 @@ export const connectionsQuery = queryOptions({ queryKey: ['connections'], queryF
 
 export function useConnections() {
   return useQuery(connectionsQuery);
+}
+
+/** Background work that didn't finish; checked every few minutes. */
+export function useStatus() {
+  return useQuery({ queryKey: ['status'], queryFn: () => api<StatusResponse>('/api/status'), refetchInterval: 5 * 60_000 });
 }
 
 export function useTarget() {

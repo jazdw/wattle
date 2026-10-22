@@ -66,6 +66,7 @@ export async function collectPendingReport(
   let reportToken: string;
   let report;
   try {
+    await run.begin();
     const keys = await loadTokenKeys(deps.config.tokenEncKey);
     reportToken = await decryptToken(keys, connection.assetReportTokenEnc, tokenAad(tenant.householdId, connection.id));
     report = await plaid.getAssetReport(reportToken);

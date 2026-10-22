@@ -6,8 +6,14 @@
  * A run's log row is written in the same atomic batch as its data (see
  * SyncRun.statement), so data never changes without a log entry. Runs that
  * fail, or find nothing to do, get a row of their own.
+ *
+ * A Worker stopped part-way (CPU or time limit, crash) runs no more code, so
+ * it can't log that. Runs that do real work write a 'running' row first
+ * (SyncRun.begin); the next run to take the connection's lease turns any
+ * still-running row into an INTERRUPTED error (closeInterruptedRuns), since
+ * nothing else can be running then.
  */
-import { desc, eq, lt, sql } from 'drizzle-orm';
+import { and, desc, eq, gte, lt, ne, sql } from 'drizzle-orm';
 import type { BatchItem } from 'drizzle-orm/batch';
 import type { SyncChange, SyncRunSummary } from '../../shared/types';
 import { PlaidApiError, type PlaidApi, type PlaidCall } from '../adapters/plaid';
@@ -24,6 +30,10 @@ export type SyncTrigger = (typeof SYNC_TRIGGERS)[number];
 const MAX_CHANGES = 500;
 /** How long the logs are kept (matches the two years of history). */
 const RETENTION_DAYS = 730;
+/** Error code of a run that was stopped part-way. */
+export const INTERRUPTED = 'INTERRUPTED';
+/** History work stopped part-way this many times in a row isn't retried on its own. */
+export const MAX_INTERRUPTED_HISTORY = 3;
 
 export class SyncRun {
   readonly plaidCalls: PlaidCall[] = [];
@@ -40,6 +50,7 @@ export class SyncRun {
   private readonly action: SyncAction;
   private readonly trigger: SyncTrigger;
   private readonly startedAt: number;
+  private begun = false;
 
   constructor(deps: Deps, tenant: Tenant, connectionId: string, action: SyncAction, trigger: SyncTrigger) {
     this.deps = deps;
@@ -73,11 +84,31 @@ export class SyncRun {
   }
 
   /**
+   * Record that the run has started, before work a Worker could be stopped
+   * part-way through. The row is completed by statement(); left 'running', the
+   * next run marks it interrupted.
+   */
+  async begin(): Promise<void> {
+    if (this.begun) return;
+    await this.tenant.db.insert(syncRuns).values({ ...this.values('running'), finishedAt: this.startedAt });
+    this.begun = true;
+  }
+
+  /**
    * The log row, to include in the batch that writes the run's data. With
    * `skipped`, the run looked but had nothing to do (`note` says why).
+   * Completes the row begin() wrote, if any.
    */
   statement(outcome: 'ok' | 'skipped' = 'ok'): BatchItem<'sqlite'> {
-    return this.tenant.db.insert(syncRuns).values({
+    const values = this.values(outcome);
+    return this.tenant.db
+      .insert(syncRuns)
+      .values(values)
+      .onConflictDoUpdate({ target: syncRuns.id, set: values, setWhere: eq(syncRuns.householdId, this.tenant.householdId) });
+  }
+
+  private values(outcome: 'ok' | 'skipped' | 'running'): typeof syncRuns.$inferInsert {
+    return {
       id: this.id,
       householdId: this.tenant.householdId,
       connectionId: this.connectionId,
@@ -93,7 +124,7 @@ export class SyncRun {
       counts: this.counts,
       changes: this.changes,
       truncated: this.truncated,
-    });
+    };
   }
 
   /**
@@ -126,6 +157,48 @@ export class SyncRun {
       console.error('Could not write the sync log', describeError(logError));
     }
   }
+}
+
+/**
+ * Mark runs still 'running' for this connection as stopped part-way. Call
+ * holding the connection's lease: no run of it can be going on then.
+ */
+export async function closeInterruptedRuns(deps: Deps, tenant: Tenant, connectionId: string): Promise<number> {
+  const closed = await tenant.db
+    .update(syncRuns)
+    .set({
+      outcome: 'error',
+      errorCode: INTERRUPTED,
+      errorMessage: 'Stopped before finishing, most likely by a Worker limit (CPU time, run time or requests). Its finished steps are kept.',
+      finishedAt: deps.now().getTime(),
+    })
+    .where(tenant.scope(syncRuns, eq(syncRuns.connectionId, connectionId), eq(syncRuns.outcome, 'running')))
+    .returning({ id: syncRuns.id });
+  return closed.length;
+}
+
+/**
+ * History work (a history load or filling missed days) for this connection
+ * was stopped part-way MAX_INTERRUPTED_HISTORY times in a row: retrying on
+ * its own would only be stopped again, every time. Skipped runs don't count.
+ */
+export async function historyKeepsStopping(tenant: Tenant, connectionId: string): Promise<boolean> {
+  const recent = await tenant.db
+    .select({ errorCode: syncRuns.errorCode })
+    .from(syncRuns)
+    .where(tenant.scope(syncRuns, eq(syncRuns.connectionId, connectionId), eq(syncRuns.action, 'history'), ne(syncRuns.outcome, 'skipped')))
+    .orderBy(desc(syncRuns.startedAt), desc(sql`rowid`))
+    .limit(MAX_INTERRUPTED_HISTORY);
+  return recent.length === MAX_INTERRUPTED_HISTORY && recent.every((run) => run.errorCode === INTERRUPTED);
+}
+
+/** Runs (all households) found stopped part-way since `since`: a count, for the nightly report. */
+export async function interruptedSince(deps: Deps, since: number): Promise<number> {
+  const [row] = await deps.db
+    .select({ count: sql<number>`count(*)` })
+    .from(syncRuns)
+    .where(and(eq(syncRuns.errorCode, INTERRUPTED), gte(syncRuns.finishedAt, since)));
+  return row?.count ?? 0;
 }
 
 /** A connection's most recent runs, newest first. */
