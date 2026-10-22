@@ -23,7 +23,8 @@ const REVIEWED: Record<string, Record<string, string>> = {
   },
   'server/services/assetReports.ts': {
     connections: 'connection lease, atomic with the balances and log row',
-    accountDaily: 'connection lease, atomic with the status and log row',
+    accountDaily: 'connection lease, atomic with the status and log row (each account job: its balances only, replacing carried-forward rows; safe to repeat)',
+    jobs: "moving a waiting report check's run_after to now: one conditional update; the job runner's claim still decides who runs it",
   },
   'server/routes/plaid.ts': {
     connections: 'webhooks: status via statusStatement (newest wins), consent warning column; no lease needed',

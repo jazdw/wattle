@@ -13,7 +13,7 @@
  * still-running row into an INTERRUPTED error (closeInterruptedRuns), since
  * nothing else can be running then.
  */
-import { and, asc, desc, eq, gt, lt, lte, ne, or, sql, type SQL } from 'drizzle-orm';
+import { and, asc, desc, eq, gt, lt, lte, notInArray, or, sql, type SQL } from 'drizzle-orm';
 import type { SQLiteColumn } from 'drizzle-orm/sqlite-core';
 import type { BatchItem } from 'drizzle-orm/batch';
 import type { ActivityEntry, ActivityResponse, SyncChange, SyncRunSummary } from '../../shared/types';
@@ -186,7 +186,7 @@ export async function closeInterruptedRuns(deps: Deps, tenant: Tenant, connectio
       errorMessage: INTERRUPTED_MESSAGE,
       finishedAt: deps.now().getTime(),
     })
-    .where(tenant.scope(syncRuns, eq(syncRuns.connectionId, connectionId), eq(syncRuns.outcome, 'running'), ne(syncRuns.action, 'history')))
+    .where(tenant.scope(syncRuns, eq(syncRuns.connectionId, connectionId), eq(syncRuns.outcome, 'running'), notInArray(syncRuns.action, ['history', 'balance_history'])))
     .returning({ id: syncRuns.id });
   return closed.length;
 }

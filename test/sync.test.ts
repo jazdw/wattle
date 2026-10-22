@@ -3,8 +3,7 @@ import { describe, expect, it } from 'vitest';
 import * as schema from '../server/db/schema';
 import { Tenant } from '../server/db/tenant';
 import type { Deps } from '../server/ports';
-import { collectPendingReport } from '../server/services/assetReports';
-import { connectionLease, Lease } from '../server/services/lease';
+import { queueReportCollection } from '../server/services/assetReports';
 import { queueHistory } from '../server/services/backfill';
 import { saveCloses } from '../server/services/pricing';
 import { snapshotHousehold } from '../server/services/snapshots';
@@ -12,7 +11,7 @@ import { syncConnection } from '../server/services/sync';
 import { runJob } from '../server/services/jobHandlers';
 import { marketDate } from '../shared/dates';
 import { account, closes, fakePlaid, fakePrices, holding, security } from './fakes';
-import { client, createHousehold, createTestDeps, flush, nightly, TODAY } from './helpers';
+import { client, createHousehold, createTestDeps, flush, nightly, settle, TODAY } from './helpers';
 
 /** A brokerage (VTI + cash) and a joint IRA (VTI) at one institution. */
 function brokerage() {
@@ -410,17 +409,47 @@ describe('history backfill', () => {
     expect(connection.assetReportId).toBe('ar-1');
     expect(connection.assetReportTokenEnc).not.toContain('assets-sandbox');
 
-    const lease = (await Lease.acquire(deps, tenant, connectionLease(connection.id)))!;
-    expect(await collectPendingReport(deps, tenant, connection, 'manual', lease)).toBe(false); // not ready yet
+    await queueReportCollection(deps, tenant, connection, 'manual');
+    await flush(deps); // not ready yet: checks again in 10 minutes
+    expect((await deps.db.select().from(schema.connections))[0].assetReportTokenEnc).not.toBeNull();
     plaid.state.assetReportReady = true;
-    expect(await collectPendingReport(deps, tenant, connection, 'manual', lease)).toBe(true);
-    await lease.forceRelease();
+    await settle(deps);
 
     const rows = await deps.db.select().from(schema.accountDaily).where(eq(schema.accountDaily.source, 'backfill'));
     expect(rows.map((row) => row.balance).sort((a, b) => a - b)).toEqual([-300_00, 900_00, 950_00]);
     const [after] = await deps.db.select().from(schema.connections);
     expect(after).toMatchObject({ backfillStatus: 'done', assetReportTokenEnc: null });
     expect(plaid.state.calls).toContain('asset_report:remove');
+  });
+
+  it('collects a large report one account per job, then finishes it once', async () => {
+    const plaid = fakePlaid({
+      accounts: [account('chk', 'depository', 1000), account('card', 'credit', 300)],
+      historicalBalances: {
+        chk: [
+          { date: '2026-10-01', current: 900 },
+          { date: '2026-10-02', current: 950 },
+        ],
+        card: [{ date: '2026-10-01', current: 300 }],
+      },
+    });
+    const deps = await createTestDeps({ plaid });
+    deps.config.jobChunkRows = 2; // three days of balances: more than one job's worth
+    const home = await createHousehold(deps, 'Home', 'me@example.com');
+    await client(deps, home.cookie)('/api/plaid/exchange', { method: 'POST', json: { publicToken: 'p', kind: 'account' } });
+    await flush(deps);
+    const [connection] = await deps.db.select().from(schema.connections);
+    await queueReportCollection(deps, new Tenant(deps.db, home.householdId), connection, 'manual');
+    await flush(deps);
+
+    const types = (await deps.db.select({ type: schema.jobs.type, status: schema.jobs.status }).from(schema.jobs)).filter((job) => job.type.startsWith('report_'));
+    expect(types.map((job) => `${job.type}:${job.status}`).sort()).toEqual(['report_account:done', 'report_account:done', 'report_collect:done', 'report_finish:done']);
+    const rows = await deps.db.select().from(schema.accountDaily).where(eq(schema.accountDaily.source, 'backfill'));
+    expect(rows.map((row) => row.balance).sort((a, b) => a - b)).toEqual([-300_00, 900_00, 950_00]);
+    expect((await deps.db.select().from(schema.connections))[0]).toMatchObject({ backfillStatus: 'done', assetReportTokenEnc: null });
+    const [run] = await deps.db.select().from(schema.syncRuns).where(eq(schema.syncRuns.action, 'balance_history'));
+    expect(run).toMatchObject({ outcome: 'ok', counts: { days: 3 } });
+    expect(plaid.state.calls.filter((call) => call === 'asset_report:remove')).toHaveLength(1);
   });
 
   it('Sync collects a ready asset report whose webhook never arrived, even during the cooldown', async () => {
@@ -441,8 +470,10 @@ describe('history backfill', () => {
     expect(notReady.body.skipped).toBe(true);
     expect((await deps.db.select().from(schema.connections))[0].backfillStatus).not.toBe('done');
 
+    await flush(deps);
     plaid.state.assetReportReady = true;
     await api(`/api/connections/${connection.id}/sync`, { method: 'POST' });
+    await flush(deps);
     const [after] = await deps.db.select().from(schema.connections);
     expect(after).toMatchObject({ backfillStatus: 'done', assetReportTokenEnc: null });
     expect(await deps.db.select().from(schema.accountDaily).where(eq(schema.accountDaily.source, 'backfill'))).toHaveLength(1);
@@ -485,6 +516,7 @@ describe('history backfill', () => {
     // The report fills in the cash account, not the rebuilt brokerage.
     plaid.state.assetReportReady = true;
     await api(`/api/connections/${connection.id}/sync`, { method: 'POST' });
+    await flush(deps);
     [connection] = await deps.db.select().from(schema.connections);
     expect(connection.backfillStatus).toBe('done');
     expect((await backfilled(cash.id)).map((row) => [row.date, row.balance])).toEqual([['2026-10-01', 250_00]]);
@@ -506,6 +538,7 @@ describe('history backfill', () => {
     await flush(deps);
     const [connection] = await deps.db.select().from(schema.connections);
     await api(`/api/connections/${connection.id}/sync`, { method: 'POST' });
+    await flush(deps);
     const [after] = await deps.db.select().from(schema.connections);
     expect(after).toMatchObject({ backfillStatus: 'done', assetReportTokenEnc: null });
   });
@@ -630,7 +663,8 @@ describe('missed days', () => {
     expect(asked.backfillStatus).toBe('done');
     expect(asked.assetReportTokenEnc).not.toBeNull();
 
-    await syncConnection(deps, new Tenant(deps.db, connection.householdId), connection.id, 'manual'); // collects it
+    await syncConnection(deps, new Tenant(deps.db, connection.householdId), connection.id, 'manual');
+    await flush(deps); // collects it
     expect(await day('2026-10-08')).toMatchObject({ balance: 1000_00, source: 'sync' }); // reported that day: kept
     expect(await day('2026-10-09')).toMatchObject({ balance: 1100_00, source: 'backfill', estimated: false });
     expect(await day('2026-10-10')).toMatchObject({ balance: 1150_00, source: 'import' }); // yours: kept
