@@ -49,6 +49,8 @@ export interface ConnectionSummary {
   ownerUserId: string | null;
   lastSyncedAt: number | null;
   backfillStatus: 'pending' | 'running' | 'done' | 'failed' | 'skipped';
+  /** While a history load runs as background jobs: how many of its parts (prices, blocks) are done. */
+  historyProgress: { done: number; total: number } | null;
   consentExpiresAt: number | null;
   createdAt: number;
 }
@@ -137,7 +139,19 @@ export type ActivityEntry =
       accounts: number;
       holdings: number;
     }
-  | { kind: 'nightly'; id: string; startedAt: number; finishedAt: number; date: string; state: 'finished' | 'running' | 'interrupted' };
+  | { kind: 'nightly'; id: string; startedAt: number; finishedAt: number; date: string; state: 'finished' | 'running' | 'interrupted' }
+  /** A background job that failed for good (listed when it failed: `startedAt` is that time). */
+  | {
+      kind: 'job';
+      id: string;
+      startedAt: number;
+      type: JobType;
+      connectionId: string | null;
+      institutionName: string | null;
+      attempts: number;
+      errorCode: string | null;
+      errorMessage: string | null;
+    };
 
 export interface ActivityResponse {
   entries: ActivityEntry[];

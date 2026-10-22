@@ -20,6 +20,17 @@ const FIRST: ActivityResponse = {
     { kind: 'nightly', id: 'j2', startedAt: at('2026-10-09T02:00:00Z'), finishedAt: at('2026-10-09T02:00:12Z'), date: '2026-10-08', state: 'interrupted' },
     run('r2', at('2026-10-09T02:00:01Z') - 1, { action: 'history', outcome: 'error', errorCode: 'INTERRUPTED', errorMessage: 'Stopped before finishing.' }),
     {
+      kind: 'job',
+      id: 'j-failed',
+      startedAt: at('2026-10-09T01:00:00Z'),
+      type: 'history_block',
+      connectionId: 'c-chase',
+      institutionName: 'Chase',
+      attempts: 3,
+      errorCode: null,
+      errorMessage: 'Tiingo said no.',
+    },
+    {
       kind: 'snapshot',
       id: 's1',
       startedAt: at('2026-10-08T02:00:05Z'),
@@ -50,6 +61,9 @@ describe('Activity page', () => {
     expect(screen.getByText('Chase · History load')).toBeInTheDocument();
     expect(screen.getByText('4 accounts · 12 holdings')).toBeInTheDocument();
     expect(screen.getByText(/Snapshot of/)).toBeInTheDocument();
+    expect(screen.getByText('Chase · Loading history')).toBeInTheDocument();
+    expect(screen.getByText('Failed after 3 attempts')).toBeInTheDocument();
+    expect(screen.getByText('Tiingo said no.')).toBeInTheDocument();
 
     await user.click(screen.getByRole('button', { name: 'Load older' }));
     expect(await screen.findByText('Chase · Sync')).toBeInTheDocument();
@@ -70,5 +84,11 @@ describe('Activity page', () => {
     const list = screen.getByText('Nightly update').closest('div.grid') as HTMLElement;
     expect(within(list).queryByText(/Snapshot of/)).not.toBeInTheDocument();
     expect(within(list).getByText('Chase · History load')).toBeInTheDocument();
+    expect(within(list).getByText('Chase · Loading history')).toBeInTheDocument();
+
+    await user.click(screen.getByRole('switch'));
+    await user.click(screen.getByRole('tab', { name: 'Failed jobs' }));
+    expect(screen.getByText('Chase · Loading history')).toBeInTheDocument();
+    expect(screen.queryByText('Nightly update')).not.toBeInTheDocument();
   });
 });

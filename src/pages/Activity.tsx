@@ -10,19 +10,22 @@ import { Alert, EmptyState, Skeleton } from '../components/ui/misc';
 import { Segmented } from '../components/ui/segmented';
 import { Switch } from '../components/ui/switch';
 import { dateTime, shortDate } from '../lib/format';
+import { JOB_TEXT } from '../lib/jobs';
 
-type Show = 'all' | 'run' | 'snapshot' | 'nightly';
+type Show = 'all' | 'run' | 'snapshot' | 'nightly' | 'job';
 
 const SHOW_OPTIONS: { value: Show; label: string }[] = [
   { value: 'all', label: 'All' },
   { value: 'run', label: 'Logins' },
   { value: 'snapshot', label: 'Snapshots' },
   { value: 'nightly', label: 'Nightly' },
+  { value: 'job', label: 'Failed jobs' },
 ];
 
 function hasProblem(entry: ActivityEntry): boolean {
   if (entry.kind === 'run') return entry.run.outcome === 'error';
   if (entry.kind === 'snapshot') return entry.outcome === 'error';
+  if (entry.kind === 'job') return true;
   return entry.state === 'interrupted';
 }
 
@@ -61,9 +64,25 @@ function NightlyEntry({ entry }: { entry: Extract<ActivityEntry, { kind: 'nightl
   );
 }
 
+function JobEntry({ entry }: { entry: Extract<ActivityEntry, { kind: 'job' }> }) {
+  const what = JOB_TEXT[entry.type];
+  return (
+    <li className="flex flex-wrap items-center gap-x-2 gap-y-1 rounded-md border px-3 py-2 text-sm">
+      <span className="font-medium">
+        {entry.institutionName ? `${entry.institutionName} · ` : ''}
+        {what.charAt(0).toUpperCase() + what.slice(1)}
+      </span>
+      <Badge variant="danger">{entry.errorCode === 'INTERRUPTED' ? 'Stopped part-way every time' : `Failed after ${entry.attempts} attempts`}</Badge>
+      <span className="ml-auto text-xs text-muted-foreground">{dateTime(entry.startedAt)}</span>
+      {entry.errorMessage && <p className="w-full text-xs text-negative">{entry.errorMessage}</p>}
+    </li>
+  );
+}
+
 function Entry({ entry }: { entry: ActivityEntry }) {
   if (entry.kind === 'run') return <RunEntry run={entry.run} title={entry.institutionName} />;
   if (entry.kind === 'snapshot') return <SnapshotEntry entry={entry} />;
+  if (entry.kind === 'job') return <JobEntry entry={entry} />;
   return <NightlyEntry entry={entry} />;
 }
 
@@ -90,7 +109,10 @@ export function Activity() {
 
   return (
     <>
-      <PageHeader title="Activity" description="Every sync, history load, snapshot and nightly update over the last two years, newest first." />
+      <PageHeader
+        title="Activity"
+        description="Every sync, history load, snapshot and nightly update over the last two years, and any background job that failed, newest first."
+      />
       <div className="mb-4 flex flex-wrap items-center gap-4">
         <Segmented value={show} options={SHOW_OPTIONS} onChange={setShow} />
         <label className="flex items-center gap-2 text-sm">

@@ -11,6 +11,22 @@ const card = (title: string) => screen.getByText(title, { selector: 'h3' }).clos
 const accountRow = (name: string) => screen.getByText(name).closest('li') as HTMLElement;
 
 describe('Accounts page', () => {
+  it("shows a history load's progress on its login", async () => {
+    server.use(
+      http.get('*/api/connections', () =>
+        HttpResponse.json({
+          ...CONNECTIONS,
+          connections: CONNECTIONS.connections.map((connection) =>
+            connection.id === 'c-chase' ? { ...connection, backfillStatus: 'running', historyProgress: { done: 3, total: 10 } } : connection,
+          ),
+        }),
+      ),
+    );
+    renderPage(<Accounts />);
+    expect(await screen.findByText('Loading history… 3 of 10')).toBeInTheDocument();
+    expect(card('Chase')).toContainElement(screen.getByText('Loading history… 3 of 10'));
+  });
+
   it('offers Reload history only for a login whose history failed', async () => {
     const first = renderPage(<Accounts />);
     await screen.findByText('Sapphire');

@@ -1,6 +1,7 @@
 import { Link } from 'react-router-dom';
 import type { StatusResponse } from '../../shared/types';
 import { useStatus } from '../hooks/queries';
+import { JOB_TEXT } from '../lib/jobs';
 import { Alert } from './ui/misc';
 
 const ACTION_TEXT: Record<StatusResponse['interrupted'][number]['action'], string> = {
@@ -10,19 +11,6 @@ const ACTION_TEXT: Record<StatusResponse['interrupted'][number]['action'], strin
   relink: 're-linking',
   disconnect: 'disconnecting',
   account: 'an account change',
-};
-
-const JOB_TEXT: Record<StatusResponse['failedJobs'][number]['type'], string> = {
-  sync: 'syncing',
-  snapshot: "updating the day's snapshot",
-  nightly_finish: 'finishing the nightly update',
-  history_plan: 'loading history',
-  history_prices: 'loading price history',
-  history_block: 'loading history',
-  history_finish: 'loading history',
-  report_collect: 'collecting balance history',
-  report_account: 'collecting balance history',
-  report_finish: 'collecting balance history',
 };
 
 const day = (time: number) => new Date(time).toLocaleDateString(undefined, { month: 'short', day: 'numeric' });

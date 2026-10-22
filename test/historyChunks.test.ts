@@ -8,6 +8,7 @@ import type { InvestmentTransaction } from 'plaid';
 import { describe, expect, it } from 'vitest';
 import * as schema from '../server/db/schema';
 import { Tenant } from '../server/db/tenant';
+import { runJob } from '../server/services/jobHandlers';
 import { snapshotHousehold } from '../server/services/snapshots';
 import { syncConnection } from '../server/services/sync';
 import { marketDate } from '../shared/dates';
@@ -104,5 +105,38 @@ describe('history in jobs', () => {
     expect(small.holdingRows.length).toBeGreaterThan(1500);
     expect(small.accountRows).toEqual(large.accountRows);
     expect(small.holdingRows).toEqual(large.holdingRows);
+  });
+});
+
+describe('history progress', () => {
+  it("shows on the login while its parts run, and clears when they're done", async () => {
+    const plaid = fakePlaid({
+      accounts: [account('brk', 'investment', 3000)],
+      securities: [security('s-vti', 'VTI', 'etf', 100)],
+      holdings: [holding('brk', 's-vti', 20, 100)],
+      transactions: [buy('t1', 'brk', 's-vti', '2026-03-15', 10, 80)] as never,
+    });
+    const deps = await createTestDeps({ plaid, prices: fakePrices({ VTI: closes('2024-09-01', 800, 60, 0.05) }) });
+    deps.config.jobChunkRows = 50;
+    const home = await createHousehold(deps, 'Home', 'me@example.com');
+    const api = client(deps, home.cookie);
+    await api('/api/plaid/exchange', { method: 'POST', json: { publicToken: 'p', kind: 'investments' } });
+    const progress = async () => (await api('/api/connections')).body.connections[0].historyProgress;
+    const run = async (type: string) => {
+      const [job] = await deps.db.select().from(schema.jobs).where(eq(schema.jobs.type, type as 'history_plan'));
+      await runJob(deps, job.id);
+    };
+    expect(await progress()).toBeNull(); // not planned yet
+    await run('history_plan');
+    const planned = await progress();
+    expect(planned.done).toBe(0);
+    expect(planned.total).toBeGreaterThan(10); // one price job, many blocks
+    await run('history_prices');
+    expect(await progress()).toEqual({ done: 1, total: planned.total });
+    await flush(deps);
+    expect(await progress()).toBeNull();
+    // Another household sees none of it.
+    const other = await createHousehold(deps, 'Other', 'other@example.com');
+    expect((await client(deps, other.cookie)('/api/connections')).body.connections).toEqual([]);
   });
 });

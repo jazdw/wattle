@@ -52,13 +52,17 @@ migrations/  drizzle-kit SQL, applied by Wrangler (D1) or Drizzle's migrator (li
 - **Shared prices.** Daily closes and FX rates from Tiingo and Frankfurter are public data, shared by all households. Prices an institution reports through Plaid stay with that household (its securities' last price) and never go in the shared table.
 - **Session cookies.** Over HTTPS they're `__Host-` cookies, which only this exact host can set, so another subdomain can't plant a session.
 - **Webhook checks.** The webhook is public. A webhook naming an item or report Wattle Wealth doesn't have is dropped before its signature is checked, so forged ones can't make it ask Plaid for verification keys. For the rest: key ids must be well-formed, an id Plaid had no key for isn't asked about again for five minutes, and each instance makes at most 10 lookups a minute (Plaid's real key is normally cached).
-- **Daily job** (cron `0 2 * * *` UTC, after US close). It syncs every connection, fetches closes and FX, and writes one `account_daily` and one `holding_daily` row per account and holding. Manual and imported values are never overwritten. History loads and missed-day fills that are due run last, after every sync and snapshot, so heavy history work cut short can't stop the rest.
+- **Background jobs** (`services/jobRunner.ts`). Work that doesn't happen while someone waits runs as small jobs, each in an invocation of its own, so each has the platform's limits to itself (Workers Free: 10 ms of CPU, 50 outside requests):
+  - The `jobs` table is the record. The platform only wakes a runner for a job id: a Cloudflare Queue (`wattle-jobs`, one job per message) on Workers, the process's own loop on Node. A lost wake-up is recovered by the sweep, which runs nightly and whenever the app checks `/api/status`, so nothing depends on the queue keeping its messages.
+  - A job is claimed by one conditional update and holds a lock it renews before each write, like a lease. A failed attempt is retried after 1, 5, then 30 minutes; one stopped part-way (its lock ran out) runs again. After three attempts it fails for good: shown in the warning banner and on the Activity page, and a failed history load offers **Reload history**.
+  - Jobs that belong together share a group; a job can wait for a group and is queued when that group has no unfinished jobs.
+  - `JOB_CHUNK_ROWS` (default 1,000) sets about how many rows one job builds. Building a row costs about 6.6 µs of CPU, so the default stays inside Workers Free; raise it on Workers Paid for fewer, larger jobs.
+- **Daily job** (cron `0 2 * * *` UTC, after US close). The cron does the light upkeep (FX rates, pruning, the sweep) and adds the night's jobs: a `sync` per active login, then per household a `snapshot` waiting for its syncs (one `account_daily` and one `holding_daily` row per account and holding), then `nightly_finish`, which completes the `job_runs` row with any job that failed. One household's failures never hold up another's. Manual and imported values are never overwritten.
 - **Runs stopped part-way.** A Worker stopped by a limit (CPU, run time, requests) runs no more code and can't log it, so it's found afterwards:
-  - Syncs, history loads and report collections write a `running` row in `sync_runs` when they start. The next run to take the connection's lease marks any still-running row `INTERRUPTED` (nothing else can be running then). Activity shows it as "Stopped part-way".
-  - The daily job writes its `job_runs` row as `running` when it starts. The next job marks one left running as `interrupted` and lists it in its errors.
-  - History work stopped three times in a row stops retrying on its own (otherwise each retry would be stopped again, every night). **Reload history** still runs it.
-  - Every page shows a warning while any of this is recent (`/api/status`): the nightly job stopped or late, runs stopped in the last three days, history that stopped retrying.
-- **Work budgets.** `test/budgets.test.ts` counts the database calls, statements, rows written and outside requests of a first link, the nightly job and each page load, with realistically sized data (30 positions, 500 transactions, two years), and fails when a change goes over budget. Counts, not timings, so they're exact.
+  - Syncs write a `running` row in `sync_runs` when they start. The next run to take the connection's lease marks any still-running row `INTERRUPTED` (nothing else can be running then). Activity shows it as "Stopped part-way". History loads and report collections are jobs, which record a stopped attempt themselves.
+  - Snapshots do the same in `snapshot_runs`, and the daily job in `job_runs`: one still running when the next night starts is marked `interrupted`.
+  - Every page shows a warning while any of this is recent (`/api/status`): the nightly job stopped or late, runs stopped in the last three days, background jobs that failed.
+- **Work budgets.** `test/budgets.test.ts` counts the database calls, statements, rows written and outside requests of each request and each background job (a first link and its history load, the nightly job, page loads), with realistically sized data (30 positions, 500 transactions, two years), and fails when a change goes over budget. Counts, not timings, so they're exact.
 - **Concurrency.** Two people, a webhook and the nightly job can all act at once; the rules (`services/lease.ts`, enforced by `test/writes.test.ts`):
   - **Leases**, at most one holder per key, taken with one atomic conditional write and renewed (checking the holder) right before every write batch. They expire after 2 minutes, so a run killed mid-way can't block anything for long.
     - `connection:<id>`: everything that changes a Plaid connection's data, including syncs, history loads, bank history, disconnecting, re-linking, and hiding its accounts.
@@ -74,13 +78,14 @@ migrations/  drizzle-kit SQL, applied by Wrangler (D1) or Drizzle's migrator (li
   - `sync_runs` (per household): every sync, history load and bank-history collection, including checks that found nothing to do (with the reason), with what triggered it, Plaid's `request_id` for each call (what Plaid support asks for), counts, and what changed: balances before → after, holdings' units before → after, accounts added or no longer reported. Status changes Plaid reports by webhook are logged too. Shown per login under **Accounts → Activity** (the button on its card).
   - `price_runs` (global): every price and FX check, with the tickers, what came back, and any stored close that was replaced with a different value; written atomically with the prices it stores. Not shown in the app, since the tickers would reveal what households hold. Query it with `npx wrangler d1 execute wattle --remote --command "SELECT * FROM price_runs ORDER BY started_at DESC LIMIT 20"`.
   - `snapshot_runs` (per household): each snapshot of a day, nightly or redone after a change, with how many account and holding rows it wrote.
+  - `jobs` (per household): each background job, its attempts, result or error. Finished jobs are kept 30 days (what they changed is in the logs above).
   - `job_runs` (global): each nightly run, with the households processed and any errors.
-  - The **Activity** page (Accounts → Activity) shows the household's `sync_runs` and `snapshot_runs` together with the nightly runs, by day, filterable to problems. Of `job_runs` it shows only the date and whether the run finished, since its errors can name other households' logins.
+  - The **Activity** page (Accounts → Activity) shows the household's `sync_runs` and `snapshot_runs` together with the nightly runs and any background job that failed for good, by day, filterable to problems. Of `job_runs` it shows only the date and whether the run finished, since its errors can name other households' logins.
   - Known gap: if two households' snapshots fetch the same ticker at the same moment, a `price_runs` entry can name a "before" value the other fetch had already replaced. The stored price is right; only that log detail is off, and it can't happen with one household. Closing it would mean serialising all price writes, which isn't worth it.
   - Raw Plaid responses are not stored.
-- **History backfill.** When an account is linked:
-  - With Investments, investment accounts are rebuilt from up to 24 months of transactions and daily closes. Days where the institution's history has gaps are marked *estimated* and shaded in charts.
-  - With Assets, the login's other accounts (bank, card, a brokerage's cash account) use Plaid Asset Report daily balances (up to 2 years).
+- **History backfill.** When an account is linked (as background jobs; the login's card shows "Loading history… n of m"):
+  - With Investments, investment accounts are rebuilt from up to 24 months of transactions and daily closes. Days where the institution's history has gaps are marked *estimated* and shaded in charts. The jobs: `history_plan` decides the work, `history_prices` fetches closes for a few tickers each, `history_block` rebuilds one account's window of days each (independent: each walks back from today's holdings, so windows can run in any order), and `history_finish` records the outcome. `test/historyChunks.test.ts` checks that many small jobs write exactly the rows one large job would.
+  - With Assets, the login's other accounts (bank, card, a brokerage's cash account) use Plaid Asset Report daily balances (up to 2 years), collected by `report_collect` once Plaid has built the report (a large report becomes one `report_account` job per account, then `report_finish`).
   - Anything else can be imported from CSV. Westpac transaction exports are recognised automatically.
 - **Missed days.** Each night's snapshot records the day's balance. Which figure wins for a day:
   - A linked account's balance reported that day is the bank's figure, and replaces anything entered or imported for it.
@@ -152,7 +157,7 @@ Configuration comes in two kinds:
 - **Plain settings** (`PLAID_ENV`, `QUOTE_PROVIDER`, …): GitHub repository variables, passed to the Worker as variables on every deploy by `scripts/deploy.mjs`. Each deploy replaces them all, so the Worker always has exactly what's set; to change one, `gh variable set NAME --body VALUE` and redeploy.
 
 1. **Log in:** `npx wrangler login`.
-2. **Deploy:** `CUSTOM_DOMAIN=wattle.example.com PLAID_ENV=sandbox npm run deploy`. It finds the D1 database named `wattle` (creating it the first time), builds with its id, applies migrations and deploys to the domain with the plain settings in the environment. The id is never written to the repo: `wrangler.jsonc` keeps a placeholder.
+2. **Deploy:** `CUSTOM_DOMAIN=wattle.example.com PLAID_ENV=sandbox npm run deploy`. It creates the `wattle-jobs` queue if it doesn't exist, finds the D1 database named `wattle` (creating it the first time), builds with its id, applies migrations and deploys to the domain with the plain settings in the environment. The id is never written to the repo: `wrangler.jsonc` keeps a placeholder.
 3. **Worker secrets:** these persist across deploys. For each `<NAME>`, run `npx wrangler secret put <NAME>`:
    - `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`
    - `TOKEN_ENC_KEY` (generate with `openssl rand -base64 32`)
@@ -160,7 +165,7 @@ Configuration comes in two kinds:
    - `TIINGO_API_KEY`, `FINNHUB_API_KEY`
 4. **Who can sign in:** `npm run allow -- add you@gmail.com partner@gmail.com`.
 5. **GitHub Actions** (`.github/workflows/deploy.yml`): every push to `main` typechecks, lints and tests. Once these are set, it also runs `npm run deploy`. Until then the deploy step is skipped.
-   - Secret: `CLOUDFLARE_API_TOKEN` (`gh secret set CLOUDFLARE_API_TOKEN`). The "Edit Cloudflare Workers" template, plus Account → D1 → Edit.
+   - Secret: `CLOUDFLARE_API_TOKEN` (`gh secret set CLOUDFLARE_API_TOKEN`). The "Edit Cloudflare Workers" template, plus Account → D1 → Edit and Account → Queues → Edit (the deploy creates the jobs queue).
    - Variables: `CLOUDFLARE_ACCOUNT_ID` and `CUSTOM_DOMAIN` (`gh variable set NAME --body VALUE`). Not secret, just kept out of the repo.
    - Plain settings, as variables too: `PLAID_ENV` and any others from the table below.
 
@@ -203,6 +208,7 @@ A second lock in front of the app. Cloudflare's edge only lets your Google accou
 | `TOKEN_ENC_KEY` | Worker secret | Encrypts Plaid tokens at rest |
 | `PLAID_CLIENT_ID`, `PLAID_SECRET` | Worker secrets | Plaid |
 | `PLAID_ENV` | GitHub variable | `sandbox` (default) or `production` |
+| `JOB_CHUNK_ROWS` | GitHub variable (optional) | About how many rows one background job builds (default `1000`, sized for Workers Free's 10 ms of CPU). Raise it on Workers Paid for fewer, larger jobs |
 | `PLAID_ALLOW_REMOVE` | GitHub variable (optional) | `true` makes Disconnect also remove the login at Plaid (`/item/remove`, can't be undone). Default off: the login is kept so it can be reconnected without using another Item |
 | `TIINGO_API_KEY` | Worker secret | Daily closes (mutual funds too), history, ticker lookups; live quotes without Finnhub (50 requests an hour free) |
 | `FINNHUB_API_KEY` | Worker secret (optional) | Live quotes (60 calls a minute free; no mutual funds or history, which come from Tiingo) |
@@ -220,6 +226,8 @@ Locally, every Worker setting goes in `.dev.vars` (see `.dev.vars.example`).
 npm run build
 DATABASE_URL=file:wattle.db PORT=8787 GOOGLE_CLIENT_ID=… TOKEN_ENC_KEY=… npm run node:start
 ```
+
+Background jobs run in the same process: due jobs one at a time, swept every minute.
 
 ## Future improvements
 
@@ -257,4 +265,3 @@ DATABASE_URL=file:wattle.db PORT=8787 GOOGLE_CLIENT_ID=… TOKEN_ENC_KEY=… npm
 - Invites and multiple households in the UI.
 - Passkey (WebAuthn) sign-in as an alternative to Google.
 - **Bulk inserts without Drizzle.** Building statements row by row in Drizzle is most of the CPU time of a history load (about 6.6 µs a row: per-column encoding and checks on every SQL piece; a 30-position load writes ~47,000 rows in ~3,600 statements). A small hand-written bulk insert for `holding_daily`, `account_daily` and `prices_daily` would cut it substantially. Reads and ordinary writes are fine as they are. `test/budgets.test.ts` measures the statements built.
-- **History loads as real background jobs.** On Workers, `waitUntil` work after a response belongs to the same invocation: it shares its CPU limit and is cut off 30 seconds after the response. Options: Cloudflare Queues (one message per load, each its own invocation), Workflows (durable steps, each retried and with its own CPU limit), or a second, frequent cron that runs due history work. Today a load that's cut off is recorded and retried by the nightly job (see "Runs stopped part-way").

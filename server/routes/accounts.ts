@@ -29,7 +29,7 @@ import type { AppEnv } from '../env';
 import { HttpError, notFound, readBody, requestCurrency } from '../lib/http';
 import type { Deps, SecurityDescription } from '../ports';
 import { connectionActivity, SyncRun } from '../services/activity';
-import { queueHistory } from '../services/backfill';
+import { historyProgress, queueHistory } from '../services/backfill';
 import { signedBalance, writeBalances } from '../services/balances';
 import { toCurrency } from '../services/portfolio';
 import { closeLookup, describeTickers, ensureRecentCloses, fxLookup } from '../services/pricing';
@@ -65,6 +65,7 @@ connectionRoutes.get('/', async (c) => {
     .from(connections)
     .where(tenant.scope(connections))
     .orderBy(connections.createdAt);
+  const progress = await historyProgress(tenant);
   const response: ConnectionsResponse = {
     connections: rows
       .filter((row) => row.status !== 'removed')
@@ -81,6 +82,7 @@ connectionRoutes.get('/', async (c) => {
         ownerUserId: row.ownerUserId,
         lastSyncedAt: row.lastSyncedAt,
         backfillStatus: row.backfillStatus,
+        historyProgress: progress.get(row.id) ?? null,
         consentExpiresAt: row.consentExpiresAt,
         createdAt: row.createdAt,
       })),

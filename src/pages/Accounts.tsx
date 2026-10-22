@@ -159,7 +159,13 @@ export function Accounts() {
                   <CardTitle className="flex items-center gap-2">
                     {connection.institutionName ?? 'Institution'}
                     <Badge variant={connection.status === 'ok' ? 'outline' : 'danger'}>{STATUS_TEXT[connection.status]}</Badge>
-                    {BACKFILL_TEXT[connection.backfillStatus] && <Badge variant="outline">{BACKFILL_TEXT[connection.backfillStatus]}</Badge>}
+                    {connection.historyProgress ? (
+                      <Badge variant="outline">
+                        Loading history… {connection.historyProgress.done} of {connection.historyProgress.total}
+                      </Badge>
+                    ) : (
+                      BACKFILL_TEXT[connection.backfillStatus] && <Badge variant="outline">{BACKFILL_TEXT[connection.backfillStatus]}</Badge>
+                    )}
                   </CardTitle>
                   <CardDescription>
                     Linked by {ownerName(connection.ownerUserId)} · {provides(connection)} · synced{' '}

@@ -123,6 +123,33 @@ export async function queueHistory(
 }
 
 /**
+ * Progress of the history loads underway, by connection: of their price and
+ * block jobs, how many have finished.
+ */
+export async function historyProgress(tenant: Tenant): Promise<Map<string, { done: number; total: number }>> {
+  const underway = tenant.db
+    .selectDistinct({ groupId: jobs.groupId })
+    .from(jobs)
+    .where(tenant.scope(jobs, inArray(jobs.type, ['history_prices', 'history_block']), inArray(jobs.status, ['waiting', 'queued', 'running'])));
+  // A load's price and block groups share its run id: history:<run>:prices / :blocks.
+  const runs = new Set((await underway).flatMap((row) => (row.groupId ? [row.groupId.split(':').slice(0, 2).join(':')] : [])));
+  const progress = new Map<string, { done: number; total: number }>();
+  if (runs.size === 0) return progress;
+  const parts = await tenant.db
+    .select({ connectionId: jobs.connectionId, groupId: jobs.groupId, status: jobs.status })
+    .from(jobs)
+    .where(tenant.scope(jobs, inArray(jobs.type, ['history_prices', 'history_block']), inArray(jobs.groupId, [...runs].flatMap((run) => [`${run}:prices`, `${run}:blocks`]))));
+  for (const part of parts) {
+    if (!part.connectionId) continue;
+    const entry = progress.get(part.connectionId) ?? { done: 0, total: 0 };
+    entry.total += 1;
+    if (part.status === 'done' || part.status === 'failed') entry.done += 1;
+    progress.set(part.connectionId, entry);
+  }
+  return progress;
+}
+
+/**
  * A history load is due: never run; abandoned part-way ("running" with no
  * report outstanding and no jobs underway); or invalidated by a late
  * transaction.
