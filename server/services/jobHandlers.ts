@@ -8,7 +8,7 @@ import type { SyncTrigger } from './activity';
 import { finishNightly } from './jobs';
 import { collectReport, collectReportAccount, finishReport, reportFailed } from './assetReports';
 import { finishHistory, historyBlock, historyFailed, historyPrices, planHistory } from './backfill';
-import { runJobWith, type FailureHandlers, type JobHandler, type JobHandlers, type JobOutcome } from './jobRunner';
+import { runJobWith, runNextWith, type FailureHandlers, type JobHandler, type JobHandlers, type JobOutcome } from './jobRunner';
 import { typeHandEnteredSecurities } from './securityTypes';
 import { snapshotHousehold } from './snapshots';
 import { syncConnection } from './sync';
@@ -61,7 +61,12 @@ const ON_FAILED: FailureHandlers = {
   report_finish: reportFailed,
 };
 
-/** Run one job by id (the Worker's queue handler, Node's loop, tests). */
+/** Run one job by id (tests). */
 export function runJob(deps: Deps, id: string): Promise<JobOutcome> {
   return runJobWith(deps, id, HANDLERS, ON_FAILED);
+}
+
+/** Run the fairest due job (the Worker's queue handler, Node's loop). */
+export function runNextJob(deps: Deps): Promise<JobOutcome> {
+  return runNextWith(deps, HANDLERS, ON_FAILED);
 }
