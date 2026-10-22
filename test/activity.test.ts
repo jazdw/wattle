@@ -5,6 +5,7 @@ import * as schema from '../server/db/schema';
 import { Tenant } from '../server/db/tenant';
 import type { Deps } from '../server/ports';
 import { queueHistory } from '../server/services/backfill';
+import { runJob } from '../server/services/jobHandlers';
 import { runAtomic } from '../server/db/batch';
 import { connectionLease, Lease, LEASE_MS, LeaseLostError, snapshotLease } from '../server/services/lease';
 import { snapshotHousehold } from '../server/services/snapshots';
@@ -100,8 +101,9 @@ describe('sync log', () => {
     const runs = async () => (await api(`/api/connections/${connection.id}/activity`)).body.runs as SyncRunSummary[];
 
     expect((await runs()).find((run) => run.action === 'history')?.counts).toEqual({ assetReportsRequested: 1 });
-    // Just linked, so Sync skips Plaid (cooldown) but queues a check of the
-    // report: not ready, so it waits to check again, and nothing is logged.
+    // Just linked, so Sync skips Plaid (cooldown) but makes the link's check
+    // of the report due now: not ready, so it waits to check again, and
+    // nothing is logged.
     await api(`/api/connections/${connection.id}/sync`, { method: 'POST' });
     await flush(deps);
     const [cooldown] = await runs();
@@ -113,9 +115,39 @@ describe('sync log', () => {
     await api(`/api/connections/${connection.id}/sync`, { method: 'POST' }); // makes the check due now
     await flush(deps);
     const [collected] = await runs();
-    expect(collected).toMatchObject({ action: 'balance_history', trigger: 'manual', outcome: 'ok', counts: { days: 2 } });
+    // The check the link queued (not one of its own), made due by Sync.
+    expect(collected).toMatchObject({ action: 'balance_history', trigger: 'link', outcome: 'ok', counts: { days: 2 } });
     // Deleting the report at Plaid happens after the balances are stored, and is logged too.
     expect(collected.plaidCalls.map((call) => call.endpoint)).toEqual(['getAssetReport', 'removeAssetReport']);
+  });
+
+  it('collects the report on its own, with no webhook or sync, and the load ends done whichever finishes first', async () => {
+    for (const reportFirst of [false, true]) {
+      const plaid = fakePlaid({
+        accounts: [account('chk', 'depository', 1000)],
+        historicalBalances: { chk: [{ date: '2026-10-01', current: 900 }] },
+      });
+      const deps = await createTestDeps({ plaid });
+      const home = await createHousehold(deps, 'Home', 'me@example.com');
+      await client(deps, home.cookie)('/api/plaid/exchange', { method: 'POST', json: { publicToken: 'p', kind: 'account' } });
+      const run = async (type: string) => {
+        const [job] = await deps.db.select().from(schema.jobs).where(eq(schema.jobs.type, type as 'history_plan'));
+        await runJob(deps, job.id);
+      };
+      await run('history_plan');
+      const [check] = await deps.db.select().from(schema.jobs).where(eq(schema.jobs.type, 'report_collect'));
+      expect(check.runAfter - deps.now().getTime()).toBe(60_000);
+      if (reportFirst) {
+        const at = deps.now().getTime() + 61_000;
+        deps.now = () => new Date(at);
+        await run('report_collect');
+      }
+      await settle(deps);
+      const [connection] = await deps.db.select().from(schema.connections);
+      expect(connection).toMatchObject({ backfillStatus: 'done', assetReportTokenEnc: null });
+      const balances = await deps.db.select().from(schema.accountDaily).where(eq(schema.accountDaily.date, '2026-10-01'));
+      expect(balances).toHaveLength(1);
+    }
   });
 
   it("never shows one household another's log", async () => {

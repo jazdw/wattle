@@ -78,17 +78,20 @@ const accountsGroup = (runId: string) => `report:${runId}:accounts`;
 /**
  * Queue collecting the connection's outstanding report, unless that's
  * underway. A collection waiting to check again (the report wasn't ready) is
- * made due now: Sync, or Plaid's webhook, means it's worth looking.
+ * made due now: Sync, or Plaid's webhook, means it's worth looking. With
+ * `delaySeconds` (just asked for), the first check is that much later.
  */
-export async function queueReportCollection(deps: Deps, tenant: Tenant, connection: ConnectionRow, trigger: SyncTrigger): Promise<void> {
+export async function queueReportCollection(deps: Deps, tenant: Tenant, connection: ConnectionRow, trigger: SyncTrigger, delaySeconds = 0): Promise<void> {
   if (!connection.assetReportTokenEnc) return;
   const now = deps.now().getTime();
-  const sooner = await tenant.db
-    .update(jobs)
-    .set({ runAfter: now })
-    .where(tenant.scope(jobs, eq(jobs.connectionId, connection.id), eq(jobs.type, 'report_collect'), eq(jobs.status, 'queued'), gt(jobs.runAfter, now)))
-    .returning({ id: jobs.id });
-  if (sooner.length > 0) await deps.jobQueue.wake(sooner.map((row) => row.id));
+  if (delaySeconds === 0) {
+    const sooner = await tenant.db
+      .update(jobs)
+      .set({ runAfter: now })
+      .where(tenant.scope(jobs, eq(jobs.connectionId, connection.id), eq(jobs.type, 'report_collect'), eq(jobs.status, 'queued'), gt(jobs.runAfter, now)))
+      .returning({ id: jobs.id });
+    if (sooner.length > 0) await deps.jobQueue.wake(sooner.map((row) => row.id));
+  }
   const [underway] = await tenant.db
     .select({ id: jobs.id })
     .from(jobs)
@@ -104,7 +107,9 @@ export async function queueReportCollection(deps: Deps, tenant: Tenant, connecti
   if (underway) return;
   const runId = crypto.randomUUID();
   const payload: CollectPayload = { connectionId: connection.id, trigger, runId };
-  await enqueue(deps, tenant, [{ id: `report:${runId}:collect`, type: 'report_collect', payload: { ...payload }, connectionId: connection.id }]);
+  await enqueue(deps, tenant, [
+    { id: `report:${runId}:collect`, type: 'report_collect', payload: { ...payload }, connectionId: connection.id, runAfter: now + delaySeconds * 1000 },
+  ]);
 }
 
 async function fetchReport(deps: Deps, tenant: Tenant, connection: ConnectionRow, run: SyncRun): Promise<{ report: AssetReport; token: string }> {
