@@ -9,7 +9,8 @@
  *     one still marked running whose lock ran out (that attempt was stopped
  *     part-way). The claim counts the attempt and sets a fresh lock.
  *  2. Run its handler, which renews the lock before each write (like a lease:
- *     an attempt that lost its lock stops without writing).
+ *     an attempt that lost its lock stops without writing). A heartbeat
+ *     renews it meanwhile, so only an attempt that was stopped loses it.
  *  3. Done, or failed: queued again after a backoff, until max_attempts. A
  *     handler can ask to run later (RetryLater) without using an attempt.
  *  4. If it was the last unfinished job of its group, queue the jobs waiting
@@ -37,6 +38,8 @@ export type JobRow = typeof jobs.$inferSelect;
 
 /** Waits before retrying a failed attempt: 1, 5, then 30 minutes. */
 const BACKOFF_SECONDS = [60, 300, 1800];
+/** How often a running attempt renews its lock (well inside LEASE_MS). */
+const HEARTBEAT_MS = LEASE_MS / 4;
 /** A queued job this long overdue lost its wake-up. */
 const OVERDUE_MS = 2 * 60 * 1000;
 /** Finished jobs are kept this long (the Activity log keeps what they did). */
@@ -200,8 +203,13 @@ export async function runJobWith(deps: Deps, id: string, handlers: JobHandlers, 
     await failedForGood(INTERRUPTED, INTERRUPTED_MESSAGE);
     return { claimed: true };
   }
+  // While the handler runs (a slow sync can take minutes), keep the lock: it
+  // runs out only if this attempt is stopped, so no other runner takes the
+  // job over while it's still working.
+  const heartbeat = setInterval(() => void context.renew().catch(() => {}), HEARTBEAT_MS);
+  (heartbeat as { unref?: () => void }).unref?.();
   try {
-    const result = await handlers[job.type](context);
+    const result = await handlers[job.type](context).finally(() => clearInterval(heartbeat));
     await finish(deps, job, mine, { status: 'done', result: result ?? null, errorCode: null, errorMessage: null });
   } catch (error) {
     if (error instanceof JobLostError) return { claimed: true };

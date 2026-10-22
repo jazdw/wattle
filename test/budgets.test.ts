@@ -138,7 +138,7 @@ describe('work budgets (2 accounts, 30 positions, 500 transactions, 2 years)', (
     const jobs = await measureJobs(deps, outside);
     // The cron only does upkeep and adds the night's jobs.
     expect(cron.outside).toBeLessThanOrEqual(2); // 1
-    expect(cron.dbCalls).toBeLessThanOrEqual(18); // 14
+    expect(cron.dbCalls).toBeLessThanOrEqual(22); // 19
     // A sync, a snapshot and the finish, each in its own invocation.
     expect(jobs.map((job) => job.type).sort()).toEqual(['nightly_finish', 'snapshot', 'sync']);
     expect(largest(jobs, 'outside')).toBeLessThanOrEqual(5); // 3

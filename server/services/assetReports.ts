@@ -25,6 +25,7 @@ import { completeRunStatements, SyncRun, type SyncTrigger } from './activity';
 import { decryptToken, loadTokenKeys, tokenAad } from './crypto';
 import { enqueue, RetryLater, type JobContext } from './jobRunner';
 import { connectionLease, Lease } from './lease';
+import { missedRetryStatement } from './backfill';
 import { getConnection, isActive, type ConnectionRow } from './sync';
 
 /**
@@ -70,7 +71,7 @@ interface AccountPayload extends CollectPayload {
 
 /** Plaid usually builds a report in minutes: check again after this... */
 const NOT_READY_RETRY_SECONDS = 10 * 60;
-/** ...for at most a day; then the next sync queues a fresh check. */
+/** ...for at most a day; then the report is given up (abandonReport). */
 const NOT_READY_GIVE_UP_MS = 24 * 3600 * 1000;
 const BUSY_RETRY_SECONDS = 30;
 const accountsGroup = (runId: string) => `report:${runId}:accounts`;
@@ -177,6 +178,43 @@ function collectedStatements(deps: Deps, tenant: Tenant, connection: ConnectionR
   ];
 }
 
+/**
+ * Give up on the connection's outstanding report: its collection kept failing,
+ * part of it couldn't be stored, or Plaid never finished it. Left outstanding,
+ * every sync would try it again for ever (and history would show as loading,
+ * and missed days couldn't be filled). It's forgotten here, and deleted at
+ * Plaid (best effort): a first load's history is marked failed, so Reload
+ * history asks for a new report; a fill of missed days leaves them carried
+ * forward, for a fill after the retry wait. Recorded with `runStatements`.
+ */
+async function abandonReport(deps: Deps, tenant: Tenant, connectionId: string, run: SyncRun, runStatements: BatchItem<'sqlite'>[]): Promise<void> {
+  const connection = await getConnection(tenant, connectionId);
+  if (!connection?.assetReportTokenEnc) {
+    await runAtomic(tenant.db, runStatements);
+    return;
+  }
+  let token: string | null = null;
+  try {
+    const keys = await loadTokenKeys(deps.config.tokenEncKey);
+    token = await decryptToken(keys, connection.assetReportTokenEnc, tokenAad(tenant.householdId, connection.id));
+  } catch {
+    // Can't delete it at Plaid then; it expires there on its own.
+  }
+  const loading = connection.backfillStatus === 'running';
+  // Called after the job ended (its own lock is gone): the connection's lease alone guards the write.
+  await withLease(deps, tenant, connection.id, async () => {}, () =>
+    runAtomic(tenant.db, [
+      tenant.db
+        .update(connections)
+        .set({ assetReportTokenEnc: null, assetReportId: null, ...(loading ? { backfillStatus: 'failed' as const } : {}) })
+        .where(tenant.scope(connections, eq(connections.id, connection.id))),
+      ...(loading ? [] : [missedRetryStatement(deps, tenant, connection.id, true)]),
+      ...runStatements,
+    ]),
+  );
+  if (token) await removeReport(run, token);
+}
+
 /** Hold the connection's lease for a write (a sync may be finishing). */
 async function withLease<T>(deps: Deps, tenant: Tenant, connectionId: string, renew: () => Promise<void>, write: () => Promise<T>): Promise<T> {
   const lease = await Lease.acquireWaiting(deps, tenant, connectionLease(connectionId));
@@ -216,8 +254,9 @@ export async function collectReport({ deps, tenant, job, renew }: JobContext): P
   } catch (error) {
     if (error instanceof PlaidApiError && error.code === 'PRODUCT_NOT_READY') {
       if (deps.now().getTime() - job.createdAt < NOT_READY_GIVE_UP_MS) throw new RetryLater(NOT_READY_RETRY_SECONDS, 'Plaid is still preparing the report.');
-      await run.skipped('Plaid was still preparing the report after a day; the next sync checks again.');
-      return { skipped: 'not ready' };
+      run.error = { code: 'REPORT_NOT_READY', message: 'Plaid was still preparing the bank history report after a day, so it was given up.' };
+      await abandonReport(deps, tenant, connection.id, run, [run.statement()]);
+      return { abandoned: 'not ready' };
     }
     if (!(error instanceof PlaidApiError)) throw error;
     // Plaid couldn't build the report: give up on it (CSV import instead).
@@ -290,12 +329,17 @@ export async function finishReport({ deps, tenant, job, renew }: JobContext): Pr
   if (!connection?.assetReportTokenEnc) return { days, failed };
   const run = new SyncRun(deps, tenant, connection.id, 'balance_history', finish.trigger, finish.runId);
   if (failed > 0) {
-    // Leave the report outstanding: the next sync collects it again.
     await renew();
-    await runAtomic(tenant.db, await completeRunStatements(deps, tenant, finish.runId, {
-      counts: { days },
-      error: { code: 'PARTS_FAILED', message: `${failed} of ${parts.length} accounts' balance history couldn't be stored; the next sync tries again.` },
-    }));
+    await abandonReport(
+      deps,
+      tenant,
+      connection.id,
+      run,
+      await completeRunStatements(deps, tenant, finish.runId, {
+        counts: { days },
+        error: { code: 'PARTS_FAILED', message: `${failed} of ${parts.length} accounts' balance history couldn't be stored, so the report was given up.` },
+      }),
+    );
     return { days, failed };
   }
   const keys = await loadTokenKeys(deps.config.tokenEncKey);
@@ -306,10 +350,10 @@ export async function finishReport({ deps, tenant, job, renew }: JobContext): Pr
   return { days };
 }
 
-/** A collection that failed for good: recorded on its run; the report stays outstanding for the next sync. */
+/** A collection that failed for good (after its retries): recorded on its run, and the report given up. */
 export async function reportFailed({ deps, tenant, job }: JobContext, error: { code: string | null; message: string }): Promise<void> {
   const { connectionId, trigger, runId } = job.payload as unknown as CollectPayload;
   const run = new SyncRun(deps, tenant, connectionId, 'balance_history', trigger, runId);
   run.error = { code: error.code, message: error.message.slice(0, 500) };
-  await runAtomic(tenant.db, [run.statement()]);
+  await abandonReport(deps, tenant, connectionId, run, [run.statement()]);
 }

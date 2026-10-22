@@ -9,6 +9,7 @@ import { describe, expect, it } from 'vitest';
 import * as schema from '../server/db/schema';
 import { Tenant } from '../server/db/tenant';
 import { runJob } from '../server/services/jobHandlers';
+import { enqueue } from '../server/services/jobRunner';
 import { snapshotHousehold } from '../server/services/snapshots';
 import { syncConnection } from '../server/services/sync';
 import { marketDate } from '../shared/dates';
@@ -281,5 +282,53 @@ describe('missed days', () => {
     expect(filled).toMatchObject({ outcome: 'ok' });
     const [done] = await deps.db.select().from(schema.connections);
     expect(done.missedRetryAt).toBeNull();
+  });
+});
+
+describe('history plans', () => {
+  async function linkedOnce() {
+    const plaid = fakePlaid({
+      accounts: [account('brk', 'investment', 3000)],
+      securities: [security('s-vti', 'VTI', 'etf', 100), security('s-bnd', 'BND', 'etf', 70)],
+      holdings: [holding('brk', 's-vti', 20, 100), holding('brk', 's-bnd', 10, 70)],
+      transactions: [buy('t1', 'brk', 's-vti', '2026-03-15', 10, 80)] as never,
+    });
+    const deps = await createTestDeps({ plaid, prices: fakePrices({ VTI: closes('2024-09-01', 800, 60, 0.05), BND: closes('2024-09-01', 800, 65, 0.01) }) });
+    deps.config.jobChunkRows = 100;
+    const home = await createHousehold(deps, 'Home', 'me@example.com');
+    await client(deps, home.cookie)('/api/plaid/exchange', { method: 'POST', json: { publicToken: 'p', kind: 'investments' } });
+    const count = async (type: string) => (await deps.db.select().from(schema.jobs).where(eq(schema.jobs.type, type as 'history_plan'))).length;
+    return { deps, tenant: new Tenant(deps.db, home.householdId), count };
+  }
+
+  it('a plan run again after adding its jobs (stopped before it could finish) adds none twice', async () => {
+    const { deps, count } = await linkedOnce();
+    const [plan] = await deps.db.select().from(schema.jobs).where(eq(schema.jobs.type, 'history_plan'));
+    await runJob(deps, plan.id);
+    const once = { blocks: await count('history_block'), prices: await count('history_prices') };
+    expect(once.blocks).toBeGreaterThan(5);
+    // As if that attempt had been stopped right after adding them.
+    await deps.db.update(schema.jobs).set({ status: 'queued', lockToken: null, lockedUntil: null }).where(eq(schema.jobs.id, plan.id));
+    await runJob(deps, plan.id);
+    expect({ blocks: await count('history_block'), prices: await count('history_prices') }).toEqual(once);
+    await flush(deps);
+    const runs = await deps.db.select().from(schema.syncRuns).where(eq(schema.syncRuns.action, 'history'));
+    expect(runs.map((run) => run.outcome)).toEqual(['ok']);
+  });
+
+  it('of two plans queued at the same moment, the second stands down', async () => {
+    const { deps, tenant, count } = await linkedOnce();
+    const [connection] = await deps.db.select().from(schema.connections);
+    // A second plan, as if two syncs had queued one each before either was seen.
+    const runId = crypto.randomUUID();
+    await enqueue(deps, tenant, [
+      { id: `history:${runId}:plan`, type: 'history_plan', payload: { connectionId: connection.id, mode: 'load', trigger: 'manual', webhookUrl: null, runId }, connectionId: connection.id },
+    ]);
+    await flush(deps);
+    const plans = await deps.db.select().from(schema.jobs).where(eq(schema.jobs.type, 'history_plan'));
+    expect(plans.map((plan) => plan.result?.skipped ?? 'planned').sort()).toEqual(['another history run is underway', 'planned']);
+    expect(await count('history_finish')).toBe(1);
+    const [done] = await deps.db.select().from(schema.connections);
+    expect(done.backfillStatus).toBe('done');
   });
 });
