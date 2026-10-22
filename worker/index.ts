@@ -9,7 +9,7 @@ import { depsFromEnv, type RawEnv } from '../server/config';
 import { describeError } from '../server/lib/errors';
 import { cloudflareJobQueue, consumeJobs, type JobMessage } from '../server/adapters/jobQueues';
 import type { Db } from '../server/ports';
-import { runJob } from '../server/services/jobHandlers';
+import { runNextJob } from '../server/services/jobHandlers';
 import { runDaily } from '../server/services/jobs';
 
 interface Env extends RawEnv {
@@ -31,10 +31,10 @@ export default {
     app ??= createApp({ assets: env.ASSETS ? (req) => env.ASSETS!.fetch(req) : undefined });
     return app.fetch(request, { deps: deps(env) }, ctx);
   },
-  /** One job per message (max_batch_size 1), so each has an invocation's limits to itself. */
+  /** One job per message (max_batch_size 1), so each has an invocation's limits to itself: the fairest due. */
   async queue(batch, env) {
     const jobDeps = deps(env);
-    await consumeJobs(batch, (id) => runJob(jobDeps, id));
+    await consumeJobs(batch, () => runNextJob(jobDeps));
   },
   async scheduled(_controller, env) {
     try {

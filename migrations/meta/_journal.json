@@ -43,6 +43,13 @@
       "when": 1792600094956,
       "tag": "0005_jobs",
       "breakpoints": true
+    },
+    {
+      "idx": 6,
+      "version": "6",
+      "when": 1792636102742,
+      "tag": "0006_fair_jobs",
+      "breakpoints": true
     }
   ]
 }

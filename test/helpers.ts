@@ -7,7 +7,7 @@ import { createApp } from '../server/app';
 import { createSession } from '../server/auth/routes';
 import * as schema from '../server/db/schema';
 import type { Deps, Db } from '../server/ports';
-import { runJob } from '../server/services/jobHandlers';
+import { runJob, runNextJob } from '../server/services/jobHandlers';
 import { runDaily } from '../server/services/jobs';
 import { dueJobs } from '../server/services/jobRunner';
 
@@ -95,7 +95,7 @@ export function wakes(deps: Deps): { ids: string[]; delaySeconds?: number }[] {
   return [...(wakesByDeps.get(deps) ?? [])];
 }
 
-/** Run jobs that are due now, including those they add or release, until none is left. */
+/** Run jobs that are due now, including those they add or release, until none is left, each by `run` (to measure one job at a time). */
 export async function runDueJobs(deps: Deps, run: (id: string) => Promise<unknown> = (id) => runJob(deps, id)): Promise<number> {
   let ran = 0;
   for (let round = 0; round < 1_000; round += 1) {
@@ -137,9 +137,12 @@ export async function nightly(deps: Deps) {
   return run;
 }
 
-/** Finish background work: run every due job (and the ones they add or release). */
+/** Finish background work: run every due job (and the ones they add or release), fairest first, as the runners do. */
 export async function flush(deps: Deps): Promise<void> {
-  await runDueJobs(deps);
+  for (let ran = 0; ran < 5_000; ran += 1) {
+    if (!(await runNextJob(deps)).claimed) return;
+  }
+  throw new Error('Jobs kept becoming due: a job that never settles?');
 }
 
 /** Today's market date for the fixed test clock (2026-10-08 in New York). */
