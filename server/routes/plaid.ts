@@ -17,7 +17,7 @@ import { SyncRun } from '../services/activity';
 import { queueHistory } from '../services/backfill';
 import { enqueue } from '../services/jobRunner';
 import { verifyPlaidWebhook } from '../services/plaidWebhook';
-import { accessTokenFor, getConnection, INACTIVE, linkConnection, statusStatement, syncConnection } from '../services/sync';
+import { accessTokenFor, getConnection, INACTIVE, linkConnection, statusStatement, syncConnection, type InvestmentFetch } from '../services/sync';
 import { marketDate } from '../../shared/dates';
 
 export const plaidRoutes = new Hono<AppEnv>();
@@ -137,27 +137,34 @@ plaidRoutes.post('/webhook', async (c) => {
   const setStatus = (status: 'login_required' | 'error', errorCode: string | null) =>
     record(statusStatement(tenant, connection.id, { status, errorCode }, observedAt));
 
-  // A sync job (which also redoes today's snapshot). Plaid often sends several
-  // webhooks at once (holdings and transactions): one job per minute serves them all.
-  const sync = () =>
+  // A sync job (which also redoes today's snapshot), fetching only the
+  // investment data the webhook says changed (each a billed Investments
+  // call). A repeat of the same webhook within a minute is the same job.
+  const sync = (investments: InvestmentFetch) =>
     enqueue(deps, tenant, [
       {
-        id: `webhook-sync:${connection.id}:${Math.floor(observedAt / 60_000)}`,
+        id: `webhook-sync:${connection.id}:${investments}:${Math.floor(observedAt / 60_000)}`,
         type: 'sync',
-        payload: { connectionId: connection.id, trigger: 'webhook' },
+        payload: { connectionId: connection.id, trigger: 'webhook', investments },
         connectionId: connection.id,
       },
     ]);
 
   switch (eventName) {
     case 'HOLDINGS:DEFAULT_UPDATE':
+      await sync('holdings');
+      break;
     case 'INVESTMENTS_TRANSACTIONS:DEFAULT_UPDATE':
+      await sync('transactions');
+      break;
     case 'ITEM:LOGIN_REPAIRED':
+      await sync('all');
+      break;
     // The sync collects the report (or records Plaid's failure to build it)
-    // under the connection's lease.
+    // under the connection's lease; no investment data needed.
     case 'ASSETS:PRODUCT_READY':
     case 'ASSETS:ERROR':
-      await sync();
+      await sync('none');
       break;
     case 'ITEM:ERROR':
       await setStatus(

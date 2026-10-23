@@ -11,7 +11,7 @@ import { finishHistory, historyBlock, historyFailed, historyPrices, planHistory 
 import { runJobWith, runNextWith, type FailureHandlers, type JobHandler, type JobHandlers, type JobOutcome } from './jobRunner';
 import { typeHandEnteredSecurities } from './securityTypes';
 import { snapshotHousehold } from './snapshots';
-import { syncConnection } from './sync';
+import { syncConnection, type InvestmentFetch } from './sync';
 
 /**
  * Sync one connection. Nightly, the household's snapshot is its own job
@@ -19,8 +19,9 @@ import { syncConnection } from './sync';
  * redone here.
  */
 const sync: JobHandler = async ({ deps, tenant, job }) => {
-  const { connectionId, trigger } = job.payload as { connectionId: string; trigger: SyncTrigger };
-  const result = await syncConnection(deps, tenant, connectionId, trigger);
+  const { connectionId, trigger, investments } = job.payload as { connectionId: string; trigger: SyncTrigger; investments?: InvestmentFetch };
+  // Nightly: only investment data not already fetched since the market closed.
+  const result = await syncConnection(deps, tenant, connectionId, trigger, { investments: investments ?? (trigger === 'nightly' ? 'since-close' : 'all') });
   if (trigger !== 'nightly') await snapshotHousehold(deps, tenant, marketDate(deps.now()));
   return { status: result.status, accounts: result.accounts, holdings: result.holdings, transactions: result.transactions, ...(result.skipped ? { skipped: true } : {}) };
 };
