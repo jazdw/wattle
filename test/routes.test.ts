@@ -310,6 +310,9 @@ describe('daily job', () => {
     const other = await createHousehold(deps, 'Other', 'other@example.com');
     await client(deps, other.cookie)('/api/accounts', { method: 'POST', json: { name: 'Cash', type: 'depository', currency: 'USD', balance: 5 } });
 
+    // The next night: a trade since.
+    const nextNight = deps.now().getTime() + 86400_000;
+    deps.now = () => new Date(nextNight);
     plaid.state.holdings = [holding('brk', 's', 11, 100)];
     const report = await nightly(deps);
     expect(report).toMatchObject({ households: 2, errors: [], status: 'ok' });

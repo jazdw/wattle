@@ -2,7 +2,7 @@ import { desc, sql } from 'drizzle-orm';
 import { describe, expect, it } from 'vitest';
 import * as schema from '../server/db/schema';
 import { account, fakePlaid, holding, security, signWebhook } from './fakes';
-import { client, createHousehold, createTestDeps, flush, settle, TODAY } from './helpers';
+import { client, createHousehold, createTestDeps, flush, nightly, settle, TODAY } from './helpers';
 
 async function setup(kind: 'investments' | 'account' = 'investments') {
   const plaid = fakePlaid({
@@ -259,6 +259,52 @@ describe('Plaid webhooks', () => {
     expect((await api(`/api/accounts/${fresh.id}/returning`, { method: 'POST', json: { of: old.id, same: false } })).status).toBe(200);
     expect(((await api('/api/accounts')).body.accounts as { possibleReturnOf: string | null }[]).every((row) => row.possibleReturnOf === null)).toBe(true);
     expect(await deps.db.select().from(schema.accounts)).toHaveLength(2); // both kept
+  });
+
+  it('a webhook fetches only the investment data it says changed', async () => {
+    const { plaid, send } = await setup();
+    const fetchedBy = async (event: Record<string, unknown>) => {
+      const before = plaid.state.calls.length;
+      await send({ item_id: 'item-1', ...event });
+      return plaid.state.calls.slice(before).filter((call) => call === 'holdings' || call === 'transactions');
+    };
+    expect(await fetchedBy({ webhook_type: 'HOLDINGS', webhook_code: 'DEFAULT_UPDATE' })).toEqual(['holdings']);
+    expect(await fetchedBy({ webhook_type: 'INVESTMENTS_TRANSACTIONS', webhook_code: 'DEFAULT_UPDATE' })).toEqual(['transactions']);
+    expect(await fetchedBy({ webhook_type: 'ASSETS', webhook_code: 'PRODUCT_READY', asset_report_id: 'ar-1' })).toEqual([]);
+    expect(await fetchedBy({ webhook_type: 'ITEM', webhook_code: 'LOGIN_REPAIRED' })).toEqual(['holdings', 'transactions']);
+  });
+
+  it('a transactions-only sync leaves holdings as they are', async () => {
+    const { deps, plaid, send } = await setup();
+    const before = await deps.db.select().from(schema.holdings);
+    plaid.state.holdings = []; // what a holdings call would say; not asked
+    await send({ webhook_type: 'INVESTMENTS_TRANSACTIONS', webhook_code: 'DEFAULT_UPDATE', item_id: 'item-1' });
+    expect(await deps.db.select().from(schema.holdings)).toEqual(before);
+  });
+
+  it('the nightly sync fetches investment data unless a webhook already did since the market closed', async () => {
+    const { deps, plaid, send } = await setup();
+    const at = (iso: string) => {
+      deps.now = () => new Date(iso);
+    };
+    const fetched = async (operation: () => Promise<unknown>) => {
+      const before = plaid.state.calls.length;
+      await operation();
+      return plaid.state.calls.slice(before).filter((call) => call === 'holdings' || call === 'transactions');
+    };
+    // Linked (and synced) the evening of the 8th; next morning, Plaid says holdings changed.
+    at('2026-10-09T14:00:00Z'); // 10am New York
+    expect(await fetched(() => send({ webhook_type: 'HOLDINGS', webhook_code: 'DEFAULT_UPDATE', item_id: 'item-1' }))).toEqual(['holdings']);
+    // That night: both fetched before today's close (4pm), so both again (a trade since would be missed otherwise).
+    at('2026-10-10T02:00:00Z');
+    expect(await fetched(() => nightly(deps))).toEqual(['holdings', 'transactions']);
+    // The 10th: Plaid's holdings update arrives after the close; that night only transactions are fetched.
+    at('2026-10-10T21:30:00Z'); // 5:30pm New York
+    expect(await fetched(() => send({ webhook_type: 'HOLDINGS', webhook_code: 'DEFAULT_UPDATE', item_id: 'item-1' }))).toEqual(['holdings']);
+    at('2026-10-11T02:00:00Z');
+    expect(await fetched(() => nightly(deps))).toEqual(['transactions']);
+    const notes = (await deps.db.select().from(schema.syncRuns)).map((run) => run.note);
+    expect(notes).toContain("Holdings already fetched since the market closed (Plaid's update); not fetched again.");
   });
 
   it('ignores unknown items and events', async () => {
