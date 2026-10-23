@@ -111,8 +111,6 @@ export interface AccountSummary {
    * the same one, e.g. a joint account you've both linked: hide one copy.
    */
   possibleDuplicateOf: string | null;
-  /** A no-longer-reported account of the same login this new one looks like (Plaid's new id for it): confirm or dismiss. */
-  possibleReturnOf: string | null;
 }
 
 /** Kinds of background job (server/db/schema.ts JOB_TYPES). */
