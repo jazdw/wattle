@@ -50,7 +50,8 @@ export interface ConnectionSummary {
   lastSyncedAt: number | null;
   backfillStatus: 'pending' | 'running' | 'done' | 'failed' | 'skipped';
   /** While a history load runs as background jobs: how many of its parts (prices, blocks) are done. */
-  historyProgress: { done: number; total: number } | null;
+  /** Of a history load underway: parts done, and until when it waits for the next day's database writes. */
+  historyProgress: { done: number; total: number; waitingUntil: number | null } | null;
   consentExpiresAt: number | null;
   /** Plaid says the login has accounts not shared with Wattle yet (Choose accounts adds them). */
   newAccountsAvailable: boolean;

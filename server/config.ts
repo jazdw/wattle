@@ -28,6 +28,8 @@ export interface RawEnv {
   ACCESS_AUD?: string;
   /** About how many rows one background job writes (default 1,000, for Workers Free). */
   JOB_CHUNK_ROWS?: string;
+  /** Rows written a day before history work waits for the next (default 80,000, for D1 Free; 0: no budget). */
+  D1_DAILY_WRITE_BUDGET?: string;
 }
 
 /**
@@ -41,6 +43,7 @@ const DEFAULT_QUOTE_CACHE_SECONDS = 300;
  * Drizzle), so 1,000 rows stays well inside Workers Free's 10 ms.
  */
 const DEFAULT_JOB_CHUNK_ROWS = 1_000;
+const DEFAULT_DAILY_WRITE_BUDGET = 80_000;
 
 function positiveInteger(value: string | undefined): number | undefined {
   const number = Number(value);
@@ -63,6 +66,7 @@ export function configFromEnv(env: RawEnv): Config {
     tokenEncKey: env.TOKEN_ENC_KEY || undefined,
     plaidAllowRemove: env.PLAID_ALLOW_REMOVE === 'true',
     jobChunkRows: positiveInteger(env.JOB_CHUNK_ROWS) ?? DEFAULT_JOB_CHUNK_ROWS,
+    dailyWriteBudget: env.D1_DAILY_WRITE_BUDGET === '0' ? 0 : (positiveInteger(env.D1_DAILY_WRITE_BUDGET) ?? DEFAULT_DAILY_WRITE_BUDGET),
     access:
       env.ACCESS_TEAM_DOMAIN && env.ACCESS_AUD ? { teamDomain: env.ACCESS_TEAM_DOMAIN, audience: env.ACCESS_AUD } : undefined,
   };

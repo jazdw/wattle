@@ -64,6 +64,13 @@
       "when": 1792765732642,
       "tag": "0008_returning_accounts",
       "breakpoints": true
+    },
+    {
+      "idx": 9,
+      "version": "6",
+      "when": 1792766126579,
+      "tag": "0009_write_budget",
+      "breakpoints": true
     }
   ]
 }

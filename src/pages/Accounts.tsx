@@ -17,7 +17,7 @@ import { Dialog, DialogContent } from '../components/ui/dialog';
 import { Alert, Skeleton } from '../components/ui/misc';
 import { useAccounts, useConnections } from '../hooks/queries';
 import { useAuth, useOwnerName } from '../hooks/useAuth';
-import { accountKind, money, relativeTime } from '../lib/format';
+import { accountKind, money, relativeTime, upcomingTime } from '../lib/format';
 
 const STATUS_TEXT: Record<ConnectionSummary['status'], string> = {
   ok: 'Connected',
@@ -170,6 +170,7 @@ export function Accounts() {
                       <Badge variant="outline">
                         Loading history…
                         {connection.historyProgress.total > 0 && ` ${connection.historyProgress.done} of ${connection.historyProgress.total}`}
+                        {connection.historyProgress.waitingUntil && ` · continues ${upcomingTime(connection.historyProgress.waitingUntil)}`}
                       </Badge>
                     ) : (
                       BACKFILL_TEXT[connection.backfillStatus] && <Badge variant="outline">{BACKFILL_TEXT[connection.backfillStatus]}</Badge>
