@@ -2,6 +2,7 @@ import { fireEvent, screen, within } from '@testing-library/react';
 import { http, HttpResponse } from 'msw';
 import { describe, expect, it } from 'vitest';
 import { Accounts } from '../pages/Accounts';
+import { ACCOUNTS } from '../test/fixtures';
 import { renderPage } from '../test/render';
 import { sent, server } from '../test/server';
 
@@ -112,6 +113,23 @@ describe('manual accounts', () => {
     await user.click(within(dialog).getByRole('switch', { name: /delete its stored history/ }));
     await user.click(within(dialog).getByRole('button', { name: 'Save' }));
     await expect.poll(() => sent('PATCH /api/accounts/chk')[0]?.body).toMatchObject({ isHidden: true, purge: true });
+  });
+
+  it('deletes a linked account only once the institution no longer reports it', async () => {
+    server.use(http.get('*/api/accounts', () => HttpResponse.json({ accounts: ACCOUNTS.map((account) => (account.id === 'chk' ? { ...account, missingSince: Date.now(), balance: null } : account)) })));
+    const { user } = await openAccounts();
+    // Still reported: hide only.
+    await user.click(within(rowFor('Vanguard Brokerage')).getByRole('button', { name: 'Edit account' }));
+    let dialog = await screen.findByRole('dialog', { name: 'Vanguard Brokerage' });
+    expect(within(dialog).queryByRole('button', { name: /Delete/ })).not.toBeInTheDocument();
+    await user.click(within(dialog).getByRole('button', { name: 'Cancel' }));
+
+    await user.click(within(rowFor('Chase Checking')).getByRole('button', { name: 'Edit account' }));
+    dialog = await screen.findByRole('dialog', { name: 'Chase Checking' });
+    expect(within(dialog).getByText(/no longer reports this account/)).toBeInTheDocument();
+    await user.click(within(dialog).getByRole('button', { name: /Delete/ }));
+    await user.click(within(dialog).getByRole('button', { name: 'Delete account and history' }));
+    await expect.poll(() => sent('DELETE /api/accounts/chk').length).toBe(1);
   });
 });
 

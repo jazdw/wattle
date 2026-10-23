@@ -420,21 +420,57 @@ accountRoutes.patch('/:id', async (c) => {
   return c.json({ ok: true });
 });
 
+/**
+ * Deletes a manual account, or a linked one the institution no longer reports
+ * (closed, or deselected in Plaid), with its stored history. Other linked
+ * accounts are hidden instead: a sync would bring them straight back.
+ */
 accountRoutes.delete('/:id', async (c) => {
+  const deps = c.env.deps;
   const tenant = c.get('tenant');
   const account = await getAccount(tenant, c.req.param('id'));
   if (!account) notFound('Account not found.');
-  if (account.source !== 'manual') {
-    throw new HttpError(409, 'Linked accounts are hidden, not deleted. Remove the connection to delete them.');
+  const remove = tenant.db.delete(accounts).where(tenant.scope(accounts, eq(accounts.id, account.id)));
+  if (account.source === 'manual') {
+    // Not while a holdings save or balance entry for it is mid-way.
+    const lease = await Lease.acquireOrBusy(deps, tenant, accountLease(account.id), 'Someone else is updating this account. Try again in a moment.');
+    try {
+      await lease.renew();
+      await remove;
+    } finally {
+      await lease.forceRelease();
+    }
+    return c.json({ ok: true });
   }
-  // Not while a holdings save or balance entry for it is mid-way.
-  const lease = await Lease.acquireOrBusy(c.env.deps, tenant, accountLease(account.id), 'Someone else is updating this account. Try again in a moment.');
+  if (account.missingSince === null || !account.connectionId) {
+    throw new HttpError(409, "Linked accounts are hidden, not deleted, while the institution still reports them. Deselect it with Choose accounts, or remove the login.");
+  }
+  // Not mid-sync (its rows are written under the connection's lease) or mid-snapshot.
+  const connectionId = account.connectionId;
+  const connection = await Lease.acquireOrBusy(deps, tenant, connectionLease(connectionId));
+  let snapshot: Lease;
   try {
-    await lease.renew();
-    await tenant.db.delete(accounts).where(tenant.scope(accounts, eq(accounts.id, account.id)));
-  } finally {
-    await lease.forceRelease();
+    snapshot = await Lease.acquireOrBusy(deps, tenant, snapshotLease(tenant.householdId), 'The household snapshot is being updated. Try again in a moment.');
+  } catch (error) {
+    await connection.forceRelease();
+    throw error;
   }
+  try {
+    await underConnectionLease(deps, tenant, connectionId, 'manual', connection, { history: false }, async () => {
+      // Read again under the lease: a sync may have just found it reported again.
+      const current = await getAccount(tenant, account.id);
+      if (!current || current.missingSince === null) throw new HttpError(409, 'The institution reports this account again, so it can only be hidden.');
+      const run = new SyncRun(deps, tenant, connectionId, 'account', 'manual');
+      run.note = `Deleted “${account.name}” (no longer reported) and its stored history.`;
+      await connection.renew();
+      await snapshot.renew();
+      // Its daily rows, holdings and transactions go with it (cascade).
+      await runAtomic(tenant.db, [remove, run.statement()]);
+    });
+  } finally {
+    await snapshot.forceRelease();
+  }
+  await snapshotHousehold(deps, tenant, marketDate(deps.now()));
   return c.json({ ok: true });
 });
 
