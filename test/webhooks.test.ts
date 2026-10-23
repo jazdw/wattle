@@ -122,6 +122,9 @@ describe('Plaid webhooks', () => {
     expect((await deps.db.select().from(schema.syncRuns)).filter((run) => run.action === 'history').length).toBe(historyBefore + 1);
     expect((await connection()).newAccountsAt).toBeNull();
     expect((await api('/api/portfolio')).body.netWorth).toBe(2000_00); // only what's shared counts
+    // The chart agrees: the brokerage account's last balance isn't carried on.
+    const chart = (await api('/api/history?range=1M&group=total')).body;
+    expect(chart.series[0].values.at(-1)).toBe(2000_00);
 
     // Choosing the brokerage account again brings it back, without a new history load.
     plaid.state.accounts = [account('brk', 'investment', 1000), account('ira', 'investment', 2000)];
