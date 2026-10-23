@@ -1,7 +1,7 @@
 {
   "version": "6",
   "dialect": "sqlite",
-  "id": "d9665cca-274d-452c-b2c6-3a325447601d",
+  "id": "0f114f15-ac3d-4d2c-8642-c23bd030592b",
   "prevId": "cf428b35-4152-4527-be8f-633ad622acef",
   "tables": {
     "account_daily": {
@@ -242,13 +242,6 @@
         "missing_since": {
           "name": "missing_since",
           "type": "integer",
-          "primaryKey": false,
-          "notNull": false,
-          "autoincrement": false
-        },
-        "distinct_from": {
-          "name": "distinct_from",
-          "type": "text",
           "primaryKey": false,
           "notNull": false,
           "autoincrement": false
@@ -531,6 +524,20 @@
           "notNull": false,
           "autoincrement": false
         },
+        "holdings_fetched_at": {
+          "name": "holdings_fetched_at",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "transactions_fetched_at": {
+          "name": "transactions_fetched_at",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
         "backfill_status": {
           "name": "backfill_status",
           "type": "text",
@@ -627,6 +634,30 @@
           "onUpdate": "no action"
         }
       },
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "checkConstraints": {}
+    },
+    "db_usage": {
+      "name": "db_usage",
+      "columns": {
+        "day": {
+          "name": "day",
+          "type": "text",
+          "primaryKey": true,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "rows_written": {
+          "name": "rows_written",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        }
+      },
+      "indexes": {},
+      "foreignKeys": {},
       "compositePrimaryKeys": {},
       "uniqueConstraints": {},
       "checkConstraints": {}
