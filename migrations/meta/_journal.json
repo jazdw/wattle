@@ -5,64 +5,8 @@
     {
       "idx": 0,
       "version": "6",
-      "when": 1792256227286,
+      "when": 1792796607249,
       "tag": "0000_init",
-      "breakpoints": true
-    },
-    {
-      "idx": 1,
-      "version": "6",
-      "when": 1792427590551,
-      "tag": "0001_security_identifiers",
-      "breakpoints": true
-    },
-    {
-      "idx": 2,
-      "version": "6",
-      "when": 1792507770203,
-      "tag": "0002_link_products",
-      "breakpoints": true
-    },
-    {
-      "idx": 3,
-      "version": "6",
-      "when": 1792595060079,
-      "tag": "0003_job_status",
-      "breakpoints": true
-    },
-    {
-      "idx": 4,
-      "version": "6",
-      "when": 1792596971492,
-      "tag": "0004_snapshot_runs",
-      "breakpoints": true
-    },
-    {
-      "idx": 5,
-      "version": "6",
-      "when": 1792600094956,
-      "tag": "0005_jobs",
-      "breakpoints": true
-    },
-    {
-      "idx": 6,
-      "version": "6",
-      "when": 1792636277125,
-      "tag": "0006_fair_jobs_missed_retry",
-      "breakpoints": true
-    },
-    {
-      "idx": 7,
-      "version": "6",
-      "when": 1792637670962,
-      "tag": "0007_new_accounts",
-      "breakpoints": true
-    },
-    {
-      "idx": 8,
-      "version": "6",
-      "when": 1792767593960,
-      "tag": "0008_usage_and_fetches",
       "breakpoints": true
     }
   ]

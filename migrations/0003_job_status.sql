@@ -1,1 +1,0 @@
-ALTER TABLE `job_runs` ADD `status` text DEFAULT 'ok' NOT NULL;

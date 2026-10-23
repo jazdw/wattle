@@ -60,16 +60,22 @@ CREATE TABLE `connections` (
 	`institution_id` text,
 	`institution_name` text,
 	`kind` text NOT NULL,
+	`has_investments` integer DEFAULT false NOT NULL,
+	`has_balance_history` integer DEFAULT false NOT NULL,
 	`status` text DEFAULT 'ok' NOT NULL,
 	`error_code` text,
 	`status_observed_at` integer,
 	`consent_expires_at` integer,
 	`consent_warning_at` integer,
+	`new_accounts_at` integer,
 	`last_synced_at` integer,
 	`txn_synced_through` text,
+	`holdings_fetched_at` integer,
+	`transactions_fetched_at` integer,
 	`backfill_status` text DEFAULT 'pending' NOT NULL,
 	`history_as_of` text,
 	`history_stale_at` integer,
+	`missed_retry_at` integer,
 	`asset_report_token_enc` text,
 	`asset_report_id` text,
 	`created_at` integer NOT NULL,
@@ -79,6 +85,11 @@ CREATE TABLE `connections` (
 --> statement-breakpoint
 CREATE INDEX `connections_household` ON `connections` (`household_id`);--> statement-breakpoint
 CREATE UNIQUE INDEX `connections_external` ON `connections` (`provider`,`external_id`);--> statement-breakpoint
+CREATE TABLE `db_usage` (
+	`day` text PRIMARY KEY NOT NULL,
+	`rows_written` integer NOT NULL
+);
+--> statement-breakpoint
 CREATE TABLE `fx_daily` (
 	`base` text NOT NULL,
 	`quote` text NOT NULL,
@@ -170,11 +181,42 @@ CREATE TABLE `job_runs` (
 	`date` text NOT NULL,
 	`started_at` integer NOT NULL,
 	`finished_at` integer NOT NULL,
+	`status` text DEFAULT 'ok' NOT NULL,
 	`households` integer NOT NULL,
 	`errors` text NOT NULL
 );
 --> statement-breakpoint
 CREATE INDEX `job_runs_started` ON `job_runs` (`started_at`);--> statement-breakpoint
+CREATE TABLE `jobs` (
+	`id` text PRIMARY KEY NOT NULL,
+	`household_id` text NOT NULL,
+	`connection_id` text,
+	`type` text NOT NULL,
+	`payload` text NOT NULL,
+	`group_id` text,
+	`waits_for` text,
+	`status` text NOT NULL,
+	`attempts` integer DEFAULT 0 NOT NULL,
+	`max_attempts` integer DEFAULT 3 NOT NULL,
+	`run_after` integer NOT NULL,
+	`locked_until` integer,
+	`lock_token` text,
+	`created_at` integer NOT NULL,
+	`started_at` integer,
+	`finished_at` integer,
+	`error_code` text,
+	`error_message` text,
+	`result` text,
+	FOREIGN KEY (`household_id`) REFERENCES `households`(`id`) ON UPDATE no action ON DELETE cascade,
+	FOREIGN KEY (`connection_id`) REFERENCES `connections`(`id`) ON UPDATE no action ON DELETE cascade
+);
+--> statement-breakpoint
+CREATE INDEX `jobs_due` ON `jobs` (`status`,`run_after`);--> statement-breakpoint
+CREATE INDEX `jobs_group` ON `jobs` (`group_id`,`status`);--> statement-breakpoint
+CREATE INDEX `jobs_waits_for` ON `jobs` (`waits_for`);--> statement-breakpoint
+CREATE INDEX `jobs_household` ON `jobs` (`household_id`,`created_at`);--> statement-breakpoint
+CREATE INDEX `jobs_household_status` ON `jobs` (`household_id`,`status`);--> statement-breakpoint
+CREATE INDEX `jobs_household_started` ON `jobs` (`household_id`,`started_at`);--> statement-breakpoint
 CREATE TABLE `kv_cache` (
 	`key` text PRIMARY KEY NOT NULL,
 	`value` text NOT NULL,
@@ -218,6 +260,8 @@ CREATE TABLE `securities` (
 	`household_id` text NOT NULL,
 	`external_id` text,
 	`ticker` text,
+	`cusip` text,
+	`isin` text,
 	`name` text,
 	`type` text,
 	`subtype` text,
@@ -244,6 +288,22 @@ CREATE TABLE `sessions` (
 );
 --> statement-breakpoint
 CREATE INDEX `sessions_user` ON `sessions` (`user_id`);--> statement-breakpoint
+CREATE TABLE `snapshot_runs` (
+	`id` text PRIMARY KEY NOT NULL,
+	`household_id` text NOT NULL,
+	`date` text NOT NULL,
+	`trigger` text NOT NULL,
+	`started_at` integer NOT NULL,
+	`finished_at` integer NOT NULL,
+	`outcome` text NOT NULL,
+	`error_code` text,
+	`error_message` text,
+	`accounts` integer DEFAULT 0 NOT NULL,
+	`holdings` integer DEFAULT 0 NOT NULL,
+	FOREIGN KEY (`household_id`) REFERENCES `households`(`id`) ON UPDATE no action ON DELETE cascade
+);
+--> statement-breakpoint
+CREATE INDEX `snapshot_runs_started` ON `snapshot_runs` (`household_id`,`started_at`);--> statement-breakpoint
 CREATE TABLE `sync_runs` (
 	`id` text PRIMARY KEY NOT NULL,
 	`household_id` text NOT NULL,
