@@ -149,14 +149,11 @@ export function NewAccountDialog({ open, onOpenChange }: { open: boolean; onOpen
 export function EditAccountDialog({
   account,
   duplicateOf,
-  returnOf,
   onClose,
 }: {
   account: AccountSummary | null;
   /** "Name at Institution" of the account this one looks like a copy of. */
   duplicateOf?: string | null;
-  /** The no-longer-reported account this new one looks like, chosen again in Plaid. */
-  returnOf?: { id: string; name: string } | null;
   onClose: () => void;
 }) {
   const invalidate = useInvalidate();
@@ -214,14 +211,6 @@ export function EditAccountDialog({
     },
   });
 
-  const answerReturn = useMutation({
-    mutationFn: (same: boolean) => api(`/api/accounts/${account!.id}/returning`, { method: 'POST', body: JSON.stringify({ of: returnOf!.id, same }) }),
-    onSuccess: () => {
-      invalidate();
-      onClose();
-    },
-  });
-
   const [confirmDelete, setConfirmDelete] = useState(false);
   if (!account || !form) return null;
   const liability = account.type === 'credit' || account.type === 'loan';
@@ -247,24 +236,6 @@ export function EditAccountDialog({
             </NativeSelect>
           </Field>
         </div>
-
-        {returnOf && (
-          <div className="grid gap-2 rounded-md border border-warning/50 p-3 text-sm">
-            <p>
-              This looks like <span className="font-medium">{returnOf.name}</span>, which you deselected earlier: Plaid gives an account chosen again a new id. If
-              it's the same account, it keeps that account's history (the days in between are filled in).
-            </p>
-            {answerReturn.error && <Alert variant="error">{answerReturn.error.message}</Alert>}
-            <div className="flex flex-wrap justify-end gap-2">
-              <Button variant="outline" size="sm" onClick={() => answerReturn.mutate(false)} disabled={answerReturn.isPending}>
-                Different account
-              </Button>
-              <Button size="sm" onClick={() => answerReturn.mutate(true)} disabled={answerReturn.isPending}>
-                Same account, keep its history
-              </Button>
-            </div>
-          </div>
-        )}
 
         <div className="rounded-md border p-3">
           {duplicateOf && (

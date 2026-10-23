@@ -325,7 +325,6 @@ export function Accounts() {
       <EditAccountDialog
         account={editing}
         duplicateOf={editing?.possibleDuplicateOf ? describeAccount(editing.possibleDuplicateOf) : null}
-        returnOf={editing?.possibleReturnOf ? { id: editing.possibleReturnOf, name: accounts.data?.accounts.find((other) => other.id === editing.possibleReturnOf)?.name ?? 'an earlier account' } : null}
         onClose={() => setEditing(null)}
       />
       <HoldingsDialog account={holdingsFor} onClose={() => setHoldingsFor(null)} />
@@ -368,11 +367,6 @@ function AccountList({
                 </Badge>
               )}
               {account.holdingCount > 0 && <span>{account.holdingCount} holdings</span>}
-              {account.possibleReturnOf && (
-                <Badge variant="warning" title="Looks like an account you deselected earlier, chosen again (Plaid gives it a new id). Edit it to keep its history.">
-                  Same as a deselected account?
-                </Badge>
-              )}
               {account.possibleDuplicateOf && (
                 <Badge variant="warning" title="Looks like an account from another login. Edit it to see which, and hide this copy if it's the same account.">
                   Possible duplicate

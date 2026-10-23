@@ -10,7 +10,6 @@ import {
   manualAccountSchema,
   manualHoldingsSchema,
   newAccountsHistorySchema,
-  returningAnswerSchema,
 } from '../../shared/schemas';
 import type { AccountsResponse, AccountSummary, ConnectionsResponse } from '../../shared/types';
 import { requireAuth } from '../auth/routes';
@@ -24,7 +23,6 @@ import {
   holdings,
   householdMembers,
   households,
-  investmentTransactions,
   securities,
 } from '../db/schema';
 import type { Tenant } from '../db/tenant';
@@ -32,7 +30,7 @@ import type { AppEnv } from '../env';
 import { HttpError, notFound, readBody, requestCurrency } from '../lib/http';
 import type { Deps, SecurityDescription } from '../ports';
 import { connectionActivity, SyncRun } from '../services/activity';
-import { historyProgress, queueDueHistory, queueHistory } from '../services/backfill';
+import { historyProgress, queueHistory } from '../services/backfill';
 import { signedBalance, writeBalances } from '../services/balances';
 import { toCurrency } from '../services/portfolio';
 import { closeLookup, describeTickers, ensureRecentCloses, fxLookup } from '../services/pricing';
@@ -147,9 +145,7 @@ connectionRoutes.post('/:id/accounts-chosen', async (c) => {
     .where(tenant.scope(connections, eq(connections.id, connection.id), lt(connections.newAccountsAt, startedAt + 1)));
   // Accounts with no days stored yet need their history (a returning account's gap is filled as missed days).
   const known = added.length > 0 ? await tenant.db.selectDistinct({ id: accountDaily.accountId }).from(accountDaily).where(tenant.scope(accountDaily, inArray(accountDaily.accountId, added))) : [];
-  // A suggested return gets its history when you confirm it.
-  const returns = added.length > 0 ? possibleReturns(await tenant.db.select().from(accounts).where(tenant.scope(accounts, eq(accounts.connectionId, connection.id)))) : new Map<string, string>();
-  const freshIds = added.filter((id) => !known.some((row) => row.id === id) && !returns.has(id));
+  const freshIds = added.filter((id) => !known.some((row) => row.id === id));
   const fresh = freshIds.length > 0 ? await tenant.db.select({ id: accounts.id, name: accounts.name, type: accounts.type }).from(accounts).where(tenant.scope(accounts, inArray(accounts.id, freshIds))) : [];
   const latest = (await getConnection(tenant, connection.id)) ?? connection;
   // Covered by the bank report (a report already on its way was asked for before these accounts were chosen).
@@ -256,7 +252,6 @@ accountRoutes.get('/', async (c) => {
     .groupBy(holdings.accountId);
   const countBy = new Map(holdingCounts.map((row) => [row.accountId, row.count]));
   const duplicates = possibleDuplicates(rows);
-  const returns = possibleReturns(rows);
 
   const response: AccountsResponse = {
     accounts: rows.map(
@@ -283,7 +278,6 @@ accountRoutes.get('/', async (c) => {
             : convertMinor(row.balance, toCurrency(row.currency), currency, rates),
         holdingCount: countBy.get(row.id) ?? 0,
         possibleDuplicateOf: duplicates.get(row.id) ?? null,
-        possibleReturnOf: returns.get(row.id) ?? null,
       }),
     ),
   };
@@ -312,121 +306,6 @@ export function possibleDuplicates(
   }
   return duplicates;
 }
-
-type ReturnCandidate = { id: string; source: string; connectionId: string | null; isHidden: boolean; missingSince: number | null; type: string; subtype: string | null; mask: string | null; plaidName: string | null; createdAt: number; distinctFrom: string | null };
-
-/**
- * Accounts that look like one of their login's no-longer-reported accounts
- * reported again: Plaid gives an account deselected in Link and later chosen
- * again a new account_id, so it arrives as a new account. Same login, type,
- * subtype, last four and Plaid's name, first seen after the old one stopped
- * being reported, and the only such pair. Suggested, not assumed: you confirm
- * it (its history then moves over) or say it's a different account. Maps the
- * new account to the old one.
- */
-export function possibleReturns(rows: ReturnCandidate[]): Map<string, string> {
-  const key = (row: ReturnCandidate) => JSON.stringify([row.connectionId, row.type, row.subtype, row.mask, row.plaidName]);
-  const linked = rows.filter((row) => row.source === 'plaid' && row.connectionId && !row.isHidden);
-  const gone = new Map<string, ReturnCandidate[]>();
-  const current = new Map<string, ReturnCandidate[]>();
-  for (const row of linked) {
-    const into = row.missingSince === null ? current : gone;
-    into.set(key(row), [...(into.get(key(row)) ?? []), row]);
-  }
-  const returns = new Map<string, string>();
-  for (const [fields, before] of gone) {
-    const now = current.get(fields) ?? [];
-    if (before.length !== 1 || now.length !== 1) continue;
-    const [old] = before;
-    const [fresh] = now;
-    if (fresh.createdAt >= old.missingSince! && fresh.distinctFrom !== old.id) returns.set(fresh.id, old.id);
-  }
-  return returns;
-}
-
-/**
- * The answer to a suggested return: the same account (the old one takes over
- * the new one's Plaid id, balance and rows, keeping its own history; days
- * between are filled as missed days) or a different one (not suggested again).
- */
-accountRoutes.post('/:id/returning', async (c) => {
-  const deps = c.env.deps;
-  const tenant = c.get('tenant');
-  const body = await readBody(c, returningAnswerSchema);
-  const fresh = await getAccount(tenant, c.req.param('id'));
-  if (!fresh || !fresh.connectionId) notFound('Account not found.');
-  const connectionId = fresh.connectionId;
-  if (!body.same) {
-    await tenant.db.update(accounts).set({ distinctFrom: body.of }).where(tenant.scope(accounts, eq(accounts.id, fresh.id)));
-    return c.json({ ok: true });
-  }
-  const connection = await Lease.acquireOrBusy(deps, tenant, connectionLease(connectionId));
-  let snapshot: Lease;
-  try {
-    snapshot = await Lease.acquireOrBusy(deps, tenant, snapshotLease(tenant.householdId), 'The household snapshot is being updated. Try again in a moment.');
-  } catch (error) {
-    await connection.forceRelease();
-    throw error;
-  }
-  try {
-    await underConnectionLease(deps, tenant, connectionId, 'manual', connection, { history: false }, async () => {
-      // Read again under the lease: still the suggested pair?
-      const rows = await tenant.db.select().from(accounts).where(tenant.scope(accounts, eq(accounts.connectionId, connectionId)));
-      const now = rows.find((row) => row.id === fresh.id);
-      const old = rows.find((row) => row.id === body.of);
-      if (!now || !old || possibleReturns(rows).get(now.id) !== old.id) throw new HttpError(409, "These accounts no longer look like the same account.");
-      const run = new SyncRun(deps, tenant, connectionId, 'account', 'manual');
-      run.change({ kind: 'account_returned', accountId: old.id, account: old.name });
-      const datesOf = <T extends typeof accountDaily | typeof holdingDaily>(table: T) =>
-        tenant.db.select({ date: table.date }).from(table).where(tenant.scope(table, eq(table.accountId, now.id)));
-      await connection.renew();
-      await snapshot.renew();
-      await runAtomic(tenant.db, [
-        // The new account's rows win a day both have; then they move over.
-        tenant.db.delete(accountDaily).where(tenant.scope(accountDaily, eq(accountDaily.accountId, old.id), inArray(accountDaily.date, datesOf(accountDaily)))),
-        tenant.db.update(accountDaily).set({ accountId: old.id }).where(tenant.scope(accountDaily, eq(accountDaily.accountId, now.id))),
-        tenant.db.delete(holdingDaily).where(tenant.scope(holdingDaily, eq(holdingDaily.accountId, old.id), inArray(holdingDaily.date, datesOf(holdingDaily)))),
-        tenant.db.update(holdingDaily).set({ accountId: old.id }).where(tenant.scope(holdingDaily, eq(holdingDaily.accountId, now.id))),
-        tenant.db.delete(holdings).where(tenant.scope(holdings, eq(holdings.accountId, old.id))),
-        tenant.db.update(holdings).set({ accountId: old.id }).where(tenant.scope(holdings, eq(holdings.accountId, now.id))),
-        tenant.db
-          .delete(investmentTransactions)
-          .where(
-            tenant.scope(
-              investmentTransactions,
-              eq(investmentTransactions.accountId, old.id),
-              inArray(investmentTransactions.externalId, tenant.db.select({ id: investmentTransactions.externalId }).from(investmentTransactions).where(tenant.scope(investmentTransactions, eq(investmentTransactions.accountId, now.id)))),
-            ),
-          ),
-        tenant.db.update(investmentTransactions).set({ accountId: old.id }).where(tenant.scope(investmentTransactions, eq(investmentTransactions.accountId, now.id))),
-        // Frees its Plaid id for the old account.
-        tenant.db.delete(accounts).where(tenant.scope(accounts, eq(accounts.id, now.id))),
-        tenant.db
-          .update(accounts)
-          .set({
-            externalId: now.externalId,
-            missingSince: null,
-            balance: now.balance,
-            balanceAsOf: now.balanceAsOf,
-            currency: now.currency,
-            plaidName: now.plaidName,
-            officialName: now.officialName,
-            mask: now.mask,
-            type: now.type,
-            subtype: now.subtype,
-          })
-          .where(tenant.scope(accounts, eq(accounts.id, old.id))),
-        run.statement(),
-      ]);
-    });
-  } finally {
-    await snapshot.forceRelease();
-  }
-  await snapshotHousehold(deps, tenant, marketDate(deps.now()));
-  // The days it wasn't reported are missed days: filled like any others.
-  await queueDueHistory(deps, tenant, connectionId, 'manual');
-  return c.json({ ok: true });
-});
 
 accountRoutes.post('/', async (c) => {
   const deps = c.env.deps;
