@@ -6,7 +6,7 @@
 import { eq, inArray, isNotNull, isNull, lte, ne, notInArray, or, sql } from 'drizzle-orm';
 import type { AccountBase, Holding, InvestmentTransaction, Security as PlaidSecurity } from 'plaid';
 import { suggestClassification } from '../../shared/classify';
-import { addDays, marketDate } from '../../shared/dates';
+import { addDays, lastMarketClose, marketDate } from '../../shared/dates';
 import { toMinor } from '../../shared/money';
 import { itemProducts, PlaidApiError, type LinkKind, type PlaidApi } from '../adapters/plaid';
 import type { BatchItem } from 'drizzle-orm/batch';
@@ -160,6 +160,26 @@ export interface SyncOptions {
    * button). A ready bank-history report is still collected.
    */
   minIntervalMs?: number;
+  /** Which investment data to fetch (default all). */
+  investments?: InvestmentFetch;
+}
+
+/**
+ * Which investment data a sync fetches from Plaid, each a billed Investments
+ * call: holdings, transactions, both, or neither. A webhook names what
+ * changed; the nightly sync ('since-close') fetches what wasn't already
+ * fetched since the market's last close, so a trade made during the day is
+ * still caught that night when Plaid's webhook for it was missed.
+ */
+export type InvestmentFetch = 'all' | 'holdings' | 'transactions' | 'none' | 'since-close';
+
+function investmentParts(deps: Deps, connection: ConnectionRow, fetch: InvestmentFetch): { holdings: boolean; transactions: boolean } {
+  if (!connection.hasInvestments) return { holdings: false, transactions: false };
+  if (fetch === 'since-close') {
+    const close = lastMarketClose(deps.now());
+    return { holdings: !(connection.holdingsFetchedAt !== null && connection.holdingsFetchedAt >= close), transactions: !(connection.transactionsFetchedAt !== null && connection.transactionsFetchedAt >= close) };
+  }
+  return { holdings: fetch === 'all' || fetch === 'holdings', transactions: fetch === 'all' || fetch === 'transactions' };
 }
 
 /** Minimum gap between button-triggered syncs of one connection. */
@@ -249,7 +269,7 @@ export async function syncConnection(
       );
       return { ...NOTHING, status: connection.status, skipped: true };
     }
-    return syncPass(deps, tenant, connection.id, trigger, lease, lease.abandoned ? "The previous run didn't finish (its lease expired)." : null);
+    return syncPass(deps, tenant, connection.id, trigger, lease, lease.abandoned ? "The previous run didn't finish (its lease expired)." : null, options.investments ?? 'all');
   });
 }
 
@@ -298,10 +318,13 @@ async function syncPass(
   trigger: SyncTrigger,
   lease: Lease,
   note: string | null,
+  investments: InvestmentFetch = 'all',
 ): Promise<SyncResult> {
   const connection = (await getConnection(tenant, connectionId))!;
   const run = new SyncRun(deps, tenant, connection.id, 'sync', trigger);
-  run.note = note;
+  const parts = investmentParts(deps, connection, investments);
+  const skipped = connection.hasInvestments && investments === 'since-close' && (!parts.holdings || !parts.transactions);
+  run.note = [note, skipped && `${!parts.holdings && !parts.transactions ? 'Holdings and transactions' : !parts.holdings ? 'Holdings' : 'Transactions'} already fetched since the market closed (Plaid's update); not fetched again.`].filter(Boolean).join(' ') || null;
   await run.begin();
   const setConnection = (values: Partial<typeof connections.$inferInsert>) =>
     tenant.db.update(connections).set(values).where(tenant.scope(connections, eq(connections.id, connection.id)));
@@ -309,7 +332,7 @@ async function syncPass(
     let fetched: Fetched;
     const fetchedAt = deps.now().getTime();
     try {
-      fetched = await fetchFromPlaid(deps, run.plaid(), connection);
+      fetched = await fetchFromPlaid(deps, run.plaid(), connection, parts);
     } catch (error) {
       const mapped = statusForError(error);
       if (!mapped) throw error;
@@ -326,13 +349,15 @@ async function syncPass(
     let transactionCount = 0;
     if (fetched.investments) {
       const securityIds = await planSecurities(deps, tenant, fetched.investments.securities, writes);
-      holdingCount = await planHoldings(deps, tenant, fetched.investments.holdings, fetched.investments.securities, securityIds, visible, run, writes);
+      // Holdings not fetched this time are left as they are.
+      if (fetched.investments.holdings) holdingCount = await planHoldings(deps, tenant, fetched.investments.holdings, fetched.investments.securities, securityIds, visible, run, writes);
       transactionCount = await planTransactions(deps, tenant, connection, fetched.investments.transactions, securityIds, visible, run, writes);
     }
     writes.push(
       setConnection({
         lastSyncedAt: deps.now().getTime(),
-        ...(fetched.investments?.transactionsComplete ? { txnSyncedThrough: marketDate(deps.now()) } : {}),
+        ...(fetched.investments?.holdings ? { holdingsFetchedAt: fetchedAt } : {}),
+        ...(fetched.investments?.transactionsComplete ? { txnSyncedThrough: marketDate(deps.now()), transactionsFetchedAt: fetchedAt } : {}),
       }),
       statusStatement(tenant, connection.id, { status: 'ok', errorCode: null }, fetchedAt),
       lease.clearNotesBefore(fetchedAt),
@@ -351,22 +376,26 @@ async function syncPass(
 interface Fetched {
   accounts: AccountBase[];
   investments: {
-    holdings: Holding[];
+    /** Null when not fetched this time (left as they are). */
+    holdings: Holding[] | null;
     /** From holdings and transaction pages, deduplicated. */
     securities: PlaidSecurity[];
     transactions: InvestmentTransaction[];
-    /** False when Plaid is still fetching history (right after linking). */
+    /** False when not fetched this time, or Plaid is still fetching history (right after linking). */
     transactionsComplete: boolean;
   } | null;
 }
 
-async function fetchFromPlaid(deps: Deps, plaid: PlaidApi, connection: ConnectionRow): Promise<Fetched> {
+async function fetchFromPlaid(deps: Deps, plaid: PlaidApi, connection: ConnectionRow, parts: { holdings: boolean; transactions: boolean }): Promise<Fetched> {
   const accessToken = await accessTokenFor(deps, connection);
   const plaidAccounts = await plaid.getAccounts(accessToken);
-  if (!connection.hasInvestments) return { accounts: plaidAccounts, investments: null };
+  if (!connection.hasInvestments || (!parts.holdings && !parts.transactions)) return { accounts: plaidAccounts, investments: null };
 
-  const holdingsResult = await plaid.getHoldings(accessToken);
-  const allSecurities = new Map(holdingsResult.securities.map((security) => [security.security_id, security]));
+  const holdingsResult = parts.holdings ? await plaid.getHoldings(accessToken) : null;
+  const allSecurities = new Map((holdingsResult?.securities ?? []).map((security) => [security.security_id, security]));
+  if (!parts.transactions) {
+    return { accounts: plaidAccounts, investments: { holdings: holdingsResult!.holdings, securities: [...allSecurities.values()], transactions: [], transactionsComplete: false } };
+  }
   const today = marketDate(deps.now());
   // Re-fetch a fortnight of overlap: institutions post late.
   const start = connection.txnSyncedThrough ? addDays(connection.txnSyncedThrough, -14) : addDays(today, -HISTORY_DAYS);
@@ -390,7 +419,7 @@ async function fetchFromPlaid(deps: Deps, plaid: PlaidApi, connection: Connectio
   }
   return {
     accounts: plaidAccounts,
-    investments: { holdings: holdingsResult.holdings, securities: [...allSecurities.values()], transactions, transactionsComplete },
+    investments: { holdings: holdingsResult?.holdings ?? null, securities: [...allSecurities.values()], transactions, transactionsComplete },
   };
 }
 

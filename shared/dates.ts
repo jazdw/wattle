@@ -12,6 +12,23 @@ export function marketDate(now: Date): IsoDate {
   }).format(now);
 }
 
+/** The US market's close (4pm New York) on `date`, as epoch ms. */
+export function marketCloseAt(date: IsoDate): number {
+  // 4pm New York is 20:00 UTC in summer (EDT), 21:00 in winter (EST).
+  for (const hour of [20, 21]) {
+    const candidate = Date.parse(`${date}T${hour}:00:00Z`);
+    const local = new Intl.DateTimeFormat('en-US', { timeZone: 'America/New_York', hour: 'numeric', hourCycle: 'h23' }).format(candidate);
+    if (Number(local) === 16) return candidate;
+  }
+  return Date.parse(`${date}T21:00:00Z`);
+}
+
+/** The most recent market close at or before `now` (any day of the week). */
+export function lastMarketClose(now: Date): number {
+  const today = marketCloseAt(marketDate(now));
+  return today <= now.getTime() ? today : marketCloseAt(addDays(marketDate(now), -1));
+}
+
 export function addDays(date: IsoDate, days: number): IsoDate {
   const value = new Date(`${date}T00:00:00Z`);
   value.setUTCDate(value.getUTCDate() + days);

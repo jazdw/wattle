@@ -129,6 +129,13 @@ export const connections = sqliteTable(
     lastSyncedAt: integer('last_synced_at'),
     /** Last day covered by stored investment transactions. */
     txnSyncedThrough: text('txn_synced_through'),
+    /**
+     * When holdings, and investment transactions, were last fetched from
+     * Plaid (each a billed Investments call). The nightly sync skips what was
+     * fetched since the market closed (a webhook's sync already did).
+     */
+    holdingsFetchedAt: integer('holdings_fetched_at'),
+    transactionsFetchedAt: integer('transactions_fetched_at'),
     backfillStatus: text('backfill_status', { enum: ['pending', 'running', 'done', 'failed', 'skipped'] })
       .notNull()
       .default('pending'),
