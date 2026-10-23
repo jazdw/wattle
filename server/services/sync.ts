@@ -397,39 +397,6 @@ async function fetchFromPlaid(deps: Deps, plaid: PlaidApi, connection: Connectio
 /** Visible accounts of a connection: Plaid account_id → Wattle account. */
 type VisibleAccounts = Map<string, { id: string; name: string; currency: string }>;
 
-/**
- * Accounts reported again under a new account_id. Plaid gives an account a
- * new id when it's deselected in Link and later chosen again, so a newly
- * reported account that matches exactly one of the login's no-longer-reported
- * ones (same type, subtype, last four and Plaid's name), and that it alone
- * matches, is that account: it keeps its history.
- */
-function returningAccounts<T extends { externalId: string | null; missingSince: number | null; isHidden: boolean; plaidName: string | null; mask: string | null; type: string; subtype: string | null }>(
-  plaidAccounts: AccountBase[],
-  existing: T[],
-): Map<string, T> {
-  const known = new Set(existing.map((row) => row.externalId));
-  const key = (fields: { type: string; subtype: string | null; mask: string | null; name: string | null }) => JSON.stringify([fields.type, fields.subtype ?? null, fields.mask ?? null, fields.name ?? null]);
-  const unreported = new Map<string, T[]>();
-  for (const row of existing) {
-    if (row.missingSince === null || row.isHidden) continue;
-    const list = unreported.get(key({ ...row, name: row.plaidName })) ?? [];
-    unreported.set(key({ ...row, name: row.plaidName }), [...list, row]);
-  }
-  const fresh = new Map<string, AccountBase[]>();
-  for (const account of plaidAccounts) {
-    if (known.has(account.account_id)) continue;
-    const fields = { type: account.type, subtype: account.subtype ?? null, mask: account.mask ? account.mask.slice(-4) : null, name: account.name };
-    fresh.set(key(fields), [...(fresh.get(key(fields)) ?? []), account]);
-  }
-  const matches = new Map<string, T>();
-  for (const [fields, accountsNow] of fresh) {
-    const before = unreported.get(fields) ?? [];
-    if (accountsNow.length === 1 && before.length === 1) matches.set(accountsNow[0].account_id, before[0]);
-  }
-  return matches;
-}
-
 /** The shown name follows the institution's until you rename the account. */
 function followPlaidName(plaidName: string) {
   return sql`case when ${accounts.plaidName} is null or ${accounts.name} = ${accounts.plaidName} then ${plaidName} else ${accounts.name} end`;
@@ -457,21 +424,15 @@ async function planAccounts(
       missingSince: accounts.missingSince,
       balance: accounts.balance,
       currency: accounts.currency,
-      plaidName: accounts.plaidName,
-      mask: accounts.mask,
-      type: accounts.type,
-      subtype: accounts.subtype,
     })
     .from(accounts)
     .where(tenant.scope(accounts, eq(accounts.connectionId, connection.id)));
   const byExternal = new Map(existing.map((row) => [row.externalId, row]));
-  const returning = returningAccounts(plaidAccounts, existing);
   const visible: VisibleAccounts = new Map();
 
   for (const account of plaidAccounts) {
     const currency = account.balances.iso_currency_code ?? 'USD';
-    const returned = returning.get(account.account_id);
-    const current = byExternal.get(account.account_id) ?? returned;
+    const current = byExternal.get(account.account_id);
     const descriptive = {
       plaidName: account.name,
       officialName: account.official_name ?? null,
@@ -516,14 +477,13 @@ async function planAccounts(
       );
       continue;
     }
-    if (returned) run.change({ kind: 'account_returned', accountId: current.id, account: account.name });
     if (balance !== current.balance || currency !== current.currency) {
       run.change({ kind: 'balance', accountId: current.id, account: account.name, before: current.balance, after: balance, currency });
     }
     writes.push(
       tenant.db
         .update(accounts)
-        .set({ ...descriptive, name: followPlaidName(account.name), currency, balance, balanceAsOf: now, missingSince: null, ...(returned ? { externalId: account.account_id } : {}) })
+        .set({ ...descriptive, name: followPlaidName(account.name), currency, balance, balanceAsOf: now, missingSince: null })
         .where(tenant.scope(accounts, eq(accounts.id, current.id))),
     );
     visible.set(account.account_id, { id: current.id, name: account.name, currency });
