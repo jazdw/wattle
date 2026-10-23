@@ -57,6 +57,13 @@
       "when": 1792637670962,
       "tag": "0007_new_accounts",
       "breakpoints": true
+    },
+    {
+      "idx": 8,
+      "version": "6",
+      "when": 1792765732642,
+      "tag": "0008_returning_accounts",
+      "breakpoints": true
     }
   ]
 }

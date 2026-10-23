@@ -31,10 +31,11 @@ const REVIEWED: Record<string, Record<string, string>> = {
   },
   'server/routes/accounts.ts': {
     connections: 'accounts chosen: clears only the new-accounts notice, and only one from before the request (single conditional update; nothing else writes it but the webhook)',
-    accounts: 'create: atomic; rename/owner/category: single update; hide: connection + snapshot leases; delete: account lease (manual) or connection + snapshot leases, re-checked as no longer reported (linked)',
-    accountDaily: 'hide/purge: connection + snapshot leases',
-    holdingDaily: 'hide/purge: connection + snapshot leases',
-    holdings: 'manual holdings: account lease + version, atomic',
+    accounts: 'create: atomic; rename/owner/category: single update; hide: connection + snapshot leases; delete: account lease (manual) or connection + snapshot leases, re-checked as no longer reported (linked); a different account than a suggested return: single update of its own column; confirmed return: connection + snapshot leases, re-checked',
+    accountDaily: 'hide/purge: connection + snapshot leases; a confirmed return moves the new account\'s rows to the old one: connection + snapshot leases, re-checked, one atomic batch',
+    holdingDaily: 'hide/purge: connection + snapshot leases; confirmed return: as accountDaily',
+    holdings: 'manual holdings: account lease + version, atomic; confirmed return: as accountDaily',
+    investmentTransactions: 'confirmed return: as accountDaily (the new account\'s transactions win an id both have)',
     securities: 'manual holdings: account lease; never modifies Plaid-owned rows; derived ids',
   },
   'server/routes/portfolio.ts': {

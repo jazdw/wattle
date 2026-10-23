@@ -31,6 +31,12 @@ export const newAccountsHistorySchema = z.object({
   bankReport: z.boolean(),
 });
 
+/** A suggested returning account: the same as `of` (merge its history) or a different account. */
+export const returningAnswerSchema = z.object({
+  of: z.string().min(1),
+  same: z.boolean(),
+});
+
 export const exchangeSchema = z.object({
   publicToken: z.string().min(1),
   kind: z.enum(['account', 'investments']),
