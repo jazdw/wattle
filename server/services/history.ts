@@ -116,11 +116,17 @@ export async function loadHistory(deps: Deps, tenant: Tenant, options: Options):
     const firstDay = firstDays.get(account.id);
     // Only if its history starts inside the range (then it's in `rows`).
     const first = account.source === 'plaid' && firstDay ? rows.find((row) => row.date === firstDay) : undefined;
+    // No longer reported (closed, or deselected in Plaid): out of totals from that day on, as it is from today's.
+    const gone = account.missingSince !== null ? marketDate(new Date(account.missingSince)) : null;
     const values: (number | null)[] = [];
     let cursor = 0;
     let last: (typeof rows)[number] | null = null;
     for (const [position, date] of dates.entries()) {
       while (cursor < rows.length && rows[cursor].date <= date) last = rows[cursor++];
+      if (gone && date >= gone) {
+        values.push(null);
+        continue;
+      }
       if (!last && first && date < first.date) {
         values.push(convert(first.balance, first.currency, date));
         estimated[position] = true;
