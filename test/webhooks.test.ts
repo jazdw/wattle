@@ -116,6 +116,7 @@ describe('Plaid webhooks', () => {
     const rows = await deps.db.select().from(schema.accounts);
     expect(rows.find((row) => row.externalId === 'ira')).toMatchObject({ missingSince: null });
     expect(rows.find((row) => row.externalId === 'brk')?.missingSince).not.toBeNull();
+    const brkId = rows.find((row) => row.externalId === 'brk')!.id;
     const brkHistory = await deps.db.select().from(schema.accountDaily);
     expect(brkHistory.some((row) => row.accountId === rows.find((r) => r.externalId === 'brk')!.id)).toBe(true); // kept
     expect(brkHistory.some((row) => row.accountId === rows.find((r) => r.externalId === 'ira')!.id && row.source === 'backfill')).toBe(true); // loaded
@@ -126,12 +127,17 @@ describe('Plaid webhooks', () => {
     const chart = (await api('/api/history?range=1M&group=total')).body;
     expect(chart.series[0].values.at(-1)).toBe(2000_00);
 
-    // Choosing the brokerage account again brings it back, without a new history load.
-    plaid.state.accounts = [account('brk', 'investment', 1000), account('ira', 'investment', 2000)];
-    plaid.state.holdings = [holding('brk', 's-vti', 10, 100), holding('ira', 's-vti', 20, 100)];
+    // Choosing the brokerage account again brings it back, without a new history
+    // load: Plaid gives it a new account_id, but it's the same account (same
+    // type, last four and name) and keeps its history.
+    plaid.state.accounts = [account('brk-again', 'investment', 1000, { name: 'brk' }), account('ira', 'investment', 2000)];
+    plaid.state.holdings = [holding('brk-again', 's-vti', 10, 100), holding('ira', 's-vti', 20, 100)];
     const again = await api(`/api/connections/${before.id}/accounts-chosen`, { method: 'POST' });
     expect(again.body).toMatchObject({ added: 1, historyQueued: false });
     expect((await api('/api/portfolio')).body.netWorth).toBe(3000_00);
+    const back = (await deps.db.select().from(schema.accounts)).filter((row) => row.plaidName === 'brk');
+    expect(back).toEqual([expect.objectContaining({ id: brkId, externalId: 'brk-again', missingSince: null })]);
+    expect((await deps.db.select().from(schema.accountDaily)).some((row) => row.accountId === brkId)).toBe(true);
   });
 
   it('Choose accounts: a new bank account waits for the person before a bank report; investment history loads either way', async () => {
@@ -204,6 +210,25 @@ describe('Plaid webhooks', () => {
     }
     expect((await deps.db.select().from(schema.syncRuns)).map((run) => run.note)).toContain('Deleted “brk” (no longer reported) and its stored history.');
     expect((await api('/api/portfolio')).body.netWorth).toBe(2000_00);
+  });
+
+  it('a returning account is only matched when exactly one fits', async () => {
+    const { deps, plaid, api } = await setup();
+    const [login] = (await api('/api/connections')).body.connections;
+    // Two look-alike cards (no mask), then both deselected.
+    plaid.state.accounts = [account('brk', 'investment', 1000), account('c1', 'credit', 100, { name: 'Card', mask: null }), account('c2', 'credit', 200, { name: 'Card', mask: null })];
+    await api(`/api/connections/${login.id}/accounts-chosen`, { method: 'POST' });
+    plaid.state.accounts = [account('brk', 'investment', 1000)];
+    await api(`/api/connections/${login.id}/accounts-chosen`, { method: 'POST' });
+    // One comes back under a new id: which one is a guess, so it's a new account.
+    plaid.state.accounts = [account('brk', 'investment', 1000), account('c3', 'credit', 100, { name: 'Card', mask: null })];
+    await api(`/api/connections/${login.id}/accounts-chosen`, { method: 'POST' });
+    const cards = (await deps.db.select().from(schema.accounts)).filter((row) => row.plaidName === 'Card');
+    expect(cards.map((row) => [row.externalId, row.missingSince === null]).sort()).toEqual([
+      ['c1', false],
+      ['c2', false],
+      ['c3', true],
+    ]);
   });
 
   it('ignores unknown items and events', async () => {
