@@ -184,6 +184,28 @@ describe('Plaid webhooks', () => {
     expect((await api(`/api/connections/${login.id}/new-accounts-history`, { method: 'POST', json: { accountIds: ['elsewhere'], bankReport: true } })).status).toBe(404);
   });
 
+  it('a deselected account can be deleted with its history; one still reported cannot', async () => {
+    const { deps, plaid, api } = await setup();
+    const [login] = (await api('/api/connections')).body.connections;
+    plaid.state.accounts = [account('ira', 'investment', 2000)];
+    plaid.state.holdings = [holding('ira', 's-vti', 20, 100)];
+    await api(`/api/connections/${login.id}/accounts-chosen`, { method: 'POST' });
+    await flush(deps);
+    const rows = await deps.db.select().from(schema.accounts);
+    const brk = rows.find((row) => row.externalId === 'brk')!;
+    const ira = rows.find((row) => row.externalId === 'ira')!;
+    expect(brk.missingSince).not.toBeNull();
+
+    expect((await api(`/api/accounts/${ira.id}`, { method: 'DELETE' })).status).toBe(409);
+    expect((await api(`/api/accounts/${brk.id}`, { method: 'DELETE' })).status).toBe(200);
+    expect((await deps.db.select().from(schema.accounts)).map((row) => row.externalId)).toEqual(['ira']);
+    for (const table of [schema.accountDaily, schema.holdingDaily, schema.holdings, schema.investmentTransactions]) {
+      expect((await deps.db.select().from(table)).filter((row) => row.accountId === brk.id)).toEqual([]);
+    }
+    expect((await deps.db.select().from(schema.syncRuns)).map((run) => run.note)).toContain('Deleted “brk” (no longer reported) and its stored history.');
+    expect((await api('/api/portfolio')).body.netWorth).toBe(2000_00);
+  });
+
   it('ignores unknown items and events', async () => {
     const { send, connection } = await setup();
     expect((await send({ webhook_type: 'ITEM', webhook_code: 'ERROR', item_id: 'someone-else' })).status).toBe(200);
