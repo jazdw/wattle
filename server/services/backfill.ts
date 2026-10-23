@@ -45,6 +45,13 @@ interface PlanPayload {
   trigger: SyncTrigger;
   webhookUrl: string | null;
   runId: string;
+  /** A load for some accounts only (added with Choose accounts): their investment history, and a bank report only if asked for. */
+  only?: HistoryScope;
+}
+
+export interface HistoryScope {
+  accountIds: string[];
+  bankReport: boolean;
 }
 
 interface PricesPayload {
@@ -140,10 +147,11 @@ export async function queueHistory(
   mode: HistoryMode,
   trigger: SyncTrigger,
   webhookUrl: string | null = null,
+  only?: HistoryScope,
 ): Promise<boolean> {
   if (await historyUnderway(tenant, connectionId)) return false;
   const runId = crypto.randomUUID();
-  const payload: PlanPayload = { connectionId, mode, trigger, webhookUrl, runId };
+  const payload: PlanPayload = { connectionId, mode, trigger, webhookUrl, runId, ...(only ? { only } : {}) };
   await enqueue(deps, tenant, [{ id: `history:${runId}:plan`, type: 'history_plan', payload: { ...payload }, connectionId }]);
   return true;
 }
@@ -271,11 +279,12 @@ export async function planHistory({ deps, tenant, job, renew }: JobContext): Pro
       }
       investments = missed.investments;
     } else {
+      if (plan.only) run.note = plan.only.bankReport ? 'History for newly added accounts.' : 'History for newly added accounts, without a bank report.';
       await run.begin();
       outcome.push(backfillStatusStatement(tenant, connection.id, 'running'));
       await ensureFx(deps, addDays(today, -HISTORY_DAYS), today);
       // Two years, asked for on the first load (not again if this plan is running a second time).
-      if (plan.mode === 'load' && connection.hasBalanceHistory && !connection.assetReportTokenEnc) {
+      if (plan.mode === 'load' && connection.hasBalanceHistory && (plan.only?.bankReport ?? true) && !connection.assetReportTokenEnc) {
         const report = await requestBalanceHistory(deps, tenant, connection, plan.webhookUrl, run, 731);
         outcome.push(...report.statements);
         reportRequested = report.requested;
@@ -286,7 +295,10 @@ export async function planHistory({ deps, tenant, job, renew }: JobContext): Pro
           .from(accounts)
           .where(tenant.scope(accounts, eq(accounts.connectionId, connection.id), eq(accounts.isHidden, false)));
         // With Assets, the bank's balance history covers the other accounts.
-        const accountIds = accountRows.filter((row) => !connection.hasBalanceHistory || row.type === 'investment').map((row) => row.id);
+        const accountIds = accountRows
+          .filter((row) => !connection.hasBalanceHistory || row.type === 'investment')
+          .filter((row) => !plan.only || plan.only.accountIds.includes(row.id))
+          .map((row) => row.id);
         if (plan.mode === 'rebuild' && accountIds.length > 0) {
           // Drop the previous estimate (only backfilled rows; synced, imported
           // and manual ones stay) and reconstruct with every transaction.

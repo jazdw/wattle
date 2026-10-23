@@ -1,6 +1,7 @@
 import { useMutation, useQueryClient } from '@tanstack/react-query';
 import { useEffect, useRef, useState } from 'react';
 import { api } from '../api';
+import { askAboutNewAccounts, type NewAccountsQuestion } from '../lib/newAccountsQuestion';
 import { loadPlaid, openPlaidLink } from '../lib/plaidLink';
 
 export type LinkKind = 'investments' | 'account';
@@ -80,12 +81,17 @@ export function usePlaidLink({
   const onSuccess = (publicToken: string, { kind, chooseAccounts: choosing }: PendingLink) => {
     if (connectionId) {
       // Update mode keeps the same access token: resync (after choosing
-      // accounts, straight away, loading new accounts' history).
+      // accounts, straight away, loading new accounts' history; for new bank
+      // accounts, Accounts asks first whether to get a bank report).
       const path = choosing ? `/api/connections/${connectionId}/accounts-chosen` : `/api/connections/${connectionId}/sync`;
-      void api(path, { method: 'POST' }).finally(() => {
-        void queryClient.invalidateQueries();
-        onLinked?.();
-      });
+      void api<{ newAccounts?: NewAccountsQuestion['accounts'] }>(path, { method: 'POST' })
+        .then((result) => {
+          if (result.newAccounts?.length) askAboutNewAccounts({ connectionId, accounts: result.newAccounts });
+        })
+        .finally(() => {
+          void queryClient.invalidateQueries();
+          onLinked?.();
+        });
     } else {
       exchange.mutate({ publicToken, kind });
     }

@@ -7,6 +7,7 @@ import { api } from '../api';
 import { ActivityDialog } from '../components/ActivityDialog';
 import { EditAccountDialog, HoldingsDialog, ImportDialog, NewAccountDialog } from '../components/AccountDialogs';
 import { PageHeader } from '../components/Layout';
+import { NewAccountsHistoryDialog } from '../components/NewAccountsHistoryDialog';
 import { PlaidLinkButton } from '../components/PlaidLinkButton';
 import { usePlaidLink, type LinkKind } from '../hooks/usePlaidLink';
 import { Badge } from '../components/ui/badge';
@@ -105,6 +106,7 @@ export function Accounts() {
 
   return (
     <>
+      <NewAccountsHistoryDialog />
       <PageHeader
         title="Accounts"
         description="Each of you links your own logins. Hide duplicates of joint accounts so they're only counted once."

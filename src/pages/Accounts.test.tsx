@@ -175,6 +175,37 @@ describe('Accounts page', () => {
     expect(sent('POST /api/plaid/exchange')).toHaveLength(0);
   });
 
+  it('asks before a bank report for new bank accounts: Load history includes them, Not now loads only investment history', async () => {
+    const newAccounts = [
+      { id: 'a-card', name: 'Freedom card', bank: true },
+      { id: 'a-ira', name: 'Roth IRA', bank: false },
+    ];
+    server.use(
+      http.post('*/api/plaid/link-token', () => HttpResponse.json({ linkToken: 'link-choose' })),
+      http.post('*/api/connections/c-chase/accounts-chosen', () => HttpResponse.json({ added: 2, historyQueued: false, newAccounts })),
+    );
+    const { user } = renderPage(<Accounts />);
+    await screen.findByText('Sapphire');
+    const choose = async () => {
+      await user.click(within(card('Chase')).getByRole('button', { name: 'Choose accounts' }));
+      await expect.poll(() => plaidLink.onSuccess).toBeTruthy();
+      act(() => plaidLink.onSuccess!('public-choose'));
+      return screen.findByRole('dialog', { name: 'Load history for the new accounts?' });
+    };
+
+    const dialog = await choose();
+    expect(within(dialog).getByText('Freedom card')).toBeInTheDocument();
+    expect(within(dialog).getByText(/Roth IRA: investment history loads either way/)).toBeInTheDocument();
+    await user.click(within(dialog).getByRole('button', { name: 'Load history' }));
+    await expect.poll(() => sent('POST /api/connections/c-chase/new-accounts-history').map((request) => request.body)).toEqual([{ accountIds: ['a-card', 'a-ira'], bankReport: true }]);
+    await expect.poll(() => screen.queryByRole('dialog')).toBeNull();
+
+    plaidLink.onSuccess = null;
+    await user.click(within(await choose()).getByRole('button', { name: 'Not now' }));
+    await expect.poll(() => sent('POST /api/connections/c-chase/new-accounts-history').at(-1)?.body).toEqual({ accountIds: ['a-ira'], bankReport: false });
+    await expect.poll(() => screen.queryByRole('dialog')).toBeNull();
+  });
+
   it("disables the button while Link is open and shows Plaid's exit error", async () => {
     const { user } = renderPage(<Accounts />);
     const button = await screen.findByRole('button', { name: 'Link account' });

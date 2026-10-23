@@ -9,6 +9,7 @@ import {
   balanceEntrySchema,
   manualAccountSchema,
   manualHoldingsSchema,
+  newAccountsHistorySchema,
 } from '../../shared/schemas';
 import type { AccountsResponse, AccountSummary, ConnectionsResponse } from '../../shared/types';
 import { requireAuth } from '../auth/routes';
@@ -107,11 +108,19 @@ connectionRoutes.post('/:id/sync', async (c) => {
   return c.json(result);
 });
 
+const hookFor = (requestUrl: string) => {
+  const url = new URL(requestUrl);
+  return url.protocol === 'https:' ? `${url.origin}/api/plaid/webhook` : null;
+};
+
 /**
  * After Choose accounts (Link's update mode with account selection): sync
  * straight away, whatever the cooldown, so added accounts appear and removed
  * ones are marked no longer reported (their history kept). Accounts new to
- * Wattle get their history loaded (existing days are kept as they are).
+ * Wattle get their history loaded (existing days are kept as they are): an
+ * investment account's straight away; a bank account's needs a new bank
+ * report for the whole login (billed per report), so those are returned for
+ * the person to decide (POST new-accounts-history).
  */
 connectionRoutes.post('/:id/accounts-chosen', async (c) => {
   const deps = c.env.deps;
@@ -136,11 +145,34 @@ connectionRoutes.post('/:id/accounts-chosen', async (c) => {
     .where(tenant.scope(connections, eq(connections.id, connection.id), lt(connections.newAccountsAt, startedAt + 1)));
   // Accounts with no days stored yet need their history (a returning account's gap is filled as missed days).
   const known = added.length > 0 ? await tenant.db.selectDistinct({ id: accountDaily.accountId }).from(accountDaily).where(tenant.scope(accountDaily, inArray(accountDaily.accountId, added))) : [];
-  const fresh = added.filter((id) => !known.some((row) => row.id === id));
-  const url = new URL(c.req.url);
-  const historyQueued = fresh.length > 0 && (await queueHistory(deps, tenant, connection.id, 'load', 'manual', url.protocol === 'https:' ? `${url.origin}/api/plaid/webhook` : null));
+  const freshIds = added.filter((id) => !known.some((row) => row.id === id));
+  const fresh = freshIds.length > 0 ? await tenant.db.select({ id: accounts.id, name: accounts.name, type: accounts.type }).from(accounts).where(tenant.scope(accounts, inArray(accounts.id, freshIds))) : [];
+  const latest = (await getConnection(tenant, connection.id)) ?? connection;
+  // Covered by the bank report (a report already on its way was asked for before these accounts were chosen).
+  const bank = latest.hasBalanceHistory && !latest.assetReportTokenEnc ? fresh.filter((account) => account.type !== 'investment') : [];
+  let historyQueued = false;
+  if (fresh.length > 0 && bank.length === 0) {
+    historyQueued = await queueHistory(deps, tenant, connection.id, 'load', 'manual', hookFor(c.req.url), { accountIds: freshIds, bankReport: false });
+  }
   await snapshotHousehold(deps, tenant, marketDate(deps.now()));
-  return c.json({ ...result, added: added.length, historyQueued });
+  const newAccounts = bank.length > 0 ? fresh.map((account) => ({ id: account.id, name: account.name, bank: bank.includes(account) })) : [];
+  return c.json({ ...result, added: added.length, historyQueued, newAccounts });
+});
+
+/** The answer to Choose accounts' question: load the added accounts' history, with a bank report or without. */
+connectionRoutes.post('/:id/new-accounts-history', async (c) => {
+  const deps = c.env.deps;
+  const tenant = c.get('tenant');
+  const connection = await getConnection(tenant, c.req.param('id'));
+  if (!connection) notFound('Connection not found.');
+  const body = await readBody(c, newAccountsHistorySchema);
+  const rows = await tenant.db
+    .select({ id: accounts.id })
+    .from(accounts)
+    .where(tenant.scope(accounts, eq(accounts.connectionId, connection.id), eq(accounts.source, 'plaid'), isNull(accounts.missingSince), inArray(accounts.id, body.accountIds)));
+  if (rows.length !== new Set(body.accountIds).size) notFound('Account not found.');
+  const queued = await queueHistory(deps, tenant, connection.id, 'load', 'manual', hookFor(c.req.url), { accountIds: rows.map((row) => row.id), bankReport: body.bankReport });
+  return c.json({ ok: true, queued });
 });
 
 /** The connection's sync log, newest first. */
@@ -156,9 +188,7 @@ connectionRoutes.post('/:id/backfill', async (c) => {
   const tenant = c.get('tenant');
   const connection = await getConnection(tenant, c.req.param('id'));
   if (!connection) notFound('Connection not found.');
-  const url = new URL(c.req.url);
-  const hook = url.protocol === 'https:' ? `${url.origin}/api/plaid/webhook` : null;
-  const queued = await queueHistory(deps, tenant, connection.id, 'load', 'manual', hook);
+  const queued = await queueHistory(deps, tenant, connection.id, 'load', 'manual', hookFor(c.req.url));
   return c.json({ ok: true, queued });
 });
 
