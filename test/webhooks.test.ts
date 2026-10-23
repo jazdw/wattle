@@ -127,20 +127,13 @@ describe('Plaid webhooks', () => {
     const chart = (await api('/api/history?range=1M&group=total')).body;
     expect(chart.series[0].values.at(-1)).toBe(2000_00);
 
-    // Choosing the brokerage account again: Plaid gives it a new account_id, so
-    // it arrives as a new account, suggested (not assumed) to be the old one.
+    // Choosing the brokerage account again: Plaid gives it a new account_id,
+    // but it matches the deselected account exactly, so it takes it over,
+    // history and all, without a new history load.
     plaid.state.accounts = [account('brk-again', 'investment', 1000, { name: 'brk' }), account('ira', 'investment', 2000)];
     plaid.state.holdings = [holding('brk-again', 's-vti', 10, 100), holding('ira', 's-vti', 20, 100)];
     const again = await api(`/api/connections/${before.id}/accounts-chosen`, { method: 'POST' });
-    expect(again.body).toMatchObject({ added: 1, historyQueued: false }); // its history comes with the answer
-    expect((await api('/api/portfolio')).body.netWorth).toBe(3000_00); // counted once
-    const listed = (await api('/api/accounts')).body.accounts as { id: string; plaidName?: string; name: string; possibleReturnOf: string | null }[];
-    const fresh = listed.find((row) => row.name === 'brk' && row.id !== brkId)!;
-    expect(fresh.possibleReturnOf).toBe(brkId);
-    expect(listed.find((row) => row.id === brkId)!.possibleReturnOf).toBeNull();
-
-    // Confirmed: the old account takes over, with its history and the new rows.
-    expect((await api(`/api/accounts/${fresh.id}/returning`, { method: 'POST', json: { of: brkId, same: true } })).status).toBe(200);
+    expect(again.body).toMatchObject({ added: 1, historyQueued: false });
     await flush(deps);
     const back = (await deps.db.select().from(schema.accounts)).filter((row) => row.plaidName === 'brk');
     expect(back).toEqual([expect.objectContaining({ id: brkId, externalId: 'brk-again', missingSince: null })]);
@@ -244,21 +237,6 @@ describe('Plaid webhooks', () => {
       ['c2', false],
       ['c3', true],
     ]);
-  });
-
-  it('a suggested return said to be a different account is not suggested again', async () => {
-    const { deps, plaid, api } = await setup();
-    const [login] = (await api('/api/connections')).body.connections;
-    plaid.state.accounts = [];
-    await api(`/api/connections/${login.id}/accounts-chosen`, { method: 'POST' });
-    const [old] = await deps.db.select().from(schema.accounts);
-    plaid.state.accounts = [account('brk-new', 'investment', 1000, { name: 'brk' })];
-    await api(`/api/connections/${login.id}/accounts-chosen`, { method: 'POST' });
-    const fresh = ((await api('/api/accounts')).body.accounts as { id: string; possibleReturnOf: string | null }[]).find((row) => row.id !== old.id)!;
-    expect(fresh.possibleReturnOf).toBe(old.id);
-    expect((await api(`/api/accounts/${fresh.id}/returning`, { method: 'POST', json: { of: old.id, same: false } })).status).toBe(200);
-    expect(((await api('/api/accounts')).body.accounts as { possibleReturnOf: string | null }[]).every((row) => row.possibleReturnOf === null)).toBe(true);
-    expect(await deps.db.select().from(schema.accounts)).toHaveLength(2); // both kept
   });
 
   it('a webhook fetches only the investment data it says changed', async () => {

@@ -131,27 +131,6 @@ describe('manual accounts', () => {
     await user.click(within(dialog).getByRole('button', { name: 'Delete account and history' }));
     await expect.poll(() => sent('DELETE /api/accounts/chk').length).toBe(1);
   });
-
-  it('asks whether an account chosen again is the deselected one, and sends the answer', async () => {
-    server.use(
-      http.get('*/api/accounts', () =>
-        HttpResponse.json({
-          accounts: [
-            ...ACCOUNTS.map((account) => (account.id === 'chk' ? { ...account, missingSince: Date.now() - 86400_000, balance: null } : account)),
-            { ...ACCOUNTS.find((account) => account.id === 'chk')!, id: 'chk-again', possibleReturnOf: 'chk' },
-          ],
-        }),
-      ),
-    );
-    const { user } = await openAccounts();
-    const rows = screen.getAllByText('Chase Checking').map((element) => element.closest('li') as HTMLElement);
-    const fresh = rows.find((row) => within(row).queryByText('Same as a deselected account?'))!;
-    await user.click(within(fresh).getByRole('button', { name: 'Edit account' }));
-    const dialog = await screen.findByRole('dialog', { name: 'Chase Checking' });
-    expect(within(dialog).getByText(/which you deselected earlier/)).toBeInTheDocument();
-    await user.click(within(dialog).getByRole('button', { name: 'Same account, keep its history' }));
-    await expect.poll(() => sent('POST /api/accounts/chk-again/returning')[0]?.body).toEqual({ of: 'chk', same: true });
-  });
 });
 
 describe('CSV import', () => {

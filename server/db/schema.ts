@@ -197,12 +197,6 @@ export const accounts = sqliteTable(
      * deselected in Plaid). It then drops out of totals; history is kept.
      */
     missingSince: integer('missing_since'),
-    /**
-     * A no-longer-reported account of the same login this one looked like
-     * (Plaid gives an account chosen again a new id), which you said is a
-     * different account: not suggested again.
-     */
-    distinctFrom: text('distinct_from'),
     sort: integer('sort').notNull().default(0),
     /** Bumped on each save of a manual account's holdings, so a stale editor can't overwrite a newer save. */
     holdingsVersion: integer('holdings_version').notNull().default(0),
