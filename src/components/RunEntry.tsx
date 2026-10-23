@@ -35,6 +35,8 @@ function describeChange(change: SyncChange): string {
       return `${change.account}: new account`;
     case 'account_missing':
       return `${change.account}: no longer reported by the institution`;
+    case 'account_returned':
+      return `${change.account}: reported again, with its history`;
     case 'balance': {
       const currency = change.currency as Currency;
       return `${change.account}: balance ${money(change.before, currency, { cents: true })} → ${money(change.after, currency, { cents: true })}`;
