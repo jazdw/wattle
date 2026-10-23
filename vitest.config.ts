@@ -14,6 +14,9 @@ export default defineConfig({
     alias: { '@': fileURLToPath(new URL('./src', import.meta.url)) },
   },
   test: {
+    // CI's runners (with coverage on) are several times slower than a laptop;
+    // the realistically sized tests take over a second here.
+    testTimeout: 15_000,
     projects: [
       {
         extends: true,
