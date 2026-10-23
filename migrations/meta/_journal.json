@@ -61,29 +61,8 @@
     {
       "idx": 8,
       "version": "6",
-      "when": 1792765732642,
-      "tag": "0008_returning_accounts",
-      "breakpoints": true
-    },
-    {
-      "idx": 9,
-      "version": "6",
-      "when": 1792766126579,
-      "tag": "0009_write_budget",
-      "breakpoints": true
-    },
-    {
-      "idx": 10,
-      "version": "6",
-      "when": 1792766581324,
-      "tag": "0010_investments_fetched",
-      "breakpoints": true
-    },
-    {
-      "idx": 11,
-      "version": "6",
-      "when": 1792767365724,
-      "tag": "0011_drop_distinct_from",
+      "when": 1792767593960,
+      "tag": "0008_usage_and_fetches",
       "breakpoints": true
     }
   ]
