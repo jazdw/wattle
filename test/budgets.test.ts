@@ -74,6 +74,7 @@ async function measure(deps: Deps, outside: () => number, operation: () => Promi
     dbCalls: after.calls - before.calls,
     statements: after.statements - before.statements,
     rowsWritten: after.rowsWritten - before.rowsWritten,
+    d1RowsWritten: after.d1RowsWritten - before.d1RowsWritten,
     outside: outside() - requestsBefore,
   };
 }
@@ -126,6 +127,10 @@ describe('work budgets (2 accounts, 30 positions, 500 transactions, 2 years)', (
     // 100,000 rows written a day, indexes counting too), and one Tiingo
     // history request per ticker.
     expect(total(jobs, 'rowsWritten')).toBeLessThanOrEqual(60_000); // 46,318
+    // As D1 counts it, index entries included: over the Free plan's daily
+    // 100,000 for one login like this.
+    expect(total(jobs, 'd1RowsWritten')).toBeLessThanOrEqual(130_000); // 116,806
+    expect(largest(jobs, 'd1RowsWritten')).toBeLessThanOrEqual(4_000); // 3,247
     expect(total(jobs, 'outside')).toBeLessThanOrEqual(45); // 37
     expect(jobs.length).toBeLessThanOrEqual(70); // 57
   });
