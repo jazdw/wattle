@@ -1,4 +1,4 @@
-import { screen, within } from '@testing-library/react';
+import { fireEvent, screen, within } from '@testing-library/react';
 import { http, HttpResponse } from 'msw';
 import { describe, expect, it, vi } from 'vitest';
 import App from './App';
@@ -51,6 +51,25 @@ describe('App shell', () => {
     await user.click(within(await screen.findByRole('banner')).getByRole('button', { name: 'Sign out' }));
     await vi.waitFor(() => expect(assign).toHaveBeenCalledWith('/login'));
     expect(sent('POST /api/auth/logout')).toHaveLength(1);
+  });
+
+  it('closes the phone menu when it is swiped left far enough, not on a short or vertical drag', async () => {
+    const { user } = renderPage(<App />, { route: '/' });
+    await screen.findByRole('heading', { name: 'Net worth' });
+    const swipe = (panel: HTMLElement, dx: number, dy = 0) => {
+      const at = (x: number, y: number) => ({ touches: [{ clientX: x, clientY: y }], changedTouches: [{ clientX: x, clientY: y }] });
+      fireEvent.touchStart(panel, at(200, 300));
+      fireEvent.touchMove(panel, at(200 + dx / 2, 300 + dy / 2));
+      fireEvent.touchMove(panel, at(200 + dx, 300 + dy));
+      fireEvent.touchEnd(panel, { touches: [], changedTouches: [{ clientX: 200 + dx, clientY: 300 + dy }] });
+    };
+    await user.click(screen.getByRole('button', { name: 'Menu' }));
+    const panel = await screen.findByRole('dialog', { name: 'Menu' });
+    swipe(panel, -20); // a nudge springs back
+    swipe(panel, -40, 200); // scrolling the menu
+    expect(screen.getByRole('dialog', { name: 'Menu' })).toBeInTheDocument();
+    swipe(panel, -150);
+    await vi.waitFor(() => expect(screen.queryByRole('dialog', { name: 'Menu' })).toBeNull());
   });
 
   it('redirects unknown paths home', async () => {
