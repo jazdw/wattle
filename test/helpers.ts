@@ -26,12 +26,22 @@ function checkParams(statement: unknown): void {
 /**
  * Database work, as D1 would count it: each execute or batch is one call (a
  * request to D1 from the Worker), each statement in it a query, and rows
- * changed by inserts, updates and deletes are rows written (before indexes).
+ * changed by inserts, updates and deletes are rows written. D1 also counts a
+ * row written for each index entry a write changes (`d1RowsWritten`: each
+ * changed row times one plus the table's indexes, an upper bound for updates
+ * that leave indexed columns alone). Composite primary keys are an index too.
  */
 export interface DbStats {
   calls: number;
   statements: number;
   rowsWritten: number;
+  d1RowsWritten: number;
+}
+
+const WRITE_TARGET = /^\s*(?:insert(?:\s+or\s+\w+)?\s+into|update|delete\s+from)\s+["`]?(\w+)/i;
+
+function sqlOf(statement: unknown): string {
+  return typeof statement === 'string' ? statement : ((statement as { sql?: string })?.sql ?? '');
 }
 
 const dbStatsByDeps = new WeakMap<Deps, DbStats>();
@@ -45,13 +55,20 @@ export async function createTestDeps(overrides: Partial<Deps> = {}): Promise<Dep
   const client = createClient({ url: ':memory:' });
   const execute = client.execute.bind(client);
   const batch = client.batch.bind(client);
-  const stats: DbStats = { calls: 0, statements: 0, rowsWritten: 0 };
+  const stats: DbStats = { calls: 0, statements: 0, rowsWritten: 0, d1RowsWritten: 0 };
+  // Indexes per table (filled after migrating).
+  const indexes = new Map<string, number>();
+  const count = (statement: unknown, rows: number) => {
+    stats.rowsWritten += rows;
+    const table = WRITE_TARGET.exec(sqlOf(statement))?.[1];
+    stats.d1RowsWritten += rows * (1 + (table ? (indexes.get(table) ?? 0) : 0));
+  };
   client.execute = (async (statement: Parameters<typeof execute>[0]) => {
     checkParams(statement);
     const result = await execute(statement);
     stats.calls += 1;
     stats.statements += 1;
-    stats.rowsWritten += result.rowsAffected;
+    count(statement, result.rowsAffected);
     return result;
   }) as typeof client.execute;
   client.batch = (async (statements: Parameters<typeof batch>[0], mode?: Parameters<typeof batch>[1]) => {
@@ -59,12 +76,15 @@ export async function createTestDeps(overrides: Partial<Deps> = {}): Promise<Dep
     const results = await batch(statements, mode);
     stats.calls += 1;
     stats.statements += statements.length;
-    for (const result of results) stats.rowsWritten += result.rowsAffected;
+    results.forEach((result, index) => count(statements[index], result.rowsAffected));
     return results;
   }) as typeof client.batch;
   const db = drizzle(client, { schema });
   await migrate(db, { migrationsFolder: 'migrations' });
-  Object.assign(stats, { calls: 0, statements: 0, rowsWritten: 0 });
+  for (const row of (await execute("select tbl_name, count(*) as n from sqlite_master where type = 'index' group by tbl_name")).rows) {
+    indexes.set(String(row.tbl_name), Number(row.n));
+  }
+  Object.assign(stats, { calls: 0, statements: 0, rowsWritten: 0, d1RowsWritten: 0 });
   const wakes: { ids: string[]; delaySeconds?: number }[] = [];
   const deps: Deps = {
     db: db as unknown as Db,
