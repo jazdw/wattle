@@ -60,7 +60,7 @@ export interface ConnectionSummary {
 /** One change a sync made to stored data (balances in minor units, holdings in units). */
 export type SyncChange =
   | { kind: 'balance'; accountId: string; account: string; before: number | null; after: number | null; currency: string }
-  | { kind: 'account_added' | 'account_missing'; accountId: string; account: string }
+  | { kind: 'account_added' | 'account_missing' | 'account_returned'; accountId: string; account: string }
   | { kind: 'holding'; accountId: string; account: string; security: string; before: number | null; after: number | null };
 
 /** A logged sync, history load or balance-history collection (GET /api/connections/:id/activity). */
