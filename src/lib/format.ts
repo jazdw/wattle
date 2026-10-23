@@ -24,6 +24,13 @@ export function dateTime(epochMs: number): string {
   return new Date(epochMs).toLocaleString(undefined, { dateStyle: 'medium', timeStyle: 'short' });
 }
 
+/** A time later today or soon after: "at 6:02 PM" today, else "Fri 6:02 PM". */
+export function upcomingTime(epochMs: number): string {
+  const when = new Date(epochMs);
+  const time = when.toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' });
+  return when.toDateString() === new Date().toDateString() ? `at ${time}` : `${when.toLocaleDateString(undefined, { weekday: 'short' })} ${time}`;
+}
+
 export function relativeTime(epochMs: number | null): string {
   if (!epochMs) return 'never';
   const minutes = Math.round((Date.now() - epochMs) / 60_000);

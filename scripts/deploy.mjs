@@ -27,7 +27,7 @@ function run(command, args, env = {}) {
  * replaces all variables, so the Worker always has exactly these; secrets
  * (API keys) are set separately with `wrangler secret put` and never touched.
  */
-const SETTINGS = ['PLAID_ENV', 'PLAID_ALLOW_REMOVE', 'QUOTE_PROVIDER', 'QUOTE_CACHE_SECONDS', 'FX_PROVIDER', 'ACCESS_TEAM_DOMAIN', 'ACCESS_AUD', 'JOB_CHUNK_ROWS'];
+const SETTINGS = ['PLAID_ENV', 'PLAID_ALLOW_REMOVE', 'QUOTE_PROVIDER', 'QUOTE_CACHE_SECONDS', 'FX_PROVIDER', 'ACCESS_TEAM_DOMAIN', 'ACCESS_AUD', 'JOB_CHUNK_ROWS', 'D1_DAILY_WRITE_BUDGET'];
 const vars = SETTINGS.filter((name) => process.env[name]).flatMap((name) => ['--var', `${name}:${process.env[name]}`]);
 
 /** The background-jobs queue (wrangler.jsonc), created on the first deploy. */

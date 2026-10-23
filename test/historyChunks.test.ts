@@ -128,13 +128,13 @@ describe('history progress', () => {
       const [job] = await deps.db.select().from(schema.jobs).where(eq(schema.jobs.type, type as 'history_plan'));
       await runJob(deps, job.id);
     };
-    expect(await progress()).toEqual({ done: 0, total: 0 }); // queued, not planned yet
+    expect(await progress()).toEqual({ done: 0, total: 0, waitingUntil: null }); // queued, not planned yet
     await run('history_plan');
     const planned = await progress();
     expect(planned.done).toBe(0);
     expect(planned.total).toBeGreaterThan(10); // one price job, many blocks
     await run('history_prices');
-    expect(await progress()).toEqual({ done: 1, total: planned.total });
+    expect(await progress()).toEqual({ done: 1, total: planned.total, waitingUntil: null });
     await flush(deps);
     expect(await progress()).toBeNull();
     // Another household sees none of it.

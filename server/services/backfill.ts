@@ -30,6 +30,7 @@ import { reconstructHistory } from './backfillCore';
 import { completeRunStatements, SyncRun, type SyncTrigger } from './activity';
 import { encryptToken, loadTokenKeys, tokenAad } from './crypto';
 import { enqueue, RetryLater, type JobContext, type JobSpec, type JobType } from './jobRunner';
+import { WAITING_FOR_TOMORROW } from './writeBudget';
 import { queueReportCollection } from './assetReports';
 import { closeLookup, ensureCloses, ensureFx } from './pricing';
 import { connectionLease, Lease } from './lease';
@@ -38,6 +39,13 @@ import { isCashSecurity, priceOn } from './valuation';
 
 /** A first load (or Reload history), a rebuild after a late transaction, or days the syncs missed. */
 export type HistoryMode = 'load' | 'rebuild' | 'missed';
+
+export interface HistoryProgress {
+  done: number;
+  total: number;
+  /** Waiting for the next day's database writes (the daily write budget) until then. */
+  waitingUntil: number | null;
+}
 
 interface PlanPayload {
   connectionId: string;
@@ -161,13 +169,19 @@ export async function queueHistory(
  * block jobs, how many have finished. A load whose plan hasn't run yet shows
  * as 0 of 0, so a page that asked for it sees it underway straight away.
  */
-export async function historyProgress(tenant: Tenant): Promise<Map<string, { done: number; total: number }>> {
+export async function historyProgress(tenant: Tenant): Promise<Map<string, HistoryProgress>> {
   const underway = await tenant.db
-    .selectDistinct({ type: jobs.type, groupId: jobs.groupId, connectionId: jobs.connectionId })
+    .selectDistinct({ type: jobs.type, groupId: jobs.groupId, connectionId: jobs.connectionId, runAfter: jobs.runAfter, errorMessage: jobs.errorMessage })
     .from(jobs)
     .where(tenant.scope(jobs, inArray(jobs.type, ['history_plan', 'history_prices', 'history_block']), inArray(jobs.status, ['waiting', 'queued', 'running'])));
-  const progress = new Map<string, { done: number; total: number }>();
-  for (const row of underway) if (row.type === 'history_plan' && row.connectionId) progress.set(row.connectionId, { done: 0, total: 0 });
+  const progress = new Map<string, HistoryProgress>();
+  // Waiting for tomorrow at the day's write budget (services/writeBudget.ts): until when.
+  const paused = new Map<string, number>();
+  for (const row of underway) {
+    if (row.connectionId && row.errorMessage?.startsWith(WAITING_FOR_TOMORROW)) paused.set(row.connectionId, Math.max(paused.get(row.connectionId) ?? 0, row.runAfter));
+  }
+  const withPause = (connectionId: string, entry: { done: number; total: number }): HistoryProgress => ({ ...entry, waitingUntil: paused.get(connectionId) ?? null });
+  for (const row of underway) if (row.type === 'history_plan' && row.connectionId) progress.set(row.connectionId, withPause(row.connectionId, { done: 0, total: 0 }));
   // A load's price and block groups share its run id: history:<run>:prices / :blocks.
   const runs = new Set(underway.flatMap((row) => (row.type !== 'history_plan' && row.groupId ? [row.groupId.split(':').slice(0, 2).join(':')] : [])));
   if (runs.size === 0) return progress;
@@ -177,7 +191,7 @@ export async function historyProgress(tenant: Tenant): Promise<Map<string, { don
     .where(tenant.scope(jobs, inArray(jobs.type, ['history_prices', 'history_block']), inArray(jobs.groupId, [...runs].flatMap((run) => [`${run}:prices`, `${run}:blocks`]))));
   for (const part of parts) {
     if (!part.connectionId) continue;
-    const entry = progress.get(part.connectionId) ?? { done: 0, total: 0 };
+    const entry = progress.get(part.connectionId) ?? withPause(part.connectionId, { done: 0, total: 0 });
     entry.total += 1;
     if (part.status === 'done' || part.status === 'failed') entry.done += 1;
     progress.set(part.connectionId, entry);

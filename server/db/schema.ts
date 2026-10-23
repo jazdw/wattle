@@ -643,3 +643,13 @@ export const jobs = sqliteTable(
     index('jobs_household_started').on(table.householdId, table.startedAt),
   ],
 );
+
+/**
+ * Rows written each day (UTC, as D1 counts them), added up by each job and
+ * request that wrote any: what the daily write budget is checked against
+ * (D1 Free stops all writes for the rest of the day at 100,000).
+ */
+export const dbUsage = sqliteTable('db_usage', {
+  day: text('day').primaryKey(),
+  rowsWritten: integer('rows_written').notNull(),
+});
