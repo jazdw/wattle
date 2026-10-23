@@ -31,7 +31,7 @@ const REVIEWED: Record<string, Record<string, string>> = {
   },
   'server/routes/accounts.ts': {
     connections: 'accounts chosen: clears only the new-accounts notice, and only one from before the request (single conditional update; nothing else writes it but the webhook)',
-    accounts: 'create: atomic; rename/owner/category: single update; hide: connection + snapshot leases; delete: account lease',
+    accounts: 'create: atomic; rename/owner/category: single update; hide: connection + snapshot leases; delete: account lease (manual) or connection + snapshot leases, re-checked as no longer reported (linked)',
     accountDaily: 'hide/purge: connection + snapshot leases',
     holdingDaily: 'hide/purge: connection + snapshot leases',
     holdings: 'manual holdings: account lease + version, atomic',

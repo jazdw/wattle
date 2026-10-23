@@ -293,9 +293,15 @@ export function EditAccountDialog({
           </div>
         )}
 
+        {account.source !== 'manual' && account.missingSince && (
+          <p className="text-xs text-muted-foreground">
+            {account.institutionName ?? 'The institution'} no longer reports this account (closed, or deselected in Plaid). Delete removes it and its stored history; if you choose it
+            again later it comes back as a new account.
+          </p>
+        )}
         {(save.error || remove.error) && <Alert variant="error">{(save.error ?? remove.error)!.message}</Alert>}
         <div className="flex flex-wrap justify-between gap-2">
-          {account.source === 'manual' ? (
+          {account.source === 'manual' || account.missingSince ? (
             confirmDelete ? (
               <Button variant="destructive" onClick={() => remove.mutate()} disabled={remove.isPending}>
                 Delete account and history
