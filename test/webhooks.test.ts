@@ -2,7 +2,7 @@ import { desc, sql } from 'drizzle-orm';
 import { describe, expect, it } from 'vitest';
 import * as schema from '../server/db/schema';
 import { account, fakePlaid, holding, security, signWebhook } from './fakes';
-import { client, createHousehold, createTestDeps, flush } from './helpers';
+import { client, createHousehold, createTestDeps, flush, settle } from './helpers';
 
 async function setup(kind: 'investments' | 'account' = 'investments') {
   const plaid = fakePlaid({
@@ -129,6 +129,56 @@ describe('Plaid webhooks', () => {
     const again = await api(`/api/connections/${before.id}/accounts-chosen`, { method: 'POST' });
     expect(again.body).toMatchObject({ added: 1, historyQueued: false });
     expect((await api('/api/portfolio')).body.netWorth).toBe(3000_00);
+  });
+
+  it('Choose accounts: a new bank account waits for the person before a bank report; investment history loads either way', async () => {
+    const { deps, plaid, api, send, connection } = await setup('account');
+    await send({ webhook_type: 'ASSETS', webhook_code: 'PRODUCT_READY', asset_report_id: 'ar-1' }); // the first load's report
+    expect((await connection()).assetReportTokenEnc).toBeNull();
+    await deps.db.update(schema.connections).set({ hasInvestments: true }); // a bank login with investment accounts too
+    const [login] = (await api('/api/connections')).body.connections;
+    expect(login.hasBalanceHistory).toBe(true);
+    const reports = () => plaid.state.calls.filter((call) => call === 'asset_report:create').length;
+    const before = reports();
+    const daily = async (externalId: string) => {
+      const [row] = (await deps.db.select().from(schema.accounts)).filter((candidate) => candidate.externalId === externalId);
+      return (await deps.db.select().from(schema.accountDaily)).filter((day) => day.accountId === row.id && day.source === 'backfill');
+    };
+
+    // An IRA and a card chosen in Link.
+    plaid.state.accounts = [account('brk', 'investment', 1000), account('ira', 'investment', 2000), account('card', 'credit', 300)];
+    plaid.state.holdings = [holding('brk', 's-vti', 10, 100), holding('ira', 's-vti', 20, 100)];
+    plaid.state.historicalBalances = { card: [{ date: '2026-10-01', current: 250 }] };
+    const chosen = await api(`/api/connections/${login.id}/accounts-chosen`, { method: 'POST' });
+    expect(chosen.body).toMatchObject({ added: 2, historyQueued: false });
+    const asked = chosen.body.newAccounts as { id: string; name: string; bank: boolean }[];
+    expect(asked.map(({ name, bank }) => ({ name, bank })).sort((a, b) => a.name.localeCompare(b.name))).toEqual([
+      { name: 'card', bank: true },
+      { name: 'ira', bank: false },
+    ]);
+    await flush(deps);
+    expect(reports()).toBe(before); // nothing asked of Plaid until the person answers
+
+    // Not now: the IRA's history, no report.
+    const ira = asked.find((entry) => !entry.bank)!;
+    expect((await api(`/api/connections/${login.id}/new-accounts-history`, { method: 'POST', json: { accountIds: [ira.id], bankReport: false } })).body.queued).toBe(true);
+    await flush(deps);
+    expect(reports()).toBe(before);
+    expect((await daily('ira')).length).toBeGreaterThan(0);
+    expect(await daily('card')).toEqual([]);
+    const notes = (await deps.db.select().from(schema.syncRuns)).map((run) => run.note);
+    expect(notes).toContain('History for newly added accounts, without a bank report.');
+
+    // Load history: one report, the card's days filled.
+    const card = asked.find((entry) => entry.bank)!;
+    expect((await api(`/api/connections/${login.id}/new-accounts-history`, { method: 'POST', json: { accountIds: [card.id], bankReport: true } })).body.queued).toBe(true);
+    await flush(deps);
+    expect(reports()).toBe(before + 1);
+    await settle(deps); // its first check, a minute on
+    expect((await daily('card')).length).toBeGreaterThan(0);
+
+    // Only this login's accounts.
+    expect((await api(`/api/connections/${login.id}/new-accounts-history`, { method: 'POST', json: { accountIds: ['elsewhere'], bankReport: true } })).status).toBe(404);
   });
 
   it('ignores unknown items and events', async () => {

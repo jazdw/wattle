@@ -25,6 +25,12 @@ export const linkTokenSchema = z
   })
   .refine((body) => !body.chooseAccounts || body.connectionId, { message: 'Choosing accounts needs a connection.' });
 
+/** After Choose accounts: load history for the accounts it added, with or without a bank report. */
+export const newAccountsHistorySchema = z.object({
+  accountIds: z.array(z.string()).min(1).max(100),
+  bankReport: z.boolean(),
+});
+
 export const exchangeSchema = z.object({
   publicToken: z.string().min(1),
   kind: z.enum(['account', 'investments']),
