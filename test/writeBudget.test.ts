@@ -10,6 +10,9 @@ import { brokerage, marketData } from './brokerage';
 import type { Deps } from '../server/ports';
 import { client, createHousehold, createTestDeps, dbStats, flush, settle, TODAY } from './helpers';
 
+/** Linking the realistic login and running its whole load takes a few seconds on a slow CI runner. */
+const SLOW = 30_000;
+
 /** The realistic brokerage login linked, its rows written counted as D1 would (index entries included). */
 async function linked(budget: number, run: (deps: Deps) => Promise<void> = (deps) => settle(deps, 20)) {
   const plaid = brokerage();
@@ -54,7 +57,7 @@ describe('daily write budget', () => {
     for (const day of days) expect(day.rowsWritten).toBeLessThanOrEqual(40_000 + 4_000);
     // Without a budget, nothing waited.
     expect(unlimited.deps.now().getTime()).toBe(unlimited.start);
-  });
+  }, SLOW);
 
   it('meanwhile, the waiting jobs say why and are due just after midnight UTC', async () => {
     const { deps, api } = await linked(40_000, flush);
@@ -69,7 +72,7 @@ describe('daily write budget', () => {
     const [login] = (await api('/api/connections')).body.connections;
     expect(login.historyProgress).toMatchObject({ waitingUntil: Date.parse('2026-10-10T00:02:00Z') });
     expect(login.historyProgress.done).toBeLessThan(login.historyProgress.total);
-  });
+  }, SLOW);
 
   it("waits for midnight UTC when D1 says its daily limit is reached, without using an attempt", async () => {
     const deps = await createTestDeps();
