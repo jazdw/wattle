@@ -17,7 +17,7 @@ describe('Accounts page', () => {
         HttpResponse.json({
           ...CONNECTIONS,
           connections: CONNECTIONS.connections.map((connection) =>
-            connection.id === 'c-chase' ? { ...connection, backfillStatus: 'running', historyProgress: { done: 3, total: 10 } } : connection,
+            connection.id === 'c-chase' ? { ...connection, backfillStatus: 'running', historyProgress: { done: 3, total: 10, waitingUntil: null } } : connection,
           ),
         }),
       ),
@@ -25,6 +25,23 @@ describe('Accounts page', () => {
     renderPage(<Accounts />);
     expect(await screen.findByText('Loading history… 3 of 10')).toBeInTheDocument();
     expect(card('Chase')).toContainElement(screen.getByText('Loading history… 3 of 10'));
+  });
+
+  it('says when a history load waiting for the next day of database writes continues', async () => {
+    const at = new Date();
+    at.setHours(18, 2, 0, 0);
+    server.use(
+      http.get('*/api/connections', () =>
+        HttpResponse.json({
+          ...CONNECTIONS,
+          connections: CONNECTIONS.connections.map((connection) =>
+            connection.id === 'c-chase' ? { ...connection, backfillStatus: 'running', historyProgress: { done: 12, total: 48, waitingUntil: at.getTime() } } : connection,
+          ),
+        }),
+      ),
+    );
+    renderPage(<Accounts />);
+    expect(await screen.findByText(/^Loading history… 12 of 48 · continues at 6:02\sPM$/)).toBeInTheDocument();
   });
 
   it('offers Reload history only for a login whose history failed', async () => {

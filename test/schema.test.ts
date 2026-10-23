@@ -15,7 +15,7 @@ describe('schema', () => {
   });
 
   it('scopes every household data table by household_id', () => {
-    const global = new Set(['households', 'users', 'sessions', 'allowed_emails', 'prices_daily', 'fx_daily', 'kv_cache', 'household_members', 'price_runs', 'job_runs']);
+    const global = new Set(['households', 'users', 'sessions', 'allowed_emails', 'prices_daily', 'fx_daily', 'kv_cache', 'household_members', 'price_runs', 'job_runs', 'db_usage']);
     for (const table of tables) {
       const { name, columns } = getTableConfig(table);
       if (global.has(name)) continue;

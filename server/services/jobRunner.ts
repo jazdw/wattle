@@ -32,6 +32,7 @@ import { describeError } from '../lib/errors';
 import type { Deps } from '../ports';
 import { INTERRUPTED, INTERRUPTED_MESSAGE } from './activity';
 import { LEASE_MS, LeaseLostError } from './lease';
+import { checkWriteBudget, isDailyLimitError, recordWrites, secondsUntilReset } from './writeBudget';
 
 export type JobType = (typeof JOB_TYPES)[number];
 export type JobRow = typeof jobs.$inferSelect;
@@ -153,6 +154,16 @@ async function wakeQueued(deps: Deps, rows: { id: string; runAfter: number }[]):
 
 /** Run one job by id with these handlers. Never throws for the job's own failure. */
 export async function runJobWith(deps: Deps, id: string, handlers: JobHandlers, onFailed: FailureHandlers = {}): Promise<JobOutcome> {
+  const meter = deps.writes?.rowsWritten() ?? 0;
+  try {
+    return await runJobOnce(deps, id, handlers, onFailed);
+  } finally {
+    // Its rows written go towards the day's write budget.
+    await recordWrites(deps, meter).catch((error) => console.error('Recording rows written failed', describeError(error)));
+  }
+}
+
+async function runJobOnce(deps: Deps, id: string, handlers: JobHandlers, onFailed: FailureHandlers): Promise<JobOutcome> {
   const now = deps.now().getTime();
   const token = crypto.randomUUID();
   const claim = (condition: ReturnType<typeof and>) =>
@@ -209,12 +220,26 @@ export async function runJobWith(deps: Deps, id: string, handlers: JobHandlers, 
   const heartbeat = setInterval(() => void context.renew().catch(() => {}), HEARTBEAT_MS);
   (heartbeat as { unref?: () => void }).unref?.();
   try {
-    const result = await handlers[job.type](context).finally(() => clearInterval(heartbeat));
+    const result = await (async () => {
+      // Heavy work waits for tomorrow once the day's writes near the budget.
+      await checkWriteBudget(deps, job.type);
+      return handlers[job.type](context);
+    })().finally(() => clearInterval(heartbeat));
     await finish(deps, job, mine, { status: 'done', result: result ?? null, errorCode: null, errorMessage: null });
   } catch (error) {
     if (error instanceof JobLostError) return { claimed: true };
-    // Asked to wait, or another run took the connection's lease mid-way: not a failed attempt.
-    const later = error instanceof RetryLater ? error : error instanceof LeaseLostError ? new RetryLater(30, error.message) : null;
+    // Asked to wait, another run took the connection's lease mid-way, or D1's
+    // daily limit was reached (writes work again after midnight UTC): not a
+    // failed attempt. (While D1 refuses writes this can't be recorded either;
+    // the job's lock then runs out and it's picked up again.)
+    const later =
+      error instanceof RetryLater
+        ? error
+        : error instanceof LeaseLostError
+          ? new RetryLater(30, error.message)
+          : isDailyLimitError(error)
+            ? new RetryLater(secondsUntilReset(deps), "D1's daily limit was reached; trying again after it resets (midnight UTC).")
+            : null;
     if (later) {
       const runAfter = deps.now().getTime() + later.seconds * 1000;
       await deps.db

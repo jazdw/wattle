@@ -55,6 +55,7 @@ const REVIEWED: Record<string, Record<string, string>> = {
     snapshotRuns: 'log rows: written running under the snapshot lease (closing any left running, atomically), completed by id',
   },
   'server/services/lease.ts': { leases: 'the lease itself: conditional upserts and holder-checked updates' },
+  'server/services/writeBudget.ts': { dbUsage: "the day's rows written: one upsert adding to the total, safe from any number of invocations at once" },
   'server/services/securityTypes.ts': {
     securities: 'nightly: fills type (and a ticker-only name) of hand-entered securities only where still unset; one batch',
   },

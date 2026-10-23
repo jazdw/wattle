@@ -88,7 +88,7 @@ export async function createTestDeps(overrides: Partial<Deps> = {}): Promise<Dep
   const wakes: { ids: string[]; delaySeconds?: number }[] = [];
   const deps: Deps = {
     db: db as unknown as Db,
-    config: { devLoginEmails: [], quoteCacheSeconds: 300, tokenEncKey: TEST_KEY, plaidAllowRemove: false, jobChunkRows: 1_000 },
+    config: { devLoginEmails: [], quoteCacheSeconds: 300, tokenEncKey: TEST_KEY, plaidAllowRemove: false, jobChunkRows: 1_000, dailyWriteBudget: 80_000 },
     plaid: null,
     prices: null,
     quotes: null,

@@ -34,6 +34,13 @@ export interface Config {
    * raise it on Workers Paid for fewer, larger jobs.
    */
   jobChunkRows: number;
+  /**
+   * D1_DAILY_WRITE_BUDGET: rows written a day (UTC, as D1 counts them, index
+   * entries included) after which history and bank-report jobs wait for the
+   * next day (default 80,000: D1 Free allows 100,000, the rest left for
+   * syncs, snapshots and requests). 0 turns it off (Workers Paid).
+   */
+  dailyWriteBudget: number;
   /** When set, /api requests must carry a valid Cloudflare Access token for this team and application. */
   access?: { teamDomain: string; audience: string };
 }
@@ -108,4 +115,10 @@ export interface Deps {
   jobQueue: JobQueue;
   /** Wait (e.g. for a lease); tests make it instant. */
   sleep: (ms: number) => Promise<void>;
+  /** Rows written so far by this invocation, as the database counts them (D1 only; see adapters/d1Meter.ts). */
+  writes?: WriteMeter;
+}
+
+export interface WriteMeter {
+  rowsWritten(): number;
 }
