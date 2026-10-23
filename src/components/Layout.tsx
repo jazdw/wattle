@@ -1,6 +1,6 @@
 import { ChartPie, Grid3x3, Landmark, LayoutDashboard, LineChart, List, LogOut, Menu, Settings, X } from 'lucide-react';
 import { Dialog as DialogPrimitive } from 'radix-ui';
-import { Suspense, useState } from 'react';
+import { Suspense, useRef, useState, type TouchEvent } from 'react';
 import { NavLink, Outlet } from 'react-router-dom';
 import { useConnections } from '../hooks/queries';
 import { StatusBanner } from './StatusBanner';
@@ -112,9 +112,44 @@ function NavPanel({ onNavigate, sidebar }: { onNavigate?: () => void; sidebar?: 
   );
 }
 
+/**
+ * Swiping the phone menu left drags it with the finger; let go past a third
+ * of its width (or with a flick) and it closes, otherwise it springs back.
+ * A mostly vertical drag is left to scroll the menu.
+ */
+function useSwipeToClose(close: () => void) {
+  const start = useRef<{ x: number; y: number; at: number; horizontal: boolean | null } | null>(null);
+  const [offset, setOffset] = useState(0);
+  const onTouchStart = (event: TouchEvent<HTMLElement>) => {
+    const touch = event.touches[0];
+    start.current = { x: touch.clientX, y: touch.clientY, at: event.timeStamp, horizontal: null };
+  };
+  const onTouchMove = (event: TouchEvent<HTMLElement>) => {
+    const from = start.current;
+    if (!from) return;
+    const dx = event.touches[0].clientX - from.x;
+    const dy = event.touches[0].clientY - from.y;
+    // Decide once, after a few pixels, whether this is a swipe or a scroll.
+    if (from.horizontal === null && Math.abs(dx) + Math.abs(dy) > 8) from.horizontal = Math.abs(dx) > Math.abs(dy);
+    if (from.horizontal) setOffset(Math.min(0, dx));
+  };
+  const onTouchEnd = (event: TouchEvent<HTMLElement>) => {
+    const from = start.current;
+    start.current = null;
+    if (!from?.horizontal) return setOffset(0);
+    const width = event.currentTarget.offsetWidth || 256;
+    const flick = offset < -30 && offset / Math.max(event.timeStamp - from.at, 1) < -0.5;
+    if (offset < -width / 3 || flick) close();
+    setOffset(0);
+  };
+  const style = offset ? { transform: `translateX(${offset}px)`, transition: 'none' } : { transition: 'transform 150ms ease-out' };
+  return { style, onTouchStart, onTouchMove, onTouchEnd, onTouchCancel: onTouchEnd };
+}
+
 /** Below md: a top bar whose menu button slides the panel in from the left. */
 function PhoneBar() {
   const [open, setOpen] = useState(false);
+  const swipe = useSwipeToClose(() => setOpen(false));
   const connections = useConnections();
   const broken = connections.data?.connections.some((connection) => connection.status !== 'ok' && connection.status !== 'disconnected') ?? false;
 
@@ -127,7 +162,10 @@ function PhoneBar() {
         </DialogPrimitive.Trigger>
         <DialogPrimitive.Portal>
           <DialogPrimitive.Overlay className="fade-in fixed inset-0 z-50 bg-black/40 backdrop-blur-[1px]" />
-          <DialogPrimitive.Content className="drawer-in fixed inset-y-0 left-0 z-50 flex w-64 max-w-[85vw] flex-col gap-4 border-r bg-card px-3 py-4 shadow-lg">
+          <DialogPrimitive.Content
+            className="drawer-in fixed inset-y-0 left-0 z-50 flex w-64 max-w-[85vw] touch-pan-y flex-col gap-4 border-r bg-card px-3 py-4 shadow-lg"
+            {...swipe}
+          >
             <DialogPrimitive.Title className="sr-only">Menu</DialogPrimitive.Title>
             <DialogPrimitive.Description className="sr-only">Pages</DialogPrimitive.Description>
             <div className="flex items-center justify-between px-2">
