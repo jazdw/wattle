@@ -49,6 +49,16 @@ export interface PlaidCall {
   error?: string;
 }
 
+/** A data call's response, as received (scrubbed), for plaid_responses. */
+export interface PlaidResponse {
+  endpoint: string;
+  requestId: string | null;
+  body: unknown;
+}
+
+/** The data calls whose responses are kept (plaid_responses). */
+export const RECORDED_ENDPOINTS = new Set(['/accounts/get', '/investments/holdings/get', '/investments/transactions/get']);
+
 export type LinkKind = 'investments' | 'account';
 
 export interface LinkTokenOptions {
@@ -78,8 +88,8 @@ export interface InvestmentsTransactionsPage {
 
 export interface PlaidApi {
   readonly env: PlaidEnvironment;
-  /** The same client, also appending every call it makes to `log`. */
-  scoped(log: PlaidCall[]): PlaidApi;
+  /** The same client, also appending every call it makes to `log`, and the data calls' responses to `received`. */
+  scoped(log: PlaidCall[], received?: PlaidResponse[]): PlaidApi;
   createLinkToken(options: LinkTokenOptions): Promise<string>;
   exchangePublicToken(publicToken: string): Promise<{ accessToken: string; itemId: string }>;
   getItem(accessToken: string): Promise<Item>;
@@ -164,7 +174,7 @@ export function itemProducts(item: Pick<Item, 'products' | 'billed_products'>): 
   return { investments: all.has('investments'), assets: all.has('assets') };
 }
 
-export function createPlaidClient(config: PlaidConfig, log?: PlaidCall[]): PlaidApi {
+export function createPlaidClient(config: PlaidConfig, log?: PlaidCall[], received?: PlaidResponse[]): PlaidApi {
   const baseUrl = `https://${config.env}.plaid.com`;
 
   async function call<T>(path: string, body: Record<string, unknown>): Promise<T> {
@@ -188,12 +198,14 @@ export function createPlaidClient(config: PlaidConfig, log?: PlaidCall[]): Plaid
       );
     }
     log?.push({ endpoint: path, requestId });
-    return scrubPlaidResponse(json) as T;
+    const scrubbed = scrubPlaidResponse(json);
+    if (RECORDED_ENDPOINTS.has(path)) received?.push({ endpoint: path, requestId, body: scrubbed });
+    return scrubbed as T;
   }
 
   return {
     env: config.env,
-    scoped: (callLog) => createPlaidClient(config, callLog),
+    scoped: (callLog, responses) => createPlaidClient(config, callLog, responses),
 
     async createLinkToken(options) {
       const body: Record<string, unknown> = {

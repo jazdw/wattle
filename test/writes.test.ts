@@ -63,6 +63,7 @@ const REVIEWED: Record<string, Record<string, string>> = {
     priceRuns: 'pruning old entries',
     jobRuns: 'pruning old entries',
     snapshotRuns: 'pruning old entries',
+    plaidResponses: "inserts with fresh ids, in the batch of the sync they belong to (under the connection lease); pruning old entries",
   },
   'server/services/pricing.ts': {
     pricesDaily: 'public data; atomic with its price_runs row; last write wins with provider data',

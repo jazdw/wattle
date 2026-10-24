@@ -49,6 +49,31 @@ export function lastTradingDay(date: IsoDate): IsoDate {
   }
 }
 
+/**
+ * The trading day of the latest close at `at` (epoch ms): the last weekday
+ * whose 4pm New York close has passed. What data fetched then describes.
+ */
+export function lastClosedTradingDay(at: number): IsoDate {
+  let day = lastTradingDay(marketDate(new Date(at)));
+  while (marketCloseAt(day) > at) day = lastTradingDay(addDays(day, -1));
+  return day;
+}
+
+/** 6.5 hours: 9:30am to 4pm. */
+const SESSION_MS = 390 * 60 * 1000;
+
+/**
+ * The trading day whose close a price current at `at` (epoch ms) is: from
+ * that day's 4pm New York close until the next weekday's 9:30am open. Null
+ * during trading hours, when a price is intraday.
+ */
+export function closeDayOf(at: number): IsoDate | null {
+  const day = lastClosedTradingDay(at);
+  let next = addDays(day, 1);
+  while (lastTradingDay(next) !== next) next = addDays(next, 1);
+  return at < marketCloseAt(next) - SESSION_MS ? day : null;
+}
+
 /** New York calendar date and minutes past midnight for an instant. */
 export function newYorkClock(instant: Date): { date: IsoDate; minutes: number } {
   const parts = new Intl.DateTimeFormat('en-CA', {

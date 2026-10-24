@@ -239,6 +239,9 @@ export const securities = sqliteTable(
     /** Latest known unit price (e.g. Plaid institution_price) for non-public securities. */
     lastPrice: real('last_price'),
     lastPriceDate: text('last_price_date'),
+    /** Plaid's own market close (close_price) and the trading day it's for (close_price_as_of); only when Plaid dates it. */
+    plaidClose: real('plaid_close'),
+    plaidCloseDate: text('plaid_close_date'),
     createdAt: integer('created_at').notNull(),
   },
   (table) => [
@@ -264,6 +267,13 @@ export const holdings = sqliteTable(
     quantity: real('quantity').notNull(),
     price: real('price'),
     priceAsOf: text('price_as_of'),
+    /**
+     * When `price` was current (epoch ms): Plaid's institution_price_datetime,
+     * parsed, when the institution sends a real time (a midnight placeholder
+     * counts as none). Plaid's institution_price_as_of (`price_as_of`) can't be
+     * trusted for this: Vanguard's funds arrive dated a day early.
+     */
+    priceAt: integer('price_at'),
     /** Minor units, in `currency`. */
     value: integer('value').notNull(),
     costBasis: integer('cost_basis'),
@@ -420,6 +430,32 @@ export const fxDaily = sqliteTable(
 /* ------------------------------------------------------------------ */
 /* Activity logs                                                       */
 /* ------------------------------------------------------------------ */
+
+/**
+ * Plaid's responses to a sync's data calls (/accounts/get,
+ * /investments/holdings/get, each /investments/transactions/get page), as
+ * received less the fields scrubPlaidResponse drops: what Plaid actually
+ * said, for checking a value later. Household data, kept 30 days.
+ */
+export const plaidResponses = sqliteTable(
+  'plaid_responses',
+  {
+    id: text('id').primaryKey(),
+    householdId: text('household_id')
+      .notNull()
+      .references(() => households.id, { onDelete: 'cascade' }),
+    connectionId: text('connection_id')
+      .notNull()
+      .references(() => connections.id, { onDelete: 'cascade' }),
+    /** The sync_runs row whose calls these were. */
+    runId: text('run_id').notNull(),
+    endpoint: text('endpoint').notNull(),
+    requestId: text('request_id'),
+    receivedAt: integer('received_at').notNull(),
+    body: text('body').notNull(),
+  },
+  (table) => [index('plaid_responses_connection').on(table.householdId, table.connectionId, table.receivedAt), index('plaid_responses_received').on(table.receivedAt)],
+);
 
 export const SYNC_ACTIONS = ['sync', 'history', 'balance_history', 'relink', 'disconnect', 'account'] as const;
 export const SYNC_TRIGGERS = ['link', 'webhook', 'nightly', 'manual', 'refresh'] as const;

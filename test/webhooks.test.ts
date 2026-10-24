@@ -260,7 +260,7 @@ describe('Plaid webhooks', () => {
     expect(await deps.db.select().from(schema.holdings)).toEqual(before);
   });
 
-  it('the nightly sync fetches investment data unless a webhook already did since the market closed', async () => {
+  it('the nightly sync always fetches holdings, and transactions unless a webhook already did since the market closed', async () => {
     const { deps, plaid, send } = await setup();
     const at = (iso: string) => {
       deps.now = () => new Date(iso);
@@ -270,19 +270,20 @@ describe('Plaid webhooks', () => {
       await operation();
       return plaid.state.calls.slice(before).filter((call) => call === 'holdings' || call === 'transactions');
     };
-    // Linked (and synced) the evening of the 8th; next morning, Plaid says holdings changed.
+    // Linked (and synced) the evening of the 8th; next morning, Plaid says transactions changed.
     at('2026-10-09T14:00:00Z'); // 10am New York
-    expect(await fetched(() => send({ webhook_type: 'HOLDINGS', webhook_code: 'DEFAULT_UPDATE', item_id: 'item-1' }))).toEqual(['holdings']);
-    // That night: both fetched before today's close (4pm), so both again (a trade since would be missed otherwise).
+    expect(await fetched(() => send({ webhook_type: 'INVESTMENTS_TRANSACTIONS', webhook_code: 'DEFAULT_UPDATE', item_id: 'item-1' }))).toEqual(['transactions']);
+    // That night: fetched before today's close (4pm), so again (a trade since would be missed otherwise).
     at('2026-10-10T02:00:00Z');
     expect(await fetched(() => nightly(deps))).toEqual(['holdings', 'transactions']);
-    // The 10th: Plaid's holdings update arrives after the close; that night only transactions are fetched.
+    // The 10th: Plaid's transactions update arrives after the close; that night only holdings
+    // are fetched (always: the institution's latest prices).
     at('2026-10-10T21:30:00Z'); // 5:30pm New York
-    expect(await fetched(() => send({ webhook_type: 'HOLDINGS', webhook_code: 'DEFAULT_UPDATE', item_id: 'item-1' }))).toEqual(['holdings']);
+    expect(await fetched(() => send({ webhook_type: 'INVESTMENTS_TRANSACTIONS', webhook_code: 'DEFAULT_UPDATE', item_id: 'item-1' }))).toEqual(['transactions']);
     at('2026-10-11T02:00:00Z');
-    expect(await fetched(() => nightly(deps))).toEqual(['transactions']);
+    expect(await fetched(() => nightly(deps))).toEqual(['holdings']);
     const notes = (await deps.db.select().from(schema.syncRuns)).map((run) => run.note);
-    expect(notes).toContain("Holdings already fetched since the market closed (Plaid's update); not fetched again.");
+    expect(notes).toContain("Transactions already fetched since the market closed (Plaid's update); not fetched again.");
   });
 
   it('ignores unknown items and events', async () => {

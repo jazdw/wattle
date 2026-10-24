@@ -15,18 +15,33 @@
  *
  * Each snapshot is logged in snapshot_runs, written 'running' as it starts;
  * the next snapshot to take the lease marks one left running as interrupted.
+ *
+ * Public holdings are valued at a close dated for the day (the last trading
+ * day's, on a weekend): Tiingo's, Plaid's own close_price (dated by
+ * close_price_as_of), or the institution's price when its time
+ * (institution_price_datetime) falls between that close and the next open.
+ * A price is never assigned to a day by when it was fetched. Until a day's
+ * dated close exists (mutual fund NAVs often reach Tiingo the next morning)
+ * the holding carries its last dated close and is provisional
+ * (holding_daily.estimated); each snapshot reprices the past week's
+ * provisional rows once a dated close for their day exists, correcting
+ * their accounts' balances by the difference. A final row isn't rewritten.
  */
-import { eq, inArray, sql } from 'drizzle-orm';
-import { marketDate, type IsoDate } from '../../shared/dates';
+import { and, eq, gte, inArray, lt, sql } from 'drizzle-orm';
+import { addDays, closeDayOf, lastTradingDay, marketDate, type IsoDate } from '../../shared/dates';
 import { chunkRows, runAtomic } from '../db/batch';
 import { accountDaily, accounts, holdingDaily, holdings, securities, snapshotRuns } from '../db/schema';
 import { describeError } from '../lib/errors';
 import { INTERRUPTED, INTERRUPTED_MESSAGE } from './activity';
 import type { Tenant } from '../db/tenant';
+import type { BatchItem } from 'drizzle-orm/batch';
 import type { Deps } from '../ports';
 import { holdWhile, Lease, snapshotLease } from './lease';
-import { closeLookup, ensureRecentCloses } from './pricing';
+import { datedCloseLookup, ensureRecentCloses, type DatedCloseLookup } from './pricing';
 import { priceOn } from './valuation';
+
+/** How far back a snapshot looks for provisional prices to correct. */
+export const REPRICE_DAYS = 7;
 
 export async function snapshotHousehold(
   deps: Deps,
@@ -84,7 +99,10 @@ async function snapshotOnce(deps: Deps, tenant: Tenant, date: IsoDate, lease: Le
       quantity: holdings.quantity,
       price: holdings.price,
       currency: holdings.currency,
+      priceAt: holdings.priceAt,
       ticker: securities.ticker,
+      plaidClose: securities.plaidClose,
+      plaidCloseDate: securities.plaidCloseDate,
       type: securities.type,
       isPublic: securities.isPublic,
       lastPrice: securities.lastPrice,
@@ -96,14 +114,17 @@ async function snapshotOnce(deps: Deps, tenant: Tenant, date: IsoDate, lease: Le
 
   const publicTickers = holdingRows.filter((row) => row.isPublic && row.ticker).map((row) => row.ticker!);
   await ensureRecentCloses(deps, publicTickers, date);
-  const closes = await closeLookup(deps, publicTickers, date, date);
+  const repriceFrom = addDays(date, -REPRICE_DAYS);
+  const provisional = await provisionalRows(tenant, repriceFrom, date);
+  const dated = await datedCloseLookup(deps, [...publicTickers, ...provisional.map((row) => row.ticker)], repriceFrom, date);
+  const closes = (ticker: string, day: IsoDate) => dated(ticker, day)?.close ?? null;
 
   const visible = new Set(accountRows.map((account) => account.id));
   const holdingDailyRows: (typeof holdingDaily.$inferInsert)[] = [];
   const totals = new Map<string, number>();
   for (const row of holdingRows) {
     if (!visible.has(row.accountId)) continue;
-    const priced = priceOn({ ...row, lastPrice: row.lastPrice ?? row.price }, date, closes);
+    const priced = dayClose(row, date, dated) ?? priceOn({ ...row, lastPrice: row.lastPrice ?? row.price }, date, closes);
     const price = priced?.price ?? row.price ?? 0;
     const value = Math.round(row.quantity * price * 100);
     totals.set(row.accountId, (totals.get(row.accountId) ?? 0) + value);
@@ -153,6 +174,7 @@ async function snapshotOnce(deps: Deps, tenant: Tenant, date: IsoDate, lease: Le
   await lease.renew();
   await runAtomic(tenant.db, [
     ...balanceUpdates,
+    ...repriced(tenant, provisional.filter((row) => visible.has(row.accountId)), dated),
     lease.clearNotesBefore(startedAt),
     // Replace the day's synced positions so a sale made today drops out.
     // Imported rows are left alone.
@@ -208,4 +230,107 @@ async function snapshotOnce(deps: Deps, tenant: Tenant, date: IsoDate, lease: Le
   ]);
 
   return { accounts: reportedRows.length + otherRows.length, holdings: holdingDailyRows.length };
+}
+
+interface DatedPrices {
+  ticker: string | null;
+  isPublic: boolean;
+  /** Plaid's close for the security, and its day. */
+  plaidClose: number | null;
+  plaidCloseDate: string | null;
+  /** The institution's price for the holding, and when it was current. */
+  price: number | null;
+  priceAt: number | null;
+}
+
+/** The latest close dated on or before `date` among Tiingo's, Plaid's and the institution's (Tiingo's on a tie). */
+function latestDatedClose(row: DatedPrices, date: IsoDate, dated: DatedCloseLookup): { date: IsoDate; close: number } | null {
+  const candidates: { date: IsoDate; close: number }[] = [];
+  const tiingo = row.ticker ? dated(row.ticker, date) : null;
+  if (tiingo) candidates.push(tiingo);
+  // A Plaid close dated on a weekend isn't a close.
+  if (row.plaidClose !== null && row.plaidCloseDate && row.plaidCloseDate <= date && lastTradingDay(row.plaidCloseDate) === row.plaidCloseDate) candidates.push({ date: row.plaidCloseDate, close: row.plaidClose });
+  const institutionDay = row.priceAt !== null ? closeDayOf(row.priceAt) : null;
+  if (row.price !== null && institutionDay && institutionDay <= date) candidates.push({ date: institutionDay, close: row.price });
+  return candidates.reduce<{ date: IsoDate; close: number } | null>((best, candidate) => (!best || candidate.date > best.date ? candidate : best), null);
+}
+
+/**
+ * A public holding's price for the day: final at a close dated for it,
+ * otherwise provisional at the latest dated close before it. Null for a
+ * holding without a public ticker or any dated close (priceOn decides).
+ */
+function dayClose(row: DatedPrices, date: IsoDate, dated: DatedCloseLookup): { price: number; estimated: boolean } | null {
+  if (!row.isPublic || !row.ticker) return null;
+  const close = latestDatedClose(row, date, dated);
+  return close ? { price: close.close, estimated: close.date < lastTradingDay(date) } : null;
+}
+
+/** The provisional (estimated) synced rows of public holdings in [from, before), with their dated prices from Plaid. */
+async function provisionalRows(tenant: Tenant, from: IsoDate, before: IsoDate) {
+  const rows = await tenant.db
+    .select({
+      accountId: holdingDaily.accountId,
+      securityId: holdingDaily.securityId,
+      date: holdingDaily.date,
+      quantity: holdingDaily.quantity,
+      value: holdingDaily.value,
+      ticker: securities.ticker,
+      isPublic: securities.isPublic,
+      plaidClose: securities.plaidClose,
+      plaidCloseDate: securities.plaidCloseDate,
+      price: holdings.price,
+      priceAt: holdings.priceAt,
+    })
+    .from(holdingDaily)
+    .innerJoin(securities, eq(securities.id, holdingDaily.securityId))
+    .leftJoin(holdings, and(eq(holdings.accountId, holdingDaily.accountId), eq(holdings.securityId, holdingDaily.securityId)))
+    .where(
+      tenant.scope(
+        holdingDaily,
+        eq(holdingDaily.estimated, true),
+        inArray(holdingDaily.source, ['sync', 'backfill']),
+        gte(holdingDaily.date, from),
+        lt(holdingDaily.date, before),
+        eq(securities.isPublic, true),
+      ),
+    );
+  return rows.filter((row): row is typeof row & { ticker: string } => row.ticker !== null);
+}
+
+/**
+ * Statements repricing provisional rows that now have a close dated for
+ * their day, and moving their accounts' synced balances for those days by
+ * the difference.
+ */
+function repriced(tenant: Tenant, rows: Awaited<ReturnType<typeof provisionalRows>>, dated: DatedCloseLookup): BatchItem<'sqlite'>[] {
+  const statements: BatchItem<'sqlite'>[] = [];
+  const deltas = new Map<string, { accountId: string; date: IsoDate; delta: number }>();
+  for (const row of rows) {
+    const priced = dayClose(row, row.date, dated);
+    if (!priced || priced.estimated) continue;
+    const value = Math.round(row.quantity * priced.price * 100);
+    statements.push(
+      tenant.db
+        .update(holdingDaily)
+        .set({ price: priced.price, value, estimated: false })
+        .where(tenant.scope(holdingDaily, eq(holdingDaily.accountId, row.accountId), eq(holdingDaily.securityId, row.securityId), eq(holdingDaily.date, row.date))),
+    );
+    const key = `${row.accountId}|${row.date}`;
+    const entry = deltas.get(key) ?? { accountId: row.accountId, date: row.date, delta: 0 };
+    entry.delta += value - row.value;
+    deltas.set(key, entry);
+  }
+  for (const { accountId, date, delta } of deltas.values()) {
+    if (delta === 0) continue;
+    statements.push(
+      tenant.db
+        .update(accountDaily)
+        .set({ balance: sql`${accountDaily.balance} + ${delta}` })
+        .where(
+          tenant.scope(accountDaily, eq(accountDaily.accountId, accountId), eq(accountDaily.date, date), inArray(accountDaily.source, ['sync', 'backfill'])),
+        ),
+    );
+  }
+  return statements;
 }

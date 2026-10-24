@@ -105,8 +105,13 @@ export function fakePlaid(initial: Partial<PlaidState> = {}): PlaidApi & { state
     state,
     env: 'sandbox',
     // Records each call with a fake request id, like the real client.
-    scoped: (log) => {
+    scoped: (log, received) => {
       let next = 0;
+      const endpoints: Record<string, string> = {
+        getAccounts: '/accounts/get',
+        getHoldings: '/investments/holdings/get',
+        getInvestmentTransactions: '/investments/transactions/get',
+      };
       return new Proxy(api, {
         get(target, key, receiver) {
           const value = Reflect.get(target, key, receiver);
@@ -116,6 +121,8 @@ export function fakePlaid(initial: Partial<PlaidState> = {}): PlaidApi & { state
             try {
               const result = await value.apply(target, args);
               log.push({ endpoint: String(key), requestId });
+              const endpoint = endpoints[String(key)];
+              if (endpoint) received?.push({ endpoint, requestId, body: result });
               return result;
             } catch (error) {
               log.push({ endpoint: String(key), requestId, error: error instanceof PlaidApiError ? error.code : 'UNKNOWN' });
