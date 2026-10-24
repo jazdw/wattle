@@ -8,7 +8,7 @@ import { queueReportCollection } from '../server/services/assetReports';
 import { queueHistory } from '../server/services/backfill';
 import { saveCloses } from '../server/services/pricing';
 import { snapshotHousehold } from '../server/services/snapshots';
-import { institutionPriceTime, syncConnection } from '../server/services/sync';
+import { institutionPriceTime, shownName, syncConnection } from '../server/services/sync';
 import { runJob } from '../server/services/jobHandlers';
 import { marketDate } from '../shared/dates';
 import { account, closes, fakePlaid, fakePrices, holding, security } from './fakes';
@@ -951,5 +951,39 @@ describe("Plaid's institution price time", () => {
     expect(institutionPriceTime('2026-10-08T00:00:00Z')).toBeNull();
     expect(institutionPriceTime('2026-10-08T00:00:00.000Z')).toBeNull();
     expect(institutionPriceTime('not a date')).toBeNull();
+  });
+});
+
+describe('account names', () => {
+  it("drop a trailing copy of the mask, which is shown on its own", () => {
+    expect(shownName('Jared Wiltshire - Brokerage Account - ****1926', '1926')).toBe('Jared Wiltshire - Brokerage Account');
+    expect(shownName('Checking (...1234)', '1234')).toBe('Checking');
+    expect(shownName('Sapphire Card x1234', '1234')).toBe('Sapphire Card');
+    expect(shownName('Savings ending in 1234', '1234')).toBe('Savings');
+    expect(shownName('Plaid Checking', '0000')).toBe('Plaid Checking');
+    expect(shownName('Box 1234', '1234')).toBe('Box 1234');
+    expect(shownName('Brokerage - ****1926', '5555')).toBe('Brokerage - ****1926');
+    expect(shownName('****1926', '1926')).toBe('****1926');
+    expect(shownName('Brokerage ****1926', null)).toBe('Brokerage ****1926');
+  });
+
+  it("are cleaned on the next sync, keeping Plaid's own and a name you chose", async () => {
+    const plaid = brokerage();
+    plaid.state.accounts = [
+      account('brk', 'investment', 1500, { mask: '1926', subtype: 'brokerage', name: 'Brokerage Account - ****1926' }),
+      account('joint', 'investment', 500, { mask: '9999', subtype: 'ira', name: 'IRA - ****9999' }),
+    ];
+    const { deps, api, tenant, connection } = await linked(plaid);
+    const names = async () => (await deps.db.select({ name: schema.accounts.name, plaidName: schema.accounts.plaidName }).from(schema.accounts)).sort((a, b) => a.name.localeCompare(b.name));
+    expect(await names()).toEqual([
+      { name: 'Brokerage Account', plaidName: 'Brokerage Account - ****1926' },
+      { name: 'IRA', plaidName: 'IRA - ****9999' },
+    ]);
+    // Stored before names were cleaned: the next sync cleans it. A renamed one stays.
+    await deps.db.update(schema.accounts).set({ name: 'Brokerage Account - ****1926' }).where(eq(schema.accounts.plaidName, 'Brokerage Account - ****1926'));
+    const ira = (await api('/api/accounts')).body.accounts.find((row: { name: string }) => row.name === 'IRA');
+    await deps.db.update(schema.accounts).set({ name: 'Our IRA' }).where(eq(schema.accounts.id, ira.id));
+    await syncConnection(deps, tenant, connection.id, 'manual');
+    expect((await names()).map((row) => row.name)).toEqual(['Brokerage Account', 'Our IRA']);
   });
 });

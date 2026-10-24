@@ -464,9 +464,27 @@ function returningAccounts<T extends { externalId: string | null; missingSince: 
   return matches;
 }
 
-/** The shown name follows the institution's until you rename the account. */
-function followPlaidName(plaidName: string) {
-  return sql`case when ${accounts.plaidName} is null or ${accounts.name} = ${accounts.plaidName} then ${plaidName} else ${accounts.name} end`;
+/**
+ * The institution's account name without a trailing copy of its mask
+ * ("Brokerage Account - ****1926" → "Brokerage Account"): the mask is shown
+ * on its own. plaid_name keeps the name as Plaid sent it.
+ */
+export function shownName(plaidName: string, mask: string | null | undefined): string {
+  const digits = mask?.slice(-4).replace(/[^0-9A-Za-z]/g, '');
+  if (!digits) return plaidName;
+  // The mask after a marker (****, x, ..., "ending in"), set off from the name by a space or separator.
+  const suffix = new RegExp(`[\\s\\-–—:|,]+[(\\[]?\\s*(?:[*xX•·#.…]+\\s*|(?:ending|ends)\\s+(?:in\\s+)?)${digits}\\s*[)\\]]?\\s*$`, 'i');
+  const trimmed = plaidName.replace(suffix, '').trim();
+  return trimmed.length > 0 ? trimmed : plaidName;
+}
+
+/**
+ * The shown name follows the institution's until you rename the account:
+ * it's yours once it's neither Plaid's previous name nor that name shown.
+ */
+function followPlaidName(name: string, previous: { plaidName: string | null; mask: string | null }) {
+  const previousShown = previous.plaidName === null ? null : shownName(previous.plaidName, previous.mask);
+  return sql`case when ${accounts.plaidName} is null or ${accounts.name} = ${accounts.plaidName} or ${accounts.name} = ${previousShown} then ${name} else ${accounts.name} end`;
 }
 
 /**
@@ -516,11 +534,12 @@ async function planAccounts(
       institutionName: connection.institutionName,
     };
     const balance = plaidBalance(account);
+    const name = shownName(account.name, account.mask);
 
     if (!current) {
       const id = crypto.randomUUID();
-      run.change({ kind: 'account_added', accountId: id, account: account.name });
-      run.change({ kind: 'balance', accountId: id, account: account.name, before: null, after: balance, currency });
+      run.change({ kind: 'account_added', accountId: id, account: name });
+      run.change({ kind: 'balance', accountId: id, account: name, before: null, after: balance, currency });
       writes.push(
         tenant.db.insert(accounts).values({
           id,
@@ -528,7 +547,7 @@ async function planAccounts(
           source: 'plaid',
           connectionId: connection.id,
           externalId: account.account_id,
-          name: account.name,
+          name,
           ...descriptive,
           currency,
           ownerUserId: connection.ownerUserId,
@@ -538,7 +557,7 @@ async function planAccounts(
           createdAt: now,
         }),
       );
-      visible.set(account.account_id, { id, name: account.name, currency });
+      visible.set(account.account_id, { id, name, currency });
       continue;
     }
 
@@ -546,21 +565,21 @@ async function planAccounts(
       // Keep only the descriptive fields so the account can be recognised and
       // un-hidden; its balance is not stored.
       writes.push(
-        tenant.db.update(accounts).set({ ...descriptive, name: followPlaidName(account.name) }).where(tenant.scope(accounts, eq(accounts.id, current.id))),
+        tenant.db.update(accounts).set({ ...descriptive, name: followPlaidName(name, current) }).where(tenant.scope(accounts, eq(accounts.id, current.id))),
       );
       continue;
     }
-    if (returned) run.change({ kind: 'account_returned', accountId: current.id, account: account.name });
+    if (returned) run.change({ kind: 'account_returned', accountId: current.id, account: name });
     if (balance !== current.balance || currency !== current.currency) {
-      run.change({ kind: 'balance', accountId: current.id, account: account.name, before: current.balance, after: balance, currency });
+      run.change({ kind: 'balance', accountId: current.id, account: name, before: current.balance, after: balance, currency });
     }
     writes.push(
       tenant.db
         .update(accounts)
-        .set({ ...descriptive, name: followPlaidName(account.name), currency, balance, balanceAsOf: now, missingSince: null, ...(returned ? { externalId: account.account_id } : {}) })
+        .set({ ...descriptive, name: followPlaidName(name, current), currency, balance, balanceAsOf: now, missingSince: null, ...(returned ? { externalId: account.account_id } : {}) })
         .where(tenant.scope(accounts, eq(accounts.id, current.id))),
     );
-    visible.set(account.account_id, { id: current.id, name: account.name, currency });
+    visible.set(account.account_id, { id: current.id, name, currency });
   }
   run.count('accounts', visible.size);
 
