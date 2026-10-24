@@ -17,9 +17,9 @@ import { and, asc, desc, eq, gt, lt, lte, notInArray, or, sql, type SQL } from '
 import type { SQLiteColumn } from 'drizzle-orm/sqlite-core';
 import type { BatchItem } from 'drizzle-orm/batch';
 import type { ActivityEntry, ActivityResponse, SyncChange, SyncRunSummary } from '../../shared/types';
-import { PlaidApiError, type PlaidApi, type PlaidCall } from '../adapters/plaid';
+import { PlaidApiError, type PlaidApi, type PlaidCall, type PlaidResponse } from '../adapters/plaid';
 import { runBatch } from '../db/batch';
-import { connections, jobRuns, jobs, priceRuns, snapshotRuns, syncRuns, type SYNC_ACTIONS, type SYNC_TRIGGERS } from '../db/schema';
+import { connections, jobRuns, jobs, plaidResponses, priceRuns, snapshotRuns, syncRuns, type SYNC_ACTIONS, type SYNC_TRIGGERS } from '../db/schema';
 import type { Tenant } from '../db/tenant';
 import type { Deps } from '../ports';
 import { describeError } from '../lib/errors';
@@ -31,6 +31,8 @@ export type SyncTrigger = (typeof SYNC_TRIGGERS)[number];
 const MAX_CHANGES = 500;
 /** How long the logs are kept (matches the two years of history). */
 const RETENTION_DAYS = 730;
+/** Plaid's raw responses are kept for checking recent values only. */
+export const PLAID_RESPONSE_DAYS = 30;
 /** Error code of a run that was stopped part-way. */
 export const INTERRUPTED = 'INTERRUPTED';
 export const INTERRUPTED_MESSAGE = 'Stopped before finishing, most likely by a Worker limit (CPU time, run time or requests). Its finished steps are kept.';
@@ -42,6 +44,8 @@ export const NIGHTLY_MAX_MS = 6 * 3600 * 1000;
 
 export class SyncRun {
   readonly plaidCalls: PlaidCall[] = [];
+  /** The data calls' responses, for plaid_responses (responseStatements). */
+  readonly plaidResponses: PlaidResponse[] = [];
   readonly counts: Record<string, number> = {};
   readonly changes: SyncChange[] = [];
   truncated = false;
@@ -71,7 +75,24 @@ export class SyncRun {
   /** The Plaid client, recording every call in this run. */
   plaid(): PlaidApi {
     if (!this.deps.plaid) throw new Error('Plaid is not configured (PLAID_CLIENT_ID / PLAID_SECRET).');
-    return this.deps.plaid.scoped(this.plaidCalls);
+    return this.deps.plaid.scoped(this.plaidCalls, this.plaidResponses);
+  }
+
+  /** Plaid's responses to the run's data calls, to keep with its data (plaid_responses). */
+  responseStatements(): BatchItem<'sqlite'>[] {
+    const receivedAt = this.deps.now().getTime();
+    return this.plaidResponses.map((response) =>
+      this.tenant.db.insert(plaidResponses).values({
+        id: crypto.randomUUID(),
+        householdId: this.tenant.householdId,
+        connectionId: this.connectionId,
+        runId: this.id,
+        endpoint: response.endpoint,
+        requestId: response.requestId,
+        receivedAt,
+        body: JSON.stringify(response.body),
+      }),
+    );
   }
 
   count(key: string, amount: number): void {
@@ -368,5 +389,6 @@ export async function pruneLogs(deps: Deps): Promise<void> {
     deps.db.delete(priceRuns).where(lt(priceRuns.startedAt, cutoff)),
     deps.db.delete(jobRuns).where(lt(jobRuns.startedAt, cutoff)),
     deps.db.delete(snapshotRuns).where(lt(snapshotRuns.startedAt, cutoff)),
+    deps.db.delete(plaidResponses).where(lt(plaidResponses.receivedAt, deps.now().getTime() - PLAID_RESPONSE_DAYS * 24 * 3600 * 1000)),
   ]);
 }

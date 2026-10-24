@@ -323,9 +323,17 @@ export async function describeTickers(deps: Deps, tickers: string[]): Promise<Ma
 }
 
 export type CloseLookup = (ticker: string, date: IsoDate) => number | null;
+/** The close in effect on a date, with the day it's from (earlier when that day's isn't stored yet). */
+export type DatedCloseLookup = (ticker: string, date: IsoDate) => { date: IsoDate; close: number } | null;
 
 /** As-of close lookup over [start, end] for the given tickers. */
 export async function closeLookup(deps: Deps, tickers: string[], start: IsoDate, end: IsoDate): Promise<CloseLookup> {
+  const dated = await datedCloseLookup(deps, tickers, start, end);
+  return (ticker, date) => dated(ticker, date)?.close ?? null;
+}
+
+/** As closeLookup, also saying which day each close is from. */
+export async function datedCloseLookup(deps: Deps, tickers: string[], start: IsoDate, end: IsoDate): Promise<DatedCloseLookup> {
   const unique = [...new Set(tickers.map((ticker) => ticker.toUpperCase()))];
   const series = new Map<string, { date: IsoDate; close: number }[]>();
   for (const chunk of inChunks(unique)) {
@@ -346,7 +354,7 @@ export async function closeLookup(deps: Deps, tickers: string[], start: IsoDate,
       series.set(row.ticker, list);
     }
   }
-  return (ticker, date) => asOf(series.get(ticker.toUpperCase()), date, (row) => row.close);
+  return (ticker, date) => asOf(series.get(ticker.toUpperCase()), date, (row) => row);
 }
 
 /** Binary search for the last entry on or before `date`. */

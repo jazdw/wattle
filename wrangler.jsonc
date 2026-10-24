@@ -56,10 +56,12 @@
       }
     ]
   },
-  // Daily snapshot: 02:00 UTC is after the US close (22:00 New York in
-  // summer, 21:00 in winter), once end-of-day prices are published.
+  // Daily job: 10:00 UTC is 6am New York in summer, 5am in winter, before
+  // the 9:30 open: by then Plaid's overnight update and the mutual fund NAVs
+  // the price provider publishes overnight are in. Webhook syncs snapshot
+  // earlier when Plaid sends them; this is the fallback.
   "triggers": {
-    "crons": ["0 2 * * *"]
+    "crons": ["0 10 * * *"]
   },
   "observability": {
     "enabled": true

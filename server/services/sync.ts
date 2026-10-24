@@ -165,11 +165,13 @@ export interface SyncOptions {
 }
 
 /**
- * Which investment data a sync fetches from Plaid, each a billed Investments
- * call: holdings, transactions, both, or neither. A webhook names what
- * changed; the nightly sync ('since-close') fetches what wasn't already
- * fetched since the market's last close, so a trade made during the day is
- * still caught that night when Plaid's webhook for it was missed.
+ * Which investment data a sync fetches from Plaid: holdings, transactions,
+ * both, or neither. A webhook names what changed. The nightly sync
+ * ('since-close') always fetches holdings, for the institution's latest
+ * prices (the stand-in while a fund's close hasn't reached the price
+ * provider), and transactions unless they were already fetched since the
+ * market's last close, so a trade made during the day is still caught that
+ * night when Plaid's webhook for it was missed.
  */
 export type InvestmentFetch = 'all' | 'holdings' | 'transactions' | 'none' | 'since-close';
 
@@ -177,7 +179,7 @@ function investmentParts(deps: Deps, connection: ConnectionRow, fetch: Investmen
   if (!connection.hasInvestments) return { holdings: false, transactions: false };
   if (fetch === 'since-close') {
     const close = lastMarketClose(deps.now());
-    return { holdings: !(connection.holdingsFetchedAt !== null && connection.holdingsFetchedAt >= close), transactions: !(connection.transactionsFetchedAt !== null && connection.transactionsFetchedAt >= close) };
+    return { holdings: true, transactions: !(connection.transactionsFetchedAt !== null && connection.transactionsFetchedAt >= close) };
   }
   return { holdings: fetch === 'all' || fetch === 'holdings', transactions: fetch === 'all' || fetch === 'transactions' };
 }
@@ -323,8 +325,8 @@ async function syncPass(
   const connection = (await getConnection(tenant, connectionId))!;
   const run = new SyncRun(deps, tenant, connection.id, 'sync', trigger);
   const parts = investmentParts(deps, connection, investments);
-  const skipped = connection.hasInvestments && investments === 'since-close' && (!parts.holdings || !parts.transactions);
-  run.note = [note, skipped && `${!parts.holdings && !parts.transactions ? 'Holdings and transactions' : !parts.holdings ? 'Holdings' : 'Transactions'} already fetched since the market closed (Plaid's update); not fetched again.`].filter(Boolean).join(' ') || null;
+  const skipped = connection.hasInvestments && investments === 'since-close' && !parts.transactions;
+  run.note = [note, skipped && "Transactions already fetched since the market closed (Plaid's update); not fetched again."].filter(Boolean).join(' ') || null;
   await run.begin();
   const setConnection = (values: Partial<typeof connections.$inferInsert>) =>
     tenant.db.update(connections).set(values).where(tenant.scope(connections, eq(connections.id, connection.id)));
@@ -362,6 +364,7 @@ async function syncPass(
       statusStatement(tenant, connection.id, { status: 'ok', errorCode: null }, fetchedAt),
       lease.clearNotesBefore(fetchedAt),
       run.statement(),
+      ...run.responseStatements(),
     );
     await lease.renew();
     await runAtomic(tenant.db, writes);
@@ -624,6 +627,8 @@ async function planSecurities(
     const ticker = security.ticker_symbol?.toUpperCase() ?? null;
     const lastPrice = security.close_price ?? null;
     const lastPriceDate = security.close_price_as_of ?? (lastPrice !== null ? today : null);
+    // Plaid's close only when Plaid says which day it's for.
+    const plaidClose = lastPrice !== null && security.close_price_as_of ? { plaidClose: lastPrice, plaidCloseDate: security.close_price_as_of } : { plaidClose: null, plaidCloseDate: null };
     const currency = security.iso_currency_code ?? 'USD';
     const isPublic = isPublicSecurity(security);
     const id = byExternal.get(security.security_id);
@@ -641,6 +646,7 @@ async function planSecurities(
             currency,
             isPublic,
             ...(lastPrice !== null ? { lastPrice, lastPriceDate } : {}),
+            ...plaidClose,
           })
           .where(tenant.scope(securities, eq(securities.id, id))),
       );
@@ -668,6 +674,7 @@ async function planSecurities(
       needsReview: suggestion.needsReview,
       lastPrice,
       lastPriceDate,
+      ...plaidClose,
       createdAt: now,
     });
     ids.set(security.security_id, newId);
@@ -677,6 +684,17 @@ async function planSecurities(
     writes.push(tenant.db.insert(securities).values(chunk).onConflictDoNothing({ target: [securities.householdId, securities.externalId] }));
   }
   return ids;
+}
+
+/**
+ * Plaid's institution_price_datetime as epoch ms. Null when there's none, it
+ * doesn't parse, or it's a midnight placeholder (Plaid: it "may contain
+ * default time values (such as 00:00:00)").
+ */
+export function institutionPriceTime(value: string | null | undefined): number | null {
+  if (!value || !value.includes('T') || /T00:00(:00(\.0+)?)?(Z|[+-]00:?00)?$/.test(value)) return null;
+  const at = Date.parse(value);
+  return Number.isNaN(at) ? null : at;
 }
 
 /** Plan the replacement of the visible accounts' holdings, logging what changed. */
@@ -716,6 +734,7 @@ async function planHoldings(
         quantity: holding.quantity,
         price: holding.institution_price,
         priceAsOf: holding.institution_price_as_of ?? null,
+        priceAt: institutionPriceTime(holding.institution_price_datetime),
         value: toMinor(holding.institution_value),
         costBasis: holding.cost_basis === null || holding.cost_basis === undefined ? null : toMinor(holding.cost_basis),
         currency: holding.iso_currency_code ?? account.currency,
