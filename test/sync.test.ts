@@ -3,11 +3,12 @@ import { describe, expect, it } from 'vitest';
 import * as schema from '../server/db/schema';
 import { Tenant } from '../server/db/tenant';
 import type { Deps } from '../server/ports';
+import { pruneLogs } from '../server/services/activity';
 import { queueReportCollection } from '../server/services/assetReports';
 import { queueHistory } from '../server/services/backfill';
 import { saveCloses } from '../server/services/pricing';
 import { snapshotHousehold } from '../server/services/snapshots';
-import { syncConnection } from '../server/services/sync';
+import { institutionPriceTime, syncConnection } from '../server/services/sync';
 import { runJob } from '../server/services/jobHandlers';
 import { marketDate } from '../shared/dates';
 import { account, closes, fakePlaid, fakePrices, holding, security } from './fakes';
@@ -859,5 +860,96 @@ describe('runs stopped part-way (a Worker limit, a crash)', () => {
     const later = deps.now().getTime() + 27 * 3600_000;
     deps.now = () => new Date(later);
     expect((await api('/api/status')).body.nightly).toEqual({ date: '2026-10-08', state: 'late' });
+  });
+});
+
+describe("a fund's close that reaches the price provider late", () => {
+  /**
+   * A brokerage holding 10 VTSAX, linked Thursday the 8th at 10pm New York.
+   * Tiingo has only Wednesday's close (100); Plaid's own close is dated
+   * Wednesday too unless `plaidCloseAsOf` says otherwise; the institution
+   * says 101, at `priceDatetime` if given.
+   */
+  async function fund(options: { plaidClose?: number; plaidCloseAsOf?: string; priceDatetime?: string; linkedAt?: string } = {}) {
+    const fundHolding = { ...holding('brk', 's-fund', 10, 101), institution_price_as_of: '2026-10-07', institution_price_datetime: options.priceDatetime ?? null };
+    const plaid = fakePlaid({
+      accounts: [account('brk', 'investment', 1010, { subtype: 'brokerage' })],
+      securities: [{ ...security('s-fund', 'VTSAX', 'mutual fund', options.plaidClose ?? 100), close_price_as_of: options.plaidCloseAsOf ?? '2026-10-07' }],
+      holdings: [fundHolding as never],
+    });
+    const prices = fakePrices({ VTSAX: [{ date: '2026-10-07', close: 100 }] });
+    const setup = await linked(plaid, { prices, now: () => new Date(options.linkedAt ?? '2026-10-09T02:00:00Z') });
+    const { deps } = setup;
+    const day = async (date: string) => {
+      const [row] = await deps.db.select().from(schema.holdingDaily).where(eq(schema.holdingDaily.date, date));
+      const [balance] = await deps.db.select().from(schema.accountDaily).where(eq(schema.accountDaily.date, date));
+      return { price: row.price, value: row.value, estimated: row.estimated, balance: balance.balance };
+    };
+    return { ...setup, day };
+  }
+
+  it("carries the last dated close, provisionally, rather than an undated price, then reprices once the day's close is out", async () => {
+    // Plaid's institution price (101, labelled Wednesday) has no time: not used.
+    const { deps, tenant, day } = await fund();
+    expect(await day(TODAY)).toEqual({ price: 100, value: 1000_00, estimated: true, balance: 1000_00 });
+
+    // Overnight Tiingo publishes Thursday's close; Friday morning's snapshot corrects Thursday.
+    await saveCloses(deps, [{ ticker: 'VTSAX', date: TODAY, close: 100.5, currency: 'USD', source: 'tiingo' }], { replace: true });
+    deps.now = () => new Date('2026-10-09T10:00:00Z');
+    await snapshotHousehold(deps, tenant, '2026-10-09');
+    expect(await day(TODAY)).toEqual({ price: 100.5, value: 1005_00, estimated: false, balance: 1005_00 });
+    // Friday itself, before its close: Thursday's, provisional.
+    expect(await day('2026-10-09')).toEqual({ price: 100.5, value: 1005_00, estimated: true, balance: 1005_00 });
+  });
+
+  it("uses the institution's price when its time is after the day's close", async () => {
+    const { day } = await fund({ priceDatetime: '2026-10-08T22:00:00Z' }); // 6pm New York
+    expect(await day(TODAY)).toEqual({ price: 101, value: 1010_00, estimated: false, balance: 1010_00 });
+  });
+
+  it("ignores an institution time that's intraday or a midnight placeholder", async () => {
+    expect(await (await fund({ priceDatetime: '2026-10-08T17:00:00Z' })).day(TODAY)).toMatchObject({ price: 100, estimated: true }); // 1pm
+    expect(await (await fund({ priceDatetime: '2026-10-09T00:00:00Z' })).day(TODAY)).toMatchObject({ price: 100, estimated: true });
+  });
+
+  it("uses Plaid's own close when it's dated for the day", async () => {
+    const { day } = await fund({ plaidClose: 100.25, plaidCloseAsOf: TODAY });
+    expect(await day(TODAY)).toEqual({ price: 100.25, value: 1002_50, estimated: false, balance: 1002_50 });
+  });
+
+  it('a final day is left alone by later snapshots', async () => {
+    const { deps, tenant, day } = await fund({ plaidClose: 100.25, plaidCloseAsOf: TODAY });
+    await saveCloses(deps, [{ ticker: 'VTSAX', date: TODAY, close: 100.5, currency: 'USD', source: 'tiingo' }], { replace: true });
+    deps.now = () => new Date('2026-10-09T10:00:00Z');
+    await snapshotHousehold(deps, tenant, '2026-10-09');
+    expect(await day(TODAY)).toEqual({ price: 100.25, value: 1002_50, estimated: false, balance: 1002_50 });
+  });
+
+  it("keeps the sync's Plaid responses with it, for 30 days", async () => {
+    const { deps } = await fund({ priceDatetime: '2026-10-08T22:00:00Z' });
+    const [run] = await deps.db.select().from(schema.syncRuns).where(eq(schema.syncRuns.action, 'sync'));
+    const responses = await deps.db.select().from(schema.plaidResponses);
+    expect(responses.map((row) => row.endpoint).sort()).toEqual(['/accounts/get', '/investments/holdings/get', '/investments/transactions/get']);
+    expect(responses.every((row) => row.runId === run.id && row.requestId !== null)).toBe(true);
+    const holdingsBody = JSON.parse(responses.find((row) => row.endpoint === '/investments/holdings/get')!.body);
+    expect(holdingsBody.holdings[0]).toMatchObject({ institution_price: 101, institution_price_as_of: '2026-10-07', institution_price_datetime: '2026-10-08T22:00:00Z' });
+    const [stored] = await deps.db.select().from(schema.holdings);
+    expect(stored.priceAt).toBe(Date.parse('2026-10-08T22:00:00Z'));
+
+    deps.now = () => new Date('2026-11-08T03:00:00Z');
+    await pruneLogs(deps);
+    expect(await deps.db.select().from(schema.plaidResponses)).toEqual([]);
+  });
+});
+
+describe("Plaid's institution price time", () => {
+  it('parses real times and ignores missing ones and midnight placeholders', () => {
+    expect(institutionPriceTime('2026-10-08T22:00:00Z')).toBe(Date.parse('2026-10-08T22:00:00Z'));
+    expect(institutionPriceTime('2026-10-08T18:00:00-04:00')).toBe(Date.parse('2026-10-08T22:00:00Z'));
+    expect(institutionPriceTime(null)).toBeNull();
+    expect(institutionPriceTime('2026-10-08')).toBeNull();
+    expect(institutionPriceTime('2026-10-08T00:00:00Z')).toBeNull();
+    expect(institutionPriceTime('2026-10-08T00:00:00.000Z')).toBeNull();
+    expect(institutionPriceTime('not a date')).toBeNull();
   });
 });
