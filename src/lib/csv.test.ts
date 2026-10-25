@@ -54,10 +54,11 @@ describe('generic CSV', () => {
   });
 });
 
-// Made up: a cash account (money market fund and cash) and a stock account.
+// Made up: a cash account (money market fund and cash), an IRA emptied by a conversion, and a stock account.
 const VANGUARD = `Account Number,Investment Name,Symbol,Shares,Share Price,Total Value,
 12345678,EXAMPLE MONEY MARKET FUND,XYZMM,9000.00,1,9000.00,
 12345678,CASH,null,25.00,1,25.00,
+11112222,EXAMPLE SETTLEMENT FUND,XYZMM,0.00,1,0.00,
 87654321,VANGUARD TOTAL STOCK MARKET ETF,VTI,10,300.00,3000.00,
 
 
@@ -68,28 +69,36 @@ Account Number,Trade Date,Settlement Date,Transaction Type,Transaction Descripti
 12345678,2026-03-31,2026-03-31,Dividend,Dividend Received,EXAMPLE MONEY MARKET FUND,XYZMM,0.00000,1.0,25.00,0.0,25.00,0.0,CASH,
 12345678,2026-03-02,2026-03-02,Sweep in,Sweep Into Settlement Fund,CASH,,0.00000,1.0,-10000.00,0.0,-10000.00,0.0,CASH,
 12345678,2026-03-02,2026-03-02,Deposit,Electronic Funds Transfer,CASH,,0.00000,1.0,10000.00,0.0,10000.00,0.0,CASH,
+11112222,2026-01-09,2026-01-09,Fee,Account Service Fee,CASH,,0.00000,1.0,-10.00,0.0,-10.00,0.0,CASH,
+11112222,2026-01-08,2026-01-08,Conversion (outgoing),Conversion,CASH,,0.00000,1.0,-6990.00,0.0,-6990.00,0.0,CASH,
+11112222,2026-01-06,2026-01-06,Sweep in,Sweep Into Settlement Fund,CASH,,0.00000,1.0,-7000.00,0.0,-7000.00,0.0,CASH,
+11112222,2026-01-05,2026-01-05,Contribution,Contribution,CASH,,0.00000,1.0,7000.00,0.0,7000.00,0.0,CASH,
 87654321,2026-03-10,2026-03-10,Buy,Buy,VANGUARD TOTAL STOCK MARKET ETF,VTI,10.00000,300.0,-3000.00,0.0,-3000.00,0.0,CASH,
 `;
 
 describe('Vanguard download', () => {
-  it('rebuilds a cash account\'s balances from today\'s total and its money in and out, leaving out accounts with priced holdings', () => {
+  it('rebuilds cash accounts\' balances from today\'s total and their money in and out, leaving out accounts with priced holdings', () => {
     const rows = parseCsv(VANGUARD);
     const preset = PRESETS.find((candidate) => candidate.detect(rows[0]));
     expect(preset?.id).toBe('vanguard');
     const table = preset!.transform!(rows);
-    // Sweeps and reinvestments move money within the account; the stock account isn't rebuilt.
+    // Sweeps and reinvestments move money within an account; contributions, conversions and fees
+    // move it in or out. The stock account isn't rebuilt.
     expect(table).toEqual([
-      ['Date', 'Account ending 5678'],
-      ['2026-03-01', '0.00'],
-      ['2026-03-02', '10000.00'],
-      ['2026-03-31', '10025.00'],
-      ['2026-04-15', '9025.00'],
+      ['Date', 'Account ending 5678', 'Account ending 2222'],
+      ['2026-01-04', '0.00', '0.00'],
+      ['2026-01-05', '0.00', '7000.00'],
+      ['2026-01-08', '0.00', '10.00'],
+      ['2026-01-09', '0.00', '0.00'],
+      ['2026-03-02', '10000.00', '0.00'],
+      ['2026-03-31', '10025.00', '0.00'],
+      ['2026-04-15', '9025.00', '0.00'],
     ]);
     expect(extractBalances(table, preset!.mapping(table[0])).rows.at(-1)).toEqual({ date: '2026-04-15', balance: 9025 });
   });
 
   it('gives nothing to import without a cash account or transactions', () => {
-    expect(vanguardBalances(parseCsv(VANGUARD.replace(/12345678/g, '87654321')))).toEqual([]);
+    expect(vanguardBalances(parseCsv(VANGUARD.replace(/12345678|11112222/g, '87654321')))).toEqual([]);
     expect(vanguardBalances(parseCsv(VANGUARD.split('\n\n\n\n')[0]))).toEqual([]);
   });
 });

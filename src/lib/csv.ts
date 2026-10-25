@@ -80,8 +80,12 @@ export interface Preset {
 const find = (header: string[], name: string) => header.findIndex((cell) => cell.toLowerCase() === name.toLowerCase());
 
 const VANGUARD_POSITIONS = ['Account Number', 'Investment Name', 'Symbol', 'Shares', 'Share Price', 'Total Value'];
-/** Transactions that move money in or out; the rest (sweeps, buys, reinvestments) move it within the account. */
-const VANGUARD_FLOWS = new Set(['deposit', 'withdrawal', 'funds received', 'dividend', 'interest']);
+/**
+ * Transactions that move money within the account (between its cash and its
+ * holdings); every other kind (deposits, dividends, interest, contributions,
+ * conversions, fees…) moves money in or out.
+ */
+const VANGUARD_INTERNAL = new Set(['sweep in', 'sweep out', 'buy', 'sell', 'reinvestment', 'exchange', 'stock split']);
 
 /**
  * A Vanguard download lists each account's positions now, then its
@@ -113,7 +117,7 @@ export function vanguardBalances(rows: string[][]): string[][] {
   for (const row of rows.slice(transactionsAt + 1)) {
     const byDate = flows.get(row[0]);
     const date = parseDate(row[dateAt] ?? '', 'YYYY-MM-DD');
-    if (!byDate || !date || !VANGUARD_FLOWS.has((row[typeAt] ?? '').toLowerCase())) continue;
+    if (!byDate || !date || VANGUARD_INTERNAL.has((row[typeAt] ?? '').toLowerCase())) continue;
     byDate.set(date, (byDate.get(date) ?? 0) + (parseAmount(row[amountAt] ?? '') ?? 0));
   }
   const dates = [...new Set([...flows.values()].flatMap((byDate) => [...byDate.keys()]))].sort();
@@ -123,12 +127,15 @@ export function vanguardBalances(rows: string[][]): string[][] {
   const running = new Map(accounts.map((account) => [account, totals.get(account)!]));
   const table: string[][] = [];
   for (const date of [...dates].reverse()) {
-    table.push([date, ...accounts.map((account) => running.get(account)!.toFixed(2))]);
+    table.push([date, ...accounts.map((account) => cents(running.get(account)!))]);
     for (const account of accounts) running.set(account, running.get(account)! - (flows.get(account)!.get(date) ?? 0));
   }
-  table.push([addDays(dates[0], -1), ...accounts.map((account) => running.get(account)!.toFixed(2))]);
+  table.push([addDays(dates[0], -1), ...accounts.map((account) => cents(running.get(account)!))]);
   return [['Date', ...accounts.map((account) => `Account ending ${account.slice(-4)}`)], ...table.reverse()];
 }
+
+/** To the cent, without a "-0.00" from floating-point leftovers. */
+const cents = (value: number) => (Math.round(value * 100) / 100 + 0).toFixed(2);
 
 export const PRESETS: Preset[] = [
   {
