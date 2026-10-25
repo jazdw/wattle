@@ -65,3 +65,6 @@ export function normalizeWeights<K extends string>(weights: Weights<K>): Weights
   if (total <= 0) return {};
   return Object.fromEntries(entries.map(([key, value]) => [key, value / total])) as Weights<K>;
 }
+
+/** Kinds of security you can set on one you entered (null: something else). */
+export const SECURITY_TYPES = ['equity', 'etf', 'mutual fund'] as const;

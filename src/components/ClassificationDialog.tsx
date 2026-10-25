@@ -3,11 +3,11 @@ import { useState } from 'react';
 import {
   CATEGORIES,
   CATEGORY_LABELS,
+  SECURITY_TYPES,
   SIZES,
   STYLES,
   type Classification,
 } from '../../shared/taxonomy';
-import { SECURITY_TYPES } from '../../shared/schemas';
 import { api } from '../api';
 import { Button } from './ui/button';
 import { Dialog, DialogContent } from './ui/dialog';

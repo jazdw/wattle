@@ -1,7 +1,7 @@
 /** Request validation (zod), shared by the server and client forms. */
 import { z } from 'zod';
 import { CURRENCIES } from './money';
-import { CATEGORIES, SIZES, STYLES } from './taxonomy';
+import { CATEGORIES, SECURITY_TYPES, SIZES, STYLES } from './taxonomy';
 
 const isoDate = z.string().regex(/^\d{4}-\d{2}-\d{2}$/, 'Expected YYYY-MM-DD');
 const category = z.enum(CATEGORIES);
@@ -79,9 +79,6 @@ export const manualHoldingsSchema = z.object({
   /** The version the editor loaded; a save is refused if it changed since. */
   version: z.number().int().min(0),
 });
-
-/** Kinds of security you can set on one you entered (null: something else). */
-export const SECURITY_TYPES = ['equity', 'etf', 'mutual fund'] as const;
 
 export const securityPatchSchema = z.object({
   classification: classificationSchema,
