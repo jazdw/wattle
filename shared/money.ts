@@ -52,22 +52,30 @@ export function convertMinor(
   return Math.round(minor * (rate ?? 1));
 }
 
+/** How each currency is written: its locale picks the symbol and separators ("$" for AUD in en-AU, "A$" elsewhere). */
+const CURRENCY_LOCALES: Record<Currency, string> = {
+  USD: 'en-US',
+  AUD: 'en-AU',
+};
+
 const formatters = new Map<string, Intl.NumberFormat>();
 
+/**
+ * Format minor units for display: in full with the currency's own decimal places
+ * (cents for USD and AUD), or compact ("$1.2M") where space is tight.
+ */
 export function formatMoney(
   minor: number,
   currency: Currency,
-  options: { compact?: boolean; cents?: boolean; signed?: boolean } = {},
+  options: { compact?: boolean; signed?: boolean } = {},
 ): string {
-  const key = `${currency}:${options.compact}:${options.cents}:${options.signed}`;
+  const key = `${currency}:${options.compact}:${options.signed}`;
   let formatter = formatters.get(key);
   if (!formatter) {
-    formatter = new Intl.NumberFormat(currency === 'AUD' ? 'en-AU' : 'en-US', {
+    formatter = new Intl.NumberFormat(CURRENCY_LOCALES[currency], {
       style: 'currency',
       currency,
-      notation: options.compact ? 'compact' : 'standard',
-      minimumFractionDigits: options.cents ? 2 : 0,
-      maximumFractionDigits: options.compact ? 1 : options.cents ? 2 : 0,
+      ...(options.compact ? { notation: 'compact', maximumFractionDigits: 1 } : {}),
       signDisplay: options.signed ? 'exceptZero' : 'auto',
     });
     formatters.set(key, formatter);

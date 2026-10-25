@@ -16,12 +16,12 @@ describe('Allocation page', () => {
     renderPage(<Allocation />);
     expect(await screen.findByRole('row', { name: /^US stocks/ })).toBeInTheDocument();
     const us = row('US stocks');
-    expect(within(us).getByText('$150,000')).toBeInTheDocument();
+    expect(within(us).getByText('$150,000.00')).toBeInTheDocument();
     expect(within(us).getByText('50.0%')).toBeInTheDocument(); // target
     expect(within(us).getByText('Outside band')).toBeInTheDocument();
     expect(within(row('Emerging markets')).queryByText('Outside band')).not.toBeInTheDocument();
     // Targeted but not held.
-    expect(within(row('US bonds')).getByText('$0')).toBeInTheDocument();
+    expect(within(row('US bonds')).getByText('$0.00')).toBeInTheDocument();
   });
 
   it('suggests buys for new cash, and buys/sells for a full rebalance', async () => {

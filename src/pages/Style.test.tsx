@@ -10,7 +10,7 @@ describe('Style page', () => {
   it('shows the size × style grid as shares of classified stocks', async () => {
     renderPage(<Style />);
     // large growth: 55,000 of 194,000 classified
-    expect(await screen.findByTitle(/Large Growth: \$55,000/)).toHaveTextContent('28%');
+    expect(await screen.findByTitle(/Large Growth: \$55,000\.00/)).toHaveTextContent('28%');
     expect(screen.getByTitle(/Small Value/)).toHaveTextContent('3%');
     expect(screen.getByText(/have no size\/style/)).toBeInTheDocument();
   });
@@ -25,7 +25,7 @@ describe('Style page', () => {
   it('lists each fund’s stock value with its size and style, and opens the editor', async () => {
     const { user } = renderPage(<Style />);
     const vtiax = (await screen.findByText('VTIAX')).closest('tr') as HTMLElement;
-    expect(within(vtiax).getByText('$70,000')).toBeInTheDocument();
+    expect(within(vtiax).getByText('$70,000.00')).toBeInTheDocument();
     expect(within(vtiax).getByText(/Large 75%/)).toBeInTheDocument();
     expect(within(vtiax).getByText(/Value 38%/)).toBeInTheDocument();
     // Non-stock holdings are left out.

@@ -19,7 +19,7 @@ describe('format helpers', () => {
 
   it('formats values for display', () => {
     expect(money(null, 'USD')).toBe('—');
-    expect(money(1_00, 'USD')).toBe('$1');
+    expect(money(1_00, 'USD')).toBe('$1.00');
     expect(shortDate('2026-10-08')).toMatch(/Oct\s+8/);
     expect(longDate('2026-10-08')).toMatch(/2026/);
     // Fractional shares in full: 6 places, 8 below one unit (crypto), no trailing zeros.

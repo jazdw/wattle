@@ -10,9 +10,9 @@ describe('Growth page', () => {
   it('breaks growth down by account with start, end and change', async () => {
     renderPage(<Growth />);
     const row = (await screen.findByRole('row', { name: /Vanguard Brokerage/ })) as HTMLElement;
-    expect(within(row).getByText('$240,000')).toBeInTheDocument();
-    expect(within(row).getByText('$250,000')).toBeInTheDocument();
-    expect(within(row).getByText('$10,000', { exact: false, selector: 'td *, td' })).toBeInTheDocument();
+    expect(within(row).getByText('$240,000.00')).toBeInTheDocument();
+    expect(within(row).getByText('$250,000.00')).toBeInTheDocument();
+    expect(within(row).getByText('$10,000.00', { exact: false, selector: 'td *, td' })).toBeInTheDocument();
     expect(screen.getByText(/Shaded periods/)).toBeInTheDocument();
     expect(lastGroup()).toBe('account');
   });
@@ -43,7 +43,7 @@ describe('Growth page', () => {
     expect(sent('GET /api/history').at(-1)?.url.searchParams.get('accountId')).toBe('brk');
     expect(lastGroup()).toBe('holding');
     const sold = await screen.findByRole('row', { name: /SOLD/ });
-    expect(within(sold).getByText('-$5,000')).toBeInTheDocument();
+    expect(within(sold).getByText('-$5,000.00')).toBeInTheDocument();
 
     await user.click(screen.getByRole('tab', { name: 'By category' }));
     expect(lastGroup()).toBe('category');

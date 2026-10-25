@@ -17,11 +17,11 @@ describe('money', () => {
   });
 
   it('formats', () => {
-    expect(formatMoney(123456_78, 'USD')).toBe('$123,457');
-    expect(formatMoney(123456_78, 'USD', { cents: true })).toBe('$123,456.78');
+    expect(formatMoney(123456_78, 'USD')).toBe('$123,456.78');
+    expect(formatMoney(5_00, 'USD')).toBe('$5.00');
     expect(formatMoney(1_250_000_00, 'USD', { compact: true })).toBe('$1.3M');
-    expect(formatMoney(5_00, 'USD', { signed: true })).toBe('+$5');
-    expect(formatMoney(5_00, 'AUD')).toBe('$5');
+    expect(formatMoney(5_00, 'USD', { signed: true })).toBe('+$5.00');
+    expect(formatMoney(5_00, 'AUD')).toBe('$5.00');
     expect(formatPercent(0.1234)).toBe('12.3%');
     expect(formatPercent(-0.05, 0, true)).toBe('-5%');
   });
