@@ -11,7 +11,7 @@ describe('Holdings page', () => {
   it('lists holdings with live prices, day change and weights', async () => {
     renderPage(<Holdings />);
     const vti = (await screen.findByText('VTI')).closest('tr') as HTMLElement;
-    expect(within(vti).getByText('303.00')).toBeInTheDocument(); // live quote
+    expect(within(vti).getByText('$303.00')).toBeInTheDocument(); // live quote
     expect(within(vti).getByText('$1,500.00')).toBeInTheDocument(); // 500 units × $3
     expect(within(vti).getByText('1.00%')).toBeInTheDocument();
     // When its quote was last updated, under the price.
@@ -21,7 +21,7 @@ describe('Holdings page', () => {
 
     // Mutual funds show the last close and its date.
     const vtiax = screen.getByText('VTIAX').closest('tr') as HTMLElement;
-    expect(within(vtiax).getByText('35.20')).toBeInTheDocument();
+    expect(within(vtiax).getByText('$35.20')).toBeInTheDocument();
     expect(within(vtiax).getByText(/Mixed \(International stocks 75%\)/)).toBeInTheDocument();
     expect(within(vtiax).queryByLabelText('Live')).not.toBeInTheDocument(); // a last close isn't live
     expect(within(vti).getByText('ETF')).toBeInTheDocument(); // type beside the ticker
@@ -97,7 +97,7 @@ describe('Holdings page', () => {
     server.use(http.get('*/api/quotes', () => HttpResponse.json({ ...QUOTES, quotes: QUOTES.quotes.map((quote) => ({ ...quote, time: closed })) })));
     renderPage(<Holdings />);
     const vti = (await screen.findByText('VTI')).closest('tr') as HTMLElement;
-    expect(within(vti).getByText('303.00')).toBeInTheDocument();
+    expect(within(vti).getByText('$303.00')).toBeInTheDocument();
     expect(within(vti).getByTitle(/^Price, last updated /)).toBeInTheDocument();
     expect(screen.queryByLabelText('Live')).not.toBeInTheDocument();
     expect(screen.getByText('Holdings value')).toBeInTheDocument();
@@ -127,7 +127,7 @@ describe('Holdings page', () => {
     server.use(http.get('*/api/quotes', () => HttpResponse.json({ quotes: [], closes: [] })));
     renderPage(<Holdings />);
     const vti = (await screen.findByText('VTI')).closest('tr') as HTMLElement;
-    expect(within(vti).getByText('300.00')).toBeInTheDocument();
+    expect(within(vti).getByText('$300.00')).toBeInTheDocument();
     const todays = screen.getByText("Today's change").closest('div') as HTMLElement;
     expect(within(todays).getByText('—')).toBeInTheDocument();
     // No live quotes: no ((o)), whatever the time of day.
