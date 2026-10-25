@@ -674,6 +674,20 @@ describe('missed days', () => {
     expect(await day('2026-10-09')).toMatchObject({ balance: 1000_00, source: 'sync', estimated: false });
   });
 
+  it('an import fills every day between its dates, replacing backfilled days in between but not synced ones', async () => {
+    const { deps, api, tenant, chk, day } = await bank();
+    // A flat history from a bank report, and one synced day.
+    const row = (date: string, source: 'backfill' | 'sync') => ({ householdId: tenant.householdId, accountId: chk.id, date, balance: 900_00, currency: 'USD', source });
+    await deps.db.insert(schema.accountDaily).values([row('2026-09-01', 'backfill'), row('2026-09-02', 'backfill'), row('2026-09-03', 'sync'), row('2026-09-04', 'backfill')]);
+    // Only the days the balance changed.
+    const response = await api('/api/imports/balances', { method: 'POST', json: { accountId: chk.id, rows: [{ date: '2026-08-31', balance: 500 }, { date: '2026-09-05', balance: 600 }] } });
+    expect(response.body.imported).toBe(6);
+    expect(await day('2026-09-02')).toMatchObject({ balance: 500_00, source: 'import' });
+    expect(await day('2026-09-03')).toMatchObject({ balance: 900_00, source: 'sync' });
+    expect(await day('2026-09-04')).toMatchObject({ balance: 500_00, source: 'import' });
+    expect(await day('2026-09-05')).toMatchObject({ balance: 600_00, source: 'import' });
+  });
+
   it('asks the bank for the days after the last one it reported, filling only balances carried forward', async () => {
     const { deps, plaid, api, connection, chk, night, day, nightly, failing } = await bank();
     failing(true);

@@ -3,7 +3,7 @@
  * so a manual account's current balance always follows its newest entry.
  */
 import { desc, eq, inArray, sql } from 'drizzle-orm';
-import { marketDate } from '../../shared/dates';
+import { addDays, marketDate } from '../../shared/dates';
 import { toMinor } from '../../shared/money';
 import { chunkRows, runAtomic } from '../db/batch';
 import { accountDaily, accounts } from '../db/schema';
@@ -22,12 +22,23 @@ export function signedBalance(type: string, amount: number): number {
 
 type Account = typeof accounts.$inferSelect;
 
+/** Add each missing day between the first and last date, carrying the previous day's balance. */
+function fillDays(byDate: Map<string, number>) {
+  const dates = [...byDate.keys()].sort();
+  for (let index = 1; index < dates.length; index++) {
+    const balance = byDate.get(dates[index - 1])!;
+    for (let day = addDays(dates[index - 1], 1); day < dates[index]; day = addDays(day, 1)) byDate.set(day, balance);
+  }
+}
+
 /**
  * Write dated balances (major units) for an account, all or none.
  * - 'manual' (Record a balance): replaces whatever that day held.
  * - 'import' (CSV): fills gaps and replaces estimates (backfilled, or carried
  *   forward while syncing failed) and earlier imports;
- *   with `overwrite`, replaces synced and recorded values too.
+ *   with `overwrite`, replaces synced and recorded values too. A balance holds
+ *   until the file's next one, so every day from its first date to its last
+ *   is written (a sparse file would otherwise leave old values in between).
  * For a manual account, the newest recorded or imported day is its current
  * balance; when that changes, later carried-forward snapshot copies are
  * dropped and today's snapshot is redone.
@@ -42,6 +53,7 @@ export async function writeBalances(
 ): Promise<number> {
   // Last value wins when several entries are for one day.
   const byDate = new Map(entries.map((entry) => [entry.date, entry.balance]));
+  if (source === 'import') fillDays(byDate);
   const rows = [...byDate].map(([date, balance]) => ({
     householdId: tenant.householdId,
     accountId: account.id,
