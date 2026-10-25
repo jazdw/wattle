@@ -11,6 +11,7 @@ const NetWorth = lazy(() => import('./pages/NetWorth').then((module) => ({ defau
 const Growth = lazy(() => import('./pages/Growth').then((module) => ({ default: module.Growth })));
 const Allocation = lazy(() => import('./pages/Allocation').then((module) => ({ default: module.Allocation })));
 const Holdings = lazy(() => import('./pages/Holdings').then((module) => ({ default: module.Holdings })));
+const Transactions = lazy(() => import('./pages/Transactions').then((module) => ({ default: module.Transactions })));
 const Style = lazy(() => import('./pages/Style').then((module) => ({ default: module.Style })));
 const Accounts = lazy(() => import('./pages/Accounts').then((module) => ({ default: module.Accounts })));
 const Settings = lazy(() => import('./pages/Settings').then((module) => ({ default: module.Settings })));
@@ -43,6 +44,7 @@ export default function App() {
         <Route path="growth" element={<Growth />} />
         <Route path="allocation" element={<Allocation />} />
         <Route path="holdings" element={<Holdings />} />
+        <Route path="transactions" element={<Transactions />} />
         <Route path="style" element={<Style />} />
         <Route path="accounts" element={<Accounts />} />
         <Route path="settings" element={<Settings />} />

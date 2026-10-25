@@ -3,12 +3,12 @@
  * reference data shared by all households). Lookups carry the last known
  * value forward over weekends and holidays.
  */
-import { and, desc, eq, gte, inArray, lte, max, min, sql } from 'drizzle-orm';
+import { and, asc, desc, eq, gte, inArray, isNull, lte, max, min, sql } from 'drizzle-orm';
 import { addDays, lastTradingDay, type IsoDate } from '../../shared/dates';
 import type { Currency, FxRates } from '../../shared/money';
 import type { BatchItem } from 'drizzle-orm/batch';
 import { ProviderHttpError } from '../adapters/marketData';
-import { chunkRows, inChunks, runAtomic } from '../db/batch';
+import { chunkRows, inChunks, runAtomic, runBatch } from '../db/batch';
 import { fxDaily, priceRuns, pricesDaily, type PriceCall, type PriceChange } from '../db/schema';
 import type { DailyClose, Deps, SecurityDescription } from '../ports';
 import { ProviderBackoffError } from './backoff';
@@ -21,6 +21,9 @@ const CARRY_DAYS = 10;
 const UNKNOWN_TTL_SECONDS = 7 * 24 * 3600;
 
 type PriceRow = typeof pricesDaily.$inferInsert;
+
+/** A fetched close as a stored row; its split factor stays unknown (null) when the endpoint doesn't give one. */
+const tiingoRow = (ticker: string, close: DailyClose): PriceRow => ({ ticker, date: close.date, close: close.close, currency: 'USD', source: 'tiingo', splitFactor: close.splitFactor ?? null });
 
 const unknownKey = (ticker: string) => `noprice:${ticker}`;
 
@@ -142,7 +145,8 @@ export function closeStatements(deps: Deps, rows: PriceRow[], options: { replace
     return options.replace
       ? insert.onConflictDoUpdate({
           target: [pricesDaily.ticker, pricesDaily.date],
-          set: { close: sql`excluded.close`, source: sql`excluded.source` },
+          // A close without a split factor keeps the one already known.
+          set: { close: sql`excluded.close`, source: sql`excluded.source`, splitFactor: sql`coalesce(excluded.split_factor, ${pricesDaily.splitFactor})` },
         })
       : insert.onConflictDoNothing();
   });
@@ -197,7 +201,7 @@ export async function ensureRecentCloses(deps: Deps, tickers: string[], date: Is
       console.warn('Bulk price fetch failed', describeError(error));
     }
   }
-  for (const [ticker, close] of bulk) rows.push({ ticker, date: close.date, close: close.close, currency: 'USD', source: 'tiingo' });
+  for (const [ticker, close] of bulk) rows.push(tiingoRow(ticker, close));
 
   const newlyUnknown: string[] = [];
   for (const ticker of stale) {
@@ -217,7 +221,7 @@ export async function ensureRecentCloses(deps: Deps, tickers: string[], date: Is
       continue;
     }
     if (closes.length === 0 && !last && !fromBulk) newlyUnknown.push(ticker);
-    for (const close of closes) rows.push({ ticker, date: close.date, close: close.close, currency: 'USD', source: 'tiingo' });
+    for (const close of closes) rows.push(tiingoRow(ticker, close));
   }
   await saveFetchedCloses(deps, run, rows);
   await cacheSetMany(deps, newlyUnknown.map((ticker) => [unknownKey(ticker), true]), UNKNOWN_TTL_SECONDS);
@@ -277,7 +281,7 @@ export async function ensureCloses(deps: Deps, tickers: string[], start: IsoDate
         newlyUnknown.push(ticker);
         break;
       }
-      for (const close of closes) rows.push({ ticker, date: close.date, close: close.close, currency: 'USD', source: 'tiingo' });
+      for (const close of closes) rows.push(tiingoRow(ticker, close));
     }
   }
   if (run.calls.length === 0 && gaps.failed.length === 0) {
@@ -368,6 +372,57 @@ function asOf<T extends { date: IsoDate }, R>(list: T[] | undefined, date: IsoDa
     else high = middle - 1;
   }
   return pick(list[low]);
+}
+
+/** Tickers whose unknown split factors one night fills in (a Tiingo request each). */
+export const SPLIT_FILL_TICKERS = 20;
+
+/**
+ * Fill in these tickers' split factors that are still unknown (closes from
+ * Tiingo's IEX endpoint, or stored before split factors were kept) from
+ * Tiingo's daily prices, a few tickers a night. Days Tiingo doesn't return are taken as no
+ * split, so a ticker isn't asked about again. Returns the tickers found to
+ * have split, whose rebuilt history depends on it.
+ */
+export async function fillSplitFactors(deps: Deps, tickers: string[], limit = SPLIT_FILL_TICKERS): Promise<string[]> {
+  const wanted = normalise(tickers);
+  if (!deps.prices || wanted.length === 0) return [];
+  const unknown = await deps.db
+    .select({ ticker: pricesDaily.ticker, from: min(pricesDaily.date), to: max(pricesDaily.date) })
+    .from(pricesDaily)
+    .where(and(isNull(pricesDaily.splitFactor), inArray(pricesDaily.ticker, wanted.slice(0, 90))))
+    .groupBy(pricesDaily.ticker)
+    // The longest-unknown first, so none waits behind tickers that gain an unknown day every night.
+    .orderBy(asc(min(pricesDaily.date)))
+    .limit(limit);
+  if (unknown.length === 0) return [];
+  const prices = deps.prices;
+  const run = new PriceRun(deps, 'history');
+  const rows: PriceRow[] = [];
+  const settled: BatchItem<'sqlite'>[] = [];
+  const split = new Set<string>();
+  for (const { ticker, from, to } of unknown) {
+    if (!from || !to) continue;
+    let closes: DailyClose[];
+    try {
+      closes = await run.call({ provider: prices.name, endpoint: 'daily', tickers: [ticker], from, to }, () => prices.dailyCloses(ticker, from, to), (result) => result.length);
+    } catch (error) {
+      console.warn('Split factor fetch failed', ticker, describeError(error));
+      if ((error instanceof ProviderHttpError && error.status === 429) || error instanceof ProviderBackoffError) break;
+      continue;
+    }
+    // Only the split days are written; every other unknown day becomes 1 below.
+    for (const close of closes) {
+      if ((close.splitFactor ?? 1) === 1) continue;
+      rows.push(tiingoRow(ticker, close));
+      split.add(ticker);
+    }
+    settled.push(deps.db.update(pricesDaily).set({ splitFactor: 1 }).where(and(eq(pricesDaily.ticker, ticker), isNull(pricesDaily.splitFactor), gte(pricesDaily.date, from), lte(pricesDaily.date, to))));
+  }
+  // Split days first; then the rest (including days Tiingo didn't return) count as no split.
+  await saveFetchedCloses(deps, run, rows);
+  if (settled.length > 0) await runBatch(deps.db, settled);
+  return [...split];
 }
 
 /* ------------------------------------------------------------------ */

@@ -7,7 +7,7 @@ import type { BatchItem } from 'drizzle-orm/batch';
 import { Hono } from 'hono';
 import { exchangeSchema, linkTokenSchema } from '../../shared/schemas';
 import { requireAuth } from '../auth/routes';
-import { connections } from '../db/schema';
+import { connections, plaidWebhooks } from '../db/schema';
 import { Tenant } from '../db/tenant';
 import type { AppEnv } from '../env';
 import { HttpError, notFound, readBody } from '../lib/http';
@@ -123,6 +123,10 @@ plaidRoutes.post('/webhook', async (c) => {
 
   const eventName = `${event.webhook_type}:${event.webhook_code}`;
   const observedAt = deps.now().getTime();
+  // Kept as received, to check later what Plaid said and when.
+  await tenant.db
+    .insert(plaidWebhooks)
+    .values({ id: crypto.randomUUID(), householdId: tenant.householdId, connectionId: connection.id, event: eventName, receivedAt: observedAt, body: raw });
   /**
    * Record what Plaid reported, logged in the same batch. These don't take
    * the connection's lease: a status is only written if it's newer than the
@@ -155,6 +159,8 @@ plaidRoutes.post('/webhook', async (c) => {
       await sync('holdings');
       break;
     case 'INVESTMENTS_TRANSACTIONS:DEFAULT_UPDATE':
+    // Plaid finished pulling older history from the institution.
+    case 'INVESTMENTS_TRANSACTIONS:HISTORICAL_UPDATE':
       await sync('transactions');
       break;
     case 'ITEM:LOGIN_REPAIRED':

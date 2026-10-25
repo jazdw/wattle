@@ -15,6 +15,13 @@
       "when": 1792864913456,
       "tag": "0001_price_dates_and_responses",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "6",
+      "when": 1792942154075,
+      "tag": "0002_splits_webhooks_bank_transactions",
+      "breakpoints": true
     }
   ]
 }

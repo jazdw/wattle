@@ -400,8 +400,10 @@ async function fetchFromPlaid(deps: Deps, plaid: PlaidApi, connection: Connectio
     return { accounts: plaidAccounts, investments: { holdings: holdingsResult!.holdings, securities: [...allSecurities.values()], transactions: [], transactionsComplete: false } };
   }
   const today = marketDate(deps.now());
-  // Re-fetch a fortnight of overlap: institutions post late.
-  const start = connection.txnSyncedThrough ? addDays(connection.txnSyncedThrough, -14) : addDays(today, -HISTORY_DAYS);
+  // Always the whole two years Plaid can have: the history Plaid holds grows
+  // after the link (it can keep growing for days after a link) and
+  // institutions post late. It's one call either way; only the response grows.
+  const start = addDays(today, -HISTORY_DAYS);
   const transactions: InvestmentTransaction[] = [];
   let transactionsComplete = true;
   for (let offset = 0; ; ) {

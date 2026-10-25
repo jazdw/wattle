@@ -36,10 +36,10 @@ export function createTiingo(apiKey: string): PriceProvider {
       );
       if (response.status === 404) return [];
       if (!response.ok) throw new ProviderHttpError(`Tiingo ${ticker}`, response.status);
-      const rows = (await response.json()) as { date: string; close: number }[];
+      const rows = (await response.json()) as { date: string; close: number; splitFactor?: number }[];
       return rows
         .filter((row) => typeof row.close === 'number')
-        .map((row): DailyClose => ({ date: row.date.slice(0, 10), close: row.close }));
+        .map((row): DailyClose => ({ date: row.date.slice(0, 10), close: row.close, ...(typeof row.splitFactor === 'number' && row.splitFactor > 0 ? { splitFactor: row.splitFactor } : {}) }));
     },
 
     // Tiingo's search gives each listing's asset type; the exact ticker,

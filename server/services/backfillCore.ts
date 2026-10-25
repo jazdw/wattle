@@ -8,6 +8,10 @@
  * cash-type sweep), cash is rebuilt from transaction amounts too (Plaid
  * amounts are positive when cash leaves the account).
  *
+ * A share split (`splitFactor`, on the first day at the new price) is undone
+ * the same way: walking back past it divides that security's shares by the
+ * factor, so the days before it have the shares actually held then.
+ *
  * Gaps in the institution's history show up as impossible states (negative
  * quantities). They are clamped to zero and that day and every earlier day
  * is marked `estimated`.
@@ -46,6 +50,8 @@ export interface BackfillInput {
   transactions: BackfillTransaction[];
   cashSecurityId: string | null;
   price: (securityId: string, date: IsoDate) => PriceResult | null;
+  /** Shares after per share before for a split taking effect on `date` (1 when none). */
+  splitFactor?: (securityId: string, date: IsoDate) => number;
   /** Return only days from here (default: start). */
   emitFrom?: IsoDate;
   /** Return only days up to here (default: end). */
@@ -118,6 +124,13 @@ export function reconstructHistory(input: BackfillInput): BackfillDay[] {
       }
       if (input.cashSecurityId && txn.securityId !== input.cashSecurityId) {
         quantities.set(input.cashSecurityId, (quantities.get(input.cashSecurityId) ?? 0) + txn.amount / 100);
+      }
+    }
+    // And a split that took effect today: the day before had fewer shares.
+    if (input.splitFactor) {
+      for (const [securityId, quantity] of quantities) {
+        const factor = input.splitFactor(securityId, date);
+        if (factor !== 1 && factor > 0) quantities.set(securityId, quantity / factor);
       }
     }
     for (const [securityId, quantity] of quantities) {

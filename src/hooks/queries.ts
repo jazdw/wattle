@@ -9,6 +9,7 @@ import type {
   SecurityRow,
   StatusResponse,
   TargetResponse,
+  TransactionsResponse,
 } from '../../shared/types';
 import { api } from '../api';
 import { useAuth } from './useAuth';
@@ -40,6 +41,14 @@ export function useAccounts() {
   return useQuery({
     queryKey: ['accounts', currency],
     queryFn: () => api<AccountsResponse>(`/api/accounts?currency=${currency}`),
+  });
+}
+
+export function useTransactions(accountId: string | null) {
+  return useQuery({
+    queryKey: ['transactions', accountId],
+    queryFn: () => api<TransactionsResponse>(`/api/accounts/${accountId}/transactions`),
+    enabled: accountId !== null,
   });
 }
 

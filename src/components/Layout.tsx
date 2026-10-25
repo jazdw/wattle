@@ -1,4 +1,4 @@
-import { ChartPie, Grid3x3, Landmark, LayoutDashboard, LineChart, List, LogOut, Menu, Settings, X } from 'lucide-react';
+import { ArrowLeftRight, ChartPie, Grid3x3, Landmark, LayoutDashboard, LineChart, List, LogOut, Menu, Settings, X } from 'lucide-react';
 import { Dialog as DialogPrimitive } from 'radix-ui';
 import { Suspense, useRef, useState, type TouchEvent } from 'react';
 import { NavLink, Outlet } from 'react-router-dom';
@@ -14,6 +14,7 @@ const NAV = [
   { to: '/growth', label: 'Growth', icon: LineChart },
   { to: '/allocation', label: 'Allocation', icon: ChartPie },
   { to: '/holdings', label: 'Holdings', icon: List },
+  { to: '/transactions', label: 'Transactions', icon: ArrowLeftRight },
   { to: '/style', label: 'Style', icon: Grid3x3 },
   { to: '/accounts', label: 'Accounts', icon: Landmark },
   { to: '/settings', label: 'Settings', icon: Settings },
