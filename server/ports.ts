@@ -48,6 +48,8 @@ export interface Config {
 export interface DailyClose {
   date: IsoDate;
   close: number;
+  /** Shares after a split per share before, on its first day at the new price (1 otherwise); absent when the source doesn't say. */
+  splitFactor?: number;
 }
 
 /** End-of-day prices (Tiingo). */

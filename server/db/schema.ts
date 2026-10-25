@@ -412,6 +412,13 @@ export const pricesDaily = sqliteTable(
     close: real('close').notNull(),
     currency: text('currency').notNull().default('USD'),
     source: text('source').notNull(),
+    /**
+     * Shares after a split per share before, on the first day at the new
+     * price (4 for a 4-for-1 split); 1 on other days. Null when the
+     * source didn't say (Tiingo's IEX endpoint, Plaid): filled in later from
+     * Tiingo's daily prices (fillSplitFactors).
+     */
+    splitFactor: real('split_factor'),
   },
   (table) => [primaryKey({ columns: [table.ticker, table.date] })],
 );
@@ -455,6 +462,52 @@ export const plaidResponses = sqliteTable(
     body: text('body').notNull(),
   },
   (table) => [index('plaid_responses_connection').on(table.householdId, table.connectionId, table.receivedAt), index('plaid_responses_received').on(table.receivedAt)],
+);
+
+/** Plaid's webhooks for a connection, as received (verified), for checking what Plaid said. Household data, kept 30 days. */
+export const plaidWebhooks = sqliteTable(
+  'plaid_webhooks',
+  {
+    id: text('id').primaryKey(),
+    householdId: text('household_id')
+      .notNull()
+      .references(() => households.id, { onDelete: 'cascade' }),
+    connectionId: text('connection_id')
+      .notNull()
+      .references(() => connections.id, { onDelete: 'cascade' }),
+    /** webhook_type:webhook_code, e.g. HOLDINGS:DEFAULT_UPDATE. */
+    event: text('event').notNull(),
+    receivedAt: integer('received_at').notNull(),
+    body: text('body').notNull(),
+  },
+  (table) => [index('plaid_webhooks_connection').on(table.householdId, table.connectionId, table.receivedAt), index('plaid_webhooks_received').on(table.receivedAt)],
+);
+
+/**
+ * A bank (non-investment) account's posted transactions, from Plaid's bank
+ * history reports (pending ones are left out: their ids change when they
+ * post). Only as current as the last report.
+ */
+export const bankTransactions = sqliteTable(
+  'bank_transactions',
+  {
+    id: text('id').primaryKey(),
+    householdId: text('household_id')
+      .notNull()
+      .references(() => households.id, { onDelete: 'cascade' }),
+    accountId: text('account_id')
+      .notNull()
+      .references(() => accounts.id, { onDelete: 'cascade' }),
+    /** Plaid transaction_id. */
+    externalId: text('external_id').notNull(),
+    date: text('date').notNull(),
+    /** Minor units; positive when money leaves the account (Plaid convention). */
+    amount: integer('amount').notNull(),
+    currency: text('currency').notNull(),
+    description: text('description'),
+    createdAt: integer('created_at').notNull(),
+  },
+  (table) => [uniqueIndex('bank_transactions_external').on(table.accountId, table.externalId), index('bank_transactions_account_date').on(table.householdId, table.accountId, table.date)],
 );
 
 export const SYNC_ACTIONS = ['sync', 'history', 'balance_history', 'relink', 'disconnect', 'account'] as const;
@@ -629,6 +682,7 @@ export const JOB_TYPES = [
   'report_collect',
   'report_account',
   'report_finish',
+  'split_factors',
 ] as const;
 export const JOB_STATES = ['waiting', 'queued', 'running', 'done', 'failed'] as const;
 

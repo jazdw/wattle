@@ -19,6 +19,10 @@ export interface PlaidState {
   failWith: string | null;
   transactionsNotReady: boolean;
   historicalBalances: Record<string, { date: string; current: number }[]>;
+  /** A bank report's transactions per account. */
+  reportTransactions: Record<string, { transaction_id: string; date: string; amount: number; original_description: string; pending: boolean }[]>;
+  /** start_date of each /investments/transactions/get (first page). */
+  transactionStarts: string[];
   assetReportReady: boolean;
   assetReportFails: boolean;
   /** Plaid couldn't build the report (after an ASSETS:ERROR webhook). */
@@ -85,6 +89,8 @@ export function fakePlaid(initial: Partial<PlaidState> = {}): PlaidApi & { state
     failWith: null,
     transactionsNotReady: false,
     historicalBalances: {},
+    reportTransactions: {},
+    transactionStarts: [],
     assetReportReady: true,
     assetReportFails: false,
     assetReportGetError: null,
@@ -111,6 +117,7 @@ export function fakePlaid(initial: Partial<PlaidState> = {}): PlaidApi & { state
         getAccounts: '/accounts/get',
         getHoldings: '/investments/holdings/get',
         getInvestmentTransactions: '/investments/transactions/get',
+        getAssetReport: '/asset_report/get',
       };
       return new Proxy(api, {
         get(target, key, receiver) {
@@ -149,15 +156,17 @@ export function fakePlaid(initial: Partial<PlaidState> = {}): PlaidApi & { state
       guard('holdings');
       return { accounts: state.accounts, holdings: state.holdings, securities: state.securities } as never;
     },
-    getInvestmentTransactions: async (_token, _start, _end, offset) => {
+    getInvestmentTransactions: async (_token, start, end, offset) => {
       guard('transactions');
+      if (offset === 0) state.transactionStarts.push(start);
       if (state.transactionsNotReady) throw new PlaidApiError(400, 'ITEM_ERROR', 'PRODUCT_NOT_READY', 'not ready');
-      const page = state.transactions.slice(offset, offset + state.transactionsPageSize);
+      const inRange = state.transactions.filter((txn) => !txn.date || (txn.date >= start && txn.date <= end));
+      const page = inRange.slice(offset, offset + state.transactionsPageSize);
       return {
         accounts: state.accounts,
         securities: state.securities,
         investment_transactions: page,
-        total_investment_transactions: state.transactions.length,
+        total_investment_transactions: inRange.length,
       } as never;
     },
     createAssetReport: async (_token, days) => {
@@ -176,6 +185,7 @@ export function fakePlaid(initial: Partial<PlaidState> = {}): PlaidApi & { state
             accounts: Object.entries(state.historicalBalances).map(([accountId, balances]) => ({
               account_id: accountId,
               historical_balances: balances.map((balance) => ({ ...balance, iso_currency_code: 'USD' })),
+              transactions: state.reportTransactions[accountId] ?? [],
             })),
           },
         ],
@@ -223,7 +233,8 @@ export function fakePrices(
     calls,
     async dailyCloses(ticker, start, end) {
       calls.push(`${ticker}:${start}:${end}`);
-      return (series[ticker.toUpperCase()] ?? []).filter((row) => row.date >= start && row.date <= end);
+      // Like Tiingo's daily prices, every day says its split factor (1 unless given).
+      return (series[ticker.toUpperCase()] ?? []).filter((row) => row.date >= start && row.date <= end).map((row) => ({ splitFactor: 1, ...row }));
     },
   };
   if (descriptions) {

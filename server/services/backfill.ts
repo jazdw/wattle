@@ -18,12 +18,12 @@
  * never overwrite synced, imported or manual rows, and every job can run
  * again safely.
  */
-import { and, eq, gte, inArray, isNull, lt, max, min, notLike, or, sql } from 'drizzle-orm';
+import { and, eq, gte, inArray, isNotNull, isNull, lt, lte, max, min, ne, notInArray, notLike, or, sql } from 'drizzle-orm';
 import type { BatchItem } from 'drizzle-orm/batch';
 import { addDays, dateRange, marketDate, type IsoDate } from '../../shared/dates';
 import { PlaidApiError } from '../adapters/plaid';
 import { chunkRows, inChunks, runAtomic, runBatch } from '../db/batch';
-import { accountDaily, accounts, connections, holdingDaily, holdings, investmentTransactions, jobs, securities, syncRuns } from '../db/schema';
+import { accountDaily, accounts, connections, holdingDaily, holdings, investmentTransactions, jobs, pricesDaily, securities, syncRuns } from '../db/schema';
 import type { Tenant } from '../db/tenant';
 import type { Deps } from '../ports';
 import { reconstructHistory } from './backfillCore';
@@ -32,9 +32,9 @@ import { encryptToken, loadTokenKeys, tokenAad } from './crypto';
 import { enqueue, RetryLater, type JobContext, type JobSpec, type JobType } from './jobRunner';
 import { WAITING_FOR_TOMORROW } from './writeBudget';
 import { queueReportCollection } from './assetReports';
-import { closeLookup, ensureCloses, ensureFx } from './pricing';
+import { closeLookup, ensureCloses, ensureFx, fillSplitFactors } from './pricing';
 import { connectionLease, Lease } from './lease';
-import { accessTokenFor, getConnection, HISTORY_DAYS, isActive, type ConnectionRow } from './sync';
+import { accessTokenFor, getConnection, HISTORY_DAYS, INACTIVE, isActive, type ConnectionRow } from './sync';
 import { isCashSecurity, priceOn } from './valuation';
 
 /** A first load (or Reload history), a rebuild after a late transaction, or days the syncs missed. */
@@ -316,7 +316,7 @@ export async function planHistory({ deps, tenant, job, renew }: JobContext): Pro
         if (plan.mode === 'rebuild' && accountIds.length > 0) {
           // Drop the previous estimate (only backfilled rows; synced, imported
           // and manual ones stay) and reconstruct with every transaction.
-          run.note = 'Rebuilt because a transaction dated before the previous history arrived later.';
+          run.note = 'Rebuilt with the latest transactions and share splits.';
           outcome.push(
             tenant.db.delete(accountDaily).where(tenant.scope(accountDaily, inArray(accountDaily.accountId, accountIds), eq(accountDaily.source, 'backfill'))),
             tenant.db.delete(holdingDaily).where(tenant.scope(holdingDaily, inArray(holdingDaily.accountId, accountIds), eq(holdingDaily.source, 'backfill'))),
@@ -438,6 +438,7 @@ export async function historyBlock({ deps, tenant, job, renew }: JobContext): Pr
       securityId: investmentTransactions.securityId,
       quantity: investmentTransactions.quantity,
       amount: investmentTransactions.amount,
+      subtype: investmentTransactions.subtype,
     })
     .from(investmentTransactions)
     .where(tenant.scope(investmentTransactions, eq(investmentTransactions.accountId, account.id), gte(investmentTransactions.date, block.start)));
@@ -461,6 +462,7 @@ export async function historyBlock({ deps, tenant, job, renew }: JobContext): Pr
   const securityById = new Map(securityRows.map((security) => [security.id, security]));
   const tickers = securityRows.flatMap((security) => (security.isPublic && security.ticker ? [security.ticker] : []));
   const closes = await closeLookup(deps, tickers, addDays(block.from, -PRICE_LOOKBACK_DAYS), block.to);
+  const splitFactor = await splitLookup(deps, securityRows, transactions, block.start, block.end);
   const cashSecurity = [...involved].find((id) => {
     const security = securityById.get(id);
     return security ? isCashSecurity(security) : false;
@@ -478,6 +480,7 @@ export async function historyBlock({ deps, tenant, job, renew }: JobContext): Pr
       const security = securityById.get(securityId);
       return security ? priceOn(security, date, closes) : null;
     },
+    splitFactor,
   });
   const holdingRows = days.flatMap((day) =>
     day.positions.map((position) => ({
@@ -633,6 +636,41 @@ export async function historyFailed({ deps, tenant, job }: JobContext, error: { 
   await runAtomic(tenant.db, statements);
 }
 
+/** Days around a split in which an institution's own record of it counts as that split. */
+const SPLIT_MATCH_DAYS = 5;
+
+/**
+ * Split factors by security and date, from the stored prices of the public
+ * securities involved. A split the institution recorded itself (a Plaid
+ * transaction with subtype split, within a few days) is already undone by
+ * that transaction, so the price data's factor is skipped for it.
+ */
+async function splitLookup(
+  deps: Deps,
+  securityRows: { id: string; ticker: string | null; isPublic: boolean }[],
+  transactions: { date: IsoDate; securityId: string | null; subtype: string | null }[],
+  start: IsoDate,
+  end: IsoDate,
+): Promise<(securityId: string, date: IsoDate) => number> {
+  const tickerOf = new Map(securityRows.flatMap((security) => (security.isPublic && security.ticker ? [[security.id, security.ticker.toUpperCase()] as const] : [])));
+  const factors = new Map<string, number>();
+  for (const chunk of inChunks([...new Set(tickerOf.values())])) {
+    const rows = await deps.db
+      .select({ ticker: pricesDaily.ticker, date: pricesDaily.date, splitFactor: pricesDaily.splitFactor })
+      .from(pricesDaily)
+      .where(and(inArray(pricesDaily.ticker, chunk), gte(pricesDaily.date, start), lte(pricesDaily.date, end), isNotNull(pricesDaily.splitFactor), ne(pricesDaily.splitFactor, 1)));
+    for (const row of rows) factors.set(`${row.ticker}|${row.date}`, row.splitFactor!);
+  }
+  const recorded = transactions.filter((txn) => txn.subtype === 'split' && txn.securityId);
+  return (securityId, date) => {
+    const ticker = tickerOf.get(securityId);
+    const factor = ticker ? factors.get(`${ticker}|${date}`) : undefined;
+    if (factor === undefined) return 1;
+    const own = recorded.some((txn) => txn.securityId === securityId && Math.abs(Date.parse(txn.date) - Date.parse(date)) <= SPLIT_MATCH_DAYS * 86_400_000);
+    return own ? 1 : factor;
+  };
+}
+
 /** Snapshot rows that carried a balance forward because the sync was missed. */
 function carriedForward(tenant: Tenant, accountIds: string[], from: IsoDate, before: IsoDate) {
   return tenant.scope(
@@ -765,4 +803,31 @@ async function requestBalanceHistory(
     }
     throw error;
   }
+}
+
+/**
+ * split_factors (nightly, per household): fill in unknown split factors for
+ * the household's public tickers, and rebuild the investment history of its
+ * logins if one turned out to have split (their rebuilt days used today's
+ * share counts before it).
+ */
+export async function splitFactors({ deps, tenant }: JobContext): Promise<Record<string, unknown>> {
+  const tickers = await tenant.db
+    .selectDistinct({ ticker: securities.ticker })
+    .from(securities)
+    .where(tenant.scope(securities, eq(securities.isPublic, true), isNotNull(securities.ticker)));
+  const split = await fillSplitFactors(
+    deps,
+    tickers.map((row) => row.ticker!),
+  );
+  if (split.length === 0) return { split: [] };
+  const logins = await tenant.db
+    .select({ id: connections.id })
+    .from(connections)
+    .where(tenant.scope(connections, eq(connections.hasInvestments, true), notInArray(connections.status, INACTIVE)));
+  for (const login of logins) {
+    await tenant.db.update(connections).set({ historyStaleAt: deps.now().getTime() }).where(tenant.scope(connections, eq(connections.id, login.id)));
+    await queueDueHistory(deps, tenant, login.id, 'nightly');
+  }
+  return { split };
 }

@@ -18,7 +18,7 @@ import { marketDate } from '../../shared/dates';
 import { toMinor } from '../../shared/money';
 import { PlaidApiError } from '../adapters/plaid';
 import { chunkRows, runAtomic } from '../db/batch';
-import { accountDaily, accounts, connections, jobs } from '../db/schema';
+import { accountDaily, accounts, bankTransactions, connections, jobs } from '../db/schema';
 import type { Tenant } from '../db/tenant';
 import type { Deps } from '../ports';
 import { completeRunStatements, SyncRun, type SyncTrigger } from './activity';
@@ -119,14 +119,20 @@ async function fetchReport(deps: Deps, tenant: Tenant, connection: ConnectionRow
   return { report: await run.plaid().getAssetReport(token), token };
 }
 
-/** The report's daily balances for the connection's accounts, by account id. */
-async function balancesByAccount(tenant: Tenant, connection: ConnectionRow, report: AssetReport) {
+interface ReportRows {
+  balances: (typeof accountDaily.$inferInsert)[];
+  transactions: (typeof bankTransactions.$inferInsert)[];
+}
+
+/** The report's daily balances and posted transactions for the connection's accounts, by account id. */
+async function reportByAccount(deps: Deps, tenant: Tenant, connection: ConnectionRow, report: AssetReport) {
   const accountRows = await tenant.db
     .select({ id: accounts.id, externalId: accounts.externalId, type: accounts.type, currency: accounts.currency })
     .from(accounts)
     .where(tenant.scope(accounts, eq(accounts.connectionId, connection.id), eq(accounts.isHidden, false)));
   const byExternal = new Map(accountRows.map((row) => [row.externalId, row]));
-  const result = new Map<string, (typeof accountDaily.$inferInsert)[]>();
+  const now = deps.now().getTime();
+  const result = new Map<string, ReportRows>();
   for (const item of report.items) {
     for (const reportAccount of item.accounts) {
       const account = byExternal.get(reportAccount.account_id);
@@ -134,10 +140,10 @@ async function balancesByAccount(tenant: Tenant, connection: ConnectionRow, repo
       // Investment accounts' history is rebuilt from their transactions.
       if (connection.hasInvestments && account.type === 'investment') continue;
       const liability = account.type === 'credit' || account.type === 'loan';
-      const rows = result.get(account.id) ?? [];
+      const rows = result.get(account.id) ?? { balances: [], transactions: [] };
       for (const balance of reportAccount.historical_balances ?? []) {
         const minor = toMinor(balance.current);
-        rows.push({
+        rows.balances.push({
           householdId: tenant.householdId,
           accountId: account.id,
           date: balance.date,
@@ -146,11 +152,38 @@ async function balancesByAccount(tenant: Tenant, connection: ConnectionRow, repo
           source: 'backfill',
         });
       }
+      // Posted only: a pending transaction's id changes when it posts.
+      for (const txn of reportAccount.transactions ?? []) {
+        if (txn.pending || !txn.transaction_id) continue;
+        rows.transactions.push({
+          id: crypto.randomUUID(),
+          householdId: tenant.householdId,
+          accountId: account.id,
+          externalId: txn.transaction_id,
+          date: txn.date,
+          amount: toMinor(txn.amount),
+          currency: txn.iso_currency_code ?? account.currency,
+          description: txn.original_description ?? null,
+          createdAt: now,
+        });
+      }
       result.set(account.id, rows);
     }
   }
   return result;
 }
+
+/** Statements writing an account's report rows: balances (see balanceStatements) and new transactions. */
+function reportStatements(tenant: Tenant, rows: ReportRows): BatchItem<'sqlite'>[] {
+  return [
+    ...balanceStatements(tenant, rows.balances),
+    ...chunkRows(bankTransactions, rows.transactions).map((chunk) =>
+      tenant.db.insert(bankTransactions).values(chunk).onConflictDoNothing({ target: [bankTransactions.accountId, bankTransactions.externalId] }),
+    ),
+  ];
+}
+
+const reportSize = (rows: ReportRows) => rows.balances.length + rows.transactions.length;
 
 function balanceStatements(tenant: Tenant, rows: (typeof accountDaily.$inferInsert)[]): BatchItem<'sqlite'>[] {
   return chunkRows(accountDaily, rows).map((chunk) =>
@@ -280,12 +313,19 @@ export async function collectReport({ deps, tenant, job, renew }: JobContext): P
     return { failed: error.code };
   }
 
-  const byAccount = await balancesByAccount(tenant, connection, fetched.report);
-  const days = [...byAccount.values()].reduce((sum, rows) => sum + rows.length, 0);
-  if (days <= deps.config.jobChunkRows) {
+  const byAccount = await reportByAccount(deps, tenant, connection, fetched.report);
+  const days = [...byAccount.values()].reduce((sum, rows) => sum + rows.balances.length, 0);
+  const size = [...byAccount.values()].reduce((sum, rows) => sum + reportSize(rows), 0);
+  if (size <= deps.config.jobChunkRows) {
     run.count('days', days);
+    run.count('transactions', [...byAccount.values()].reduce((sum, rows) => sum + rows.transactions.length, 0));
     await withLease(deps, tenant, connection.id, renew, () =>
-      runAtomic(tenant.db, [...balanceStatements(tenant, [...byAccount.values()].flat()), ...collectedStatements(deps, tenant, connection), run.statement()]),
+      runAtomic(tenant.db, [
+        ...[...byAccount.values()].flatMap((rows) => reportStatements(tenant, rows)),
+        ...collectedStatements(deps, tenant, connection),
+        run.statement(),
+        ...run.responseStatements(),
+      ]),
     );
     await removeReport(run, fetched.token);
     return { days };
@@ -293,7 +333,7 @@ export async function collectReport({ deps, tenant, job, renew }: JobContext): P
   // Large: one job per account, then the finish.
   await run.begin();
   await renew();
-  await runAtomic(tenant.db, [run.statement('running')]);
+  await runAtomic(tenant.db, [run.statement('running'), ...run.responseStatements()]);
   await enqueue(deps, tenant, [
     ...[...byAccount.keys()].map((accountId) => {
       const payload: AccountPayload = { ...collect, accountId };
@@ -311,9 +351,9 @@ export async function collectReportAccount({ deps, tenant, job, renew }: JobCont
   if (!connection?.assetReportTokenEnc || !deps.plaid) return { days: 0 };
   const run = new SyncRun(deps, tenant, connection.id, 'balance_history', payload.trigger);
   const { report } = await fetchReport(deps, tenant, connection, run);
-  const rows = (await balancesByAccount(tenant, connection, report)).get(payload.accountId) ?? [];
-  await withLease(deps, tenant, connection.id, renew, () => runAtomic(tenant.db, balanceStatements(tenant, rows)));
-  return { days: rows.length };
+  const rows = (await reportByAccount(deps, tenant, connection, report)).get(payload.accountId) ?? { balances: [], transactions: [] };
+  await withLease(deps, tenant, connection.id, renew, () => runAtomic(tenant.db, reportStatements(tenant, rows)));
+  return { days: rows.balances.length, transactions: rows.transactions.length };
 }
 
 /** report_finish: every account is in; mark the report collected and delete it at Plaid. */

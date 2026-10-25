@@ -19,7 +19,7 @@ import type { BatchItem } from 'drizzle-orm/batch';
 import type { ActivityEntry, ActivityResponse, SyncChange, SyncRunSummary } from '../../shared/types';
 import { PlaidApiError, type PlaidApi, type PlaidCall, type PlaidResponse } from '../adapters/plaid';
 import { runBatch } from '../db/batch';
-import { connections, jobRuns, jobs, plaidResponses, priceRuns, snapshotRuns, syncRuns, type SYNC_ACTIONS, type SYNC_TRIGGERS } from '../db/schema';
+import { connections, jobRuns, jobs, plaidResponses, plaidWebhooks, priceRuns, snapshotRuns, syncRuns, type SYNC_ACTIONS, type SYNC_TRIGGERS } from '../db/schema';
 import type { Tenant } from '../db/tenant';
 import type { Deps } from '../ports';
 import { describeError } from '../lib/errors';
@@ -31,8 +31,10 @@ export type SyncTrigger = (typeof SYNC_TRIGGERS)[number];
 const MAX_CHANGES = 500;
 /** How long the logs are kept (matches the two years of history). */
 const RETENTION_DAYS = 730;
-/** Plaid's raw responses are kept for checking recent values only. */
+/** Plaid's raw responses and webhooks are kept for checking recent values only. */
 export const PLAID_RESPONSE_DAYS = 30;
+/** The largest response body kept (characters), well under D1's 2 MB row limit. */
+const MAX_RESPONSE_CHARS = 1_500_000;
 /** Error code of a run that was stopped part-way. */
 export const INTERRUPTED = 'INTERRUPTED';
 export const INTERRUPTED_MESSAGE = 'Stopped before finishing, most likely by a Worker limit (CPU time, run time or requests). Its finished steps are kept.';
@@ -81,8 +83,11 @@ export class SyncRun {
   /** Plaid's responses to the run's data calls, to keep with its data (plaid_responses). */
   responseStatements(): BatchItem<'sqlite'>[] {
     const receivedAt = this.deps.now().getTime();
-    return this.plaidResponses.map((response) =>
-      this.tenant.db.insert(plaidResponses).values({
+    return this.plaidResponses.map((response) => {
+      // D1 rows top out at 2 MB; a years-long bank report can be bigger.
+      const json = JSON.stringify(response.body);
+      const body = json.length <= MAX_RESPONSE_CHARS ? json : JSON.stringify({ omitted: 'too large to keep', characters: json.length });
+      return this.tenant.db.insert(plaidResponses).values({
         id: crypto.randomUUID(),
         householdId: this.tenant.householdId,
         connectionId: this.connectionId,
@@ -90,9 +95,9 @@ export class SyncRun {
         endpoint: response.endpoint,
         requestId: response.requestId,
         receivedAt,
-        body: JSON.stringify(response.body),
-      }),
-    );
+        body,
+      });
+    });
   }
 
   count(key: string, amount: number): void {
@@ -390,5 +395,6 @@ export async function pruneLogs(deps: Deps): Promise<void> {
     deps.db.delete(jobRuns).where(lt(jobRuns.startedAt, cutoff)),
     deps.db.delete(snapshotRuns).where(lt(snapshotRuns.startedAt, cutoff)),
     deps.db.delete(plaidResponses).where(lt(plaidResponses.receivedAt, deps.now().getTime() - PLAID_RESPONSE_DAYS * 24 * 3600 * 1000)),
+    deps.db.delete(plaidWebhooks).where(lt(plaidWebhooks.receivedAt, deps.now().getTime() - PLAID_RESPONSE_DAYS * 24 * 3600 * 1000)),
   ]);
 }

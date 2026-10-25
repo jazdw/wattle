@@ -17,7 +17,7 @@ const REVIEWED: Record<string, Record<string, string>> = {
     securities: 'connection lease; new ones get derived ids (shared across connections)',
   },
   'server/services/backfill.ts': {
-    connections: 'connection lease (or marking a load due + note when busy)',
+    connections: "connection lease (or marking a load due + note when busy); split_factors: setting history_stale_at, a timestamp any writer may set (the history finish clears only one older than its start)",
     accountDaily: 'connection lease; insert-or-ignore backfill rows, rebuild deletes only backfill rows',
     holdingDaily: 'connection lease; as accountDaily',
   },
@@ -25,9 +25,11 @@ const REVIEWED: Record<string, Record<string, string>> = {
     connections: 'connection lease, atomic with the balances and log row',
     accountDaily: 'connection lease, atomic with the status and log row (each account job: its balances only, replacing carried-forward rows; safe to repeat)',
     jobs: "moving a waiting report check's run_after to now: one conditional update; the job runner's claim still decides who runs it",
+    bankTransactions: 'connection lease, atomic with the balances; insert-or-ignore by (account, Plaid transaction id), safe to repeat',
   },
   'server/routes/plaid.ts': {
     connections: 'webhooks: status via statusStatement (newest wins), consent warning and new-accounts columns; no lease needed',
+    plaidWebhooks: 'one insert with a fresh id per verified webhook',
   },
   'server/routes/accounts.ts': {
     connections: 'accounts chosen: clears only the new-accounts notice, and only one from before the request (single conditional update; nothing else writes it but the webhook)',
@@ -64,9 +66,10 @@ const REVIEWED: Record<string, Record<string, string>> = {
     jobRuns: 'pruning old entries',
     snapshotRuns: 'pruning old entries',
     plaidResponses: "inserts with fresh ids, in the batch of the sync they belong to (under the connection lease); pruning old entries",
+    plaidWebhooks: 'pruning old entries',
   },
   'server/services/pricing.ts': {
-    pricesDaily: 'public data; atomic with its price_runs row; last write wins with provider data',
+    pricesDaily: "public data; atomic with its price_runs row; last write wins with provider data (a known split factor is kept); unknown split factors set to 1 where still null",
     priceRuns: 'log rows, atomic with the prices they record',
     fxDaily: 'public data; insert-or-ignore, atomic with its log row',
   },
@@ -109,7 +112,8 @@ describe('write paths', () => {
 
   it('chunked (non-atomic) batches are used only for idempotent bulk writes', () => {
     const users = sourceFiles('server').filter((file) => file !== 'server/db/batch.ts' && /\brunBatch\(/.test(readFileSync(file, 'utf8')));
-    // Pruning old log rows, history backfill rows (insert-or-ignore) and cache upserts.
-    expect(users.sort()).toEqual(['server/services/activity.ts', 'server/services/backfill.ts', 'server/services/cache.ts']);
+    // Pruning old log rows, history backfill rows (insert-or-ignore), cache upserts and
+    // marking unknown split factors as none (setting 1 where still null).
+    expect(users.sort()).toEqual(['server/services/activity.ts', 'server/services/backfill.ts', 'server/services/cache.ts', 'server/services/pricing.ts']);
   });
 });

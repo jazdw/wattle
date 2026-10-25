@@ -7,7 +7,7 @@ import type { Deps } from '../ports';
 import type { SyncTrigger } from './activity';
 import { finishNightly } from './jobs';
 import { collectReport, collectReportAccount, finishReport, reportFailed } from './assetReports';
-import { finishHistory, historyBlock, historyFailed, historyPrices, planHistory } from './backfill';
+import { finishHistory, historyBlock, historyFailed, historyPrices, planHistory, splitFactors } from './backfill';
 import { runJobWith, runNextWith, type FailureHandlers, type JobHandler, type JobHandlers, type JobOutcome } from './jobRunner';
 import { typeHandEnteredSecurities } from './securityTypes';
 import { snapshotHousehold } from './snapshots';
@@ -49,6 +49,7 @@ export const HANDLERS: JobHandlers = {
   report_collect: collectReport,
   report_account: collectReportAccount,
   report_finish: finishReport,
+  split_factors: splitFactors,
 };
 
 /**

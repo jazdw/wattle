@@ -84,6 +84,36 @@ export interface SyncRunSummary {
 
 export type AccountType = 'depository' | 'credit' | 'loan' | 'investment' | 'property' | 'other';
 
+/** One transaction of an account: an investment one from Plaid's Investments data, or a bank one from a bank history report. */
+export interface TransactionEntry {
+  id: string;
+  date: string;
+  /** Investment: buy | sell | cash | fee | transfer | cancel; bank: null. */
+  type: string | null;
+  /** Plaid's subtype (dividend, reinvestment, split, …). */
+  subtype: string | null;
+  description: string | null;
+  ticker: string | null;
+  security: string | null;
+  quantity: number | null;
+  price: number | null;
+  /** Minor units, in the response's currency; positive when money leaves the account (Plaid's convention). */
+  amount: number;
+}
+
+export interface TransactionsResponse {
+  /** Where they come from: investment transactions, or bank transactions from bank history reports. */
+  kind: 'investment' | 'bank';
+  currency: Currency;
+  /** The earliest and latest transaction dates held. */
+  from: string | null;
+  to: string | null;
+  /** Newest first, at most TRANSACTIONS_LIMIT. */
+  transactions: TransactionEntry[];
+  /** More than were returned. */
+  truncated: boolean;
+}
+
 export interface AccountSummary {
   id: string;
   source: 'plaid' | 'manual';
@@ -124,7 +154,8 @@ export type JobType =
   | 'history_finish'
   | 'report_collect'
   | 'report_account'
-  | 'report_finish';
+  | 'report_finish'
+  | 'split_factors';
 
 /** One entry in the household's activity: a login's run, a snapshot, or the nightly job. */
 export type ActivityEntry =

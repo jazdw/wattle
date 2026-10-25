@@ -57,7 +57,7 @@ export interface PlaidResponse {
 }
 
 /** The data calls whose responses are kept (plaid_responses). */
-export const RECORDED_ENDPOINTS = new Set(['/accounts/get', '/investments/holdings/get', '/investments/transactions/get']);
+export const RECORDED_ENDPOINTS = new Set(['/accounts/get', '/investments/holdings/get', '/investments/transactions/get', '/asset_report/get']);
 
 export type LinkKind = 'investments' | 'account';
 
