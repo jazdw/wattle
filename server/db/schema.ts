@@ -415,8 +415,8 @@ export const pricesDaily = sqliteTable(
     /**
      * Shares after a split per share before, on the first day at the new
      * price (4 for a 4-for-1 split); 1 on other days. Null when the
-     * source didn't say (Tiingo's IEX endpoint, Plaid): filled in later from
-     * Tiingo's daily prices (fillSplitFactors).
+     * source didn't say (Tiingo's IEX endpoint, Plaid): a history rebuild
+     * fetches those days again from Tiingo's daily prices first (ensureCloses).
      */
     splitFactor: real('split_factor'),
   },
@@ -682,7 +682,6 @@ export const JOB_TYPES = [
   'report_collect',
   'report_account',
   'report_finish',
-  'split_factors',
 ] as const;
 export const JOB_STATES = ['waiting', 'queued', 'running', 'done', 'failed'] as const;
 

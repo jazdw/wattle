@@ -18,7 +18,7 @@
  * never overwrite synced, imported or manual rows, and every job can run
  * again safely.
  */
-import { and, eq, gte, inArray, isNotNull, isNull, lt, lte, max, min, ne, notInArray, notLike, or, sql } from 'drizzle-orm';
+import { and, eq, gte, inArray, isNotNull, isNull, lt, lte, max, min, ne, notLike, or, sql } from 'drizzle-orm';
 import type { BatchItem } from 'drizzle-orm/batch';
 import { addDays, dateRange, marketDate, type IsoDate } from '../../shared/dates';
 import { PlaidApiError } from '../adapters/plaid';
@@ -32,9 +32,9 @@ import { encryptToken, loadTokenKeys, tokenAad } from './crypto';
 import { enqueue, RetryLater, type JobContext, type JobSpec, type JobType } from './jobRunner';
 import { WAITING_FOR_TOMORROW } from './writeBudget';
 import { queueReportCollection } from './assetReports';
-import { closeLookup, ensureCloses, ensureFx, fillSplitFactors } from './pricing';
+import { closeLookup, ensureCloses, ensureFx } from './pricing';
 import { connectionLease, Lease } from './lease';
-import { accessTokenFor, getConnection, HISTORY_DAYS, INACTIVE, isActive, type ConnectionRow } from './sync';
+import { accessTokenFor, getConnection, HISTORY_DAYS, isActive, type ConnectionRow } from './sync';
 import { isCashSecurity, priceOn } from './valuation';
 
 /** A first load (or Reload history), a rebuild after a late transaction, or days the syncs missed. */
@@ -805,29 +805,3 @@ async function requestBalanceHistory(
   }
 }
 
-/**
- * split_factors (nightly, per household): fill in unknown split factors for
- * the household's public tickers, and rebuild the investment history of its
- * logins if one turned out to have split (their rebuilt days used today's
- * share counts before it).
- */
-export async function splitFactors({ deps, tenant }: JobContext): Promise<Record<string, unknown>> {
-  const tickers = await tenant.db
-    .selectDistinct({ ticker: securities.ticker })
-    .from(securities)
-    .where(tenant.scope(securities, eq(securities.isPublic, true), isNotNull(securities.ticker)));
-  const split = await fillSplitFactors(
-    deps,
-    tickers.map((row) => row.ticker!),
-  );
-  if (split.length === 0) return { split: [] };
-  const logins = await tenant.db
-    .select({ id: connections.id })
-    .from(connections)
-    .where(tenant.scope(connections, eq(connections.hasInvestments, true), notInArray(connections.status, INACTIVE)));
-  for (const login of logins) {
-    await tenant.db.update(connections).set({ historyStaleAt: deps.now().getTime() }).where(tenant.scope(connections, eq(connections.id, login.id)));
-    await queueDueHistory(deps, tenant, login.id, 'nightly');
-  }
-  return { split };
-}

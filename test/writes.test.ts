@@ -17,7 +17,7 @@ const REVIEWED: Record<string, Record<string, string>> = {
     securities: 'connection lease; new ones get derived ids (shared across connections)',
   },
   'server/services/backfill.ts': {
-    connections: "connection lease (or marking a load due + note when busy); split_factors: setting history_stale_at, a timestamp any writer may set (the history finish clears only one older than its start)",
+    connections: 'connection lease (or marking a load due + note when busy)',
     accountDaily: 'connection lease; insert-or-ignore backfill rows, rebuild deletes only backfill rows',
     holdingDaily: 'connection lease; as accountDaily',
   },

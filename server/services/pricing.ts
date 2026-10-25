@@ -3,7 +3,7 @@
  * reference data shared by all households). Lookups carry the last known
  * value forward over weekends and holidays.
  */
-import { and, asc, desc, eq, gte, inArray, isNull, lte, max, min, sql } from 'drizzle-orm';
+import { and, desc, eq, gte, inArray, isNull, lte, max, min, sql } from 'drizzle-orm';
 import { addDays, lastTradingDay, type IsoDate } from '../../shared/dates';
 import type { Currency, FxRates } from '../../shared/money';
 import type { BatchItem } from 'drizzle-orm/batch';
@@ -243,10 +243,12 @@ export async function ensureCloses(deps: Deps, tickers: string[], start: IsoDate
   if (!deps.prices || tickers.length === 0) return gaps;
   const unique = normalise(tickers);
   const have = await coverage(deps, unique, end);
+  const unknownSplits = await unknownSplitSpans(deps, unique, start, end);
   const unknown = await knownUnknowns(deps, unique);
   const prices = deps.prices;
   const run = new PriceRun(deps, 'history');
   const rows: PriceRow[] = [];
+  const settled: BatchItem<'sqlite'>[] = [];
   const newlyUnknown: string[] = [];
 
   for (const ticker of unique) {
@@ -261,7 +263,11 @@ export async function ensureCloses(deps: Deps, tickers: string[], start: IsoDate
       if (stored.first > addDays(start, 4)) ranges.push([start, addDays(stored.first, -1)]);
       if (stored.last < lastTradingDay(end)) ranges.push([addDays(stored.last, 1), end]);
     }
-    for (const [from, to] of ranges) {
+    // Days stored without a split factor (closes from Tiingo's IEX endpoint):
+    // fetched again from the daily prices, which say whether each day split.
+    const splits = unknownSplits.get(ticker);
+    if (splits) ranges.push([splits.from, splits.to]);
+    for (const [from, to] of mergeRanges(ranges)) {
       if (from > to) continue;
       // Once the provider says "too many requests", asking again only makes it worse.
       if (gaps.rateLimited) {
@@ -282,6 +288,8 @@ export async function ensureCloses(deps: Deps, tickers: string[], start: IsoDate
         break;
       }
       for (const close of closes) rows.push(tiingoRow(ticker, close));
+      // Days in the range Tiingo didn't return count as no split, so they aren't asked about again.
+      settled.push(deps.db.update(pricesDaily).set({ splitFactor: 1 }).where(and(eq(pricesDaily.ticker, ticker), isNull(pricesDaily.splitFactor), gte(pricesDaily.date, from), lte(pricesDaily.date, to))));
     }
   }
   if (run.calls.length === 0 && gaps.failed.length === 0) {
@@ -289,8 +297,34 @@ export async function ensureCloses(deps: Deps, tickers: string[], start: IsoDate
     return gaps;
   }
   await saveFetchedCloses(deps, run, rows);
+  if (settled.length > 0) await runBatch(deps.db, settled);
   await cacheSetMany(deps, newlyUnknown.map((ticker) => [unknownKey(ticker), true]), UNKNOWN_TTL_SECONDS);
   return gaps;
+}
+
+/** Per ticker, the first and last day in [start, end] stored without a split factor. */
+async function unknownSplitSpans(deps: Deps, tickers: string[], start: IsoDate, end: IsoDate) {
+  const spans = new Map<string, { from: IsoDate; to: IsoDate }>();
+  for (const chunk of inChunks(tickers)) {
+    const rows = await deps.db
+      .select({ ticker: pricesDaily.ticker, from: min(pricesDaily.date), to: max(pricesDaily.date) })
+      .from(pricesDaily)
+      .where(and(inArray(pricesDaily.ticker, chunk), isNull(pricesDaily.splitFactor), gte(pricesDaily.date, start), lte(pricesDaily.date, end)))
+      .groupBy(pricesDaily.ticker);
+    for (const row of rows) if (row.from && row.to) spans.set(row.ticker, { from: row.from, to: row.to });
+  }
+  return spans;
+}
+
+/** Date ranges with overlapping or adjacent ones joined (each day fetched once). */
+function mergeRanges(ranges: [IsoDate, IsoDate][]): [IsoDate, IsoDate][] {
+  const merged: [IsoDate, IsoDate][] = [];
+  for (const [from, to] of [...ranges].filter(([from, to]) => from <= to).sort((a, b) => a[0].localeCompare(b[0]))) {
+    const last = merged.at(-1);
+    if (last && from <= addDays(last[1], 1)) last[1] = to > last[1] ? to : last[1];
+    else merged.push([from, to]);
+  }
+  return merged;
 }
 
 /** Remember what a ticker is for a month (it rarely changes). */
@@ -372,57 +406,6 @@ function asOf<T extends { date: IsoDate }, R>(list: T[] | undefined, date: IsoDa
     else high = middle - 1;
   }
   return pick(list[low]);
-}
-
-/** Tickers whose unknown split factors one night fills in (a Tiingo request each). */
-export const SPLIT_FILL_TICKERS = 40;
-
-/**
- * Fill in these tickers' split factors that are still unknown (closes from
- * Tiingo's IEX endpoint, or stored before split factors were kept) from
- * Tiingo's daily prices, a few tickers a night. Days Tiingo doesn't return are taken as no
- * split, so a ticker isn't asked about again. Returns the tickers found to
- * have split, whose rebuilt history depends on it.
- */
-export async function fillSplitFactors(deps: Deps, tickers: string[], limit = SPLIT_FILL_TICKERS): Promise<string[]> {
-  const wanted = normalise(tickers);
-  if (!deps.prices || wanted.length === 0) return [];
-  const unknown = await deps.db
-    .select({ ticker: pricesDaily.ticker, from: min(pricesDaily.date), to: max(pricesDaily.date) })
-    .from(pricesDaily)
-    .where(and(isNull(pricesDaily.splitFactor), inArray(pricesDaily.ticker, wanted.slice(0, 90))))
-    .groupBy(pricesDaily.ticker)
-    // The longest-unknown first, so none waits behind tickers that gain an unknown day every night.
-    .orderBy(asc(min(pricesDaily.date)))
-    .limit(limit);
-  if (unknown.length === 0) return [];
-  const prices = deps.prices;
-  const run = new PriceRun(deps, 'history');
-  const rows: PriceRow[] = [];
-  const settled: BatchItem<'sqlite'>[] = [];
-  const split = new Set<string>();
-  for (const { ticker, from, to } of unknown) {
-    if (!from || !to) continue;
-    let closes: DailyClose[];
-    try {
-      closes = await run.call({ provider: prices.name, endpoint: 'daily', tickers: [ticker], from, to }, () => prices.dailyCloses(ticker, from, to), (result) => result.length);
-    } catch (error) {
-      console.warn('Split factor fetch failed', ticker, describeError(error));
-      if ((error instanceof ProviderHttpError && error.status === 429) || error instanceof ProviderBackoffError) break;
-      continue;
-    }
-    // Only the split days are written; every other unknown day becomes 1 below.
-    for (const close of closes) {
-      if ((close.splitFactor ?? 1) === 1) continue;
-      rows.push(tiingoRow(ticker, close));
-      split.add(ticker);
-    }
-    settled.push(deps.db.update(pricesDaily).set({ splitFactor: 1 }).where(and(eq(pricesDaily.ticker, ticker), isNull(pricesDaily.splitFactor), gte(pricesDaily.date, from), lte(pricesDaily.date, to))));
-  }
-  // Split days first; then the rest (including days Tiingo didn't return) count as no split.
-  await saveFetchedCloses(deps, run, rows);
-  if (settled.length > 0) await runBatch(deps.db, settled);
-  return [...split];
 }
 
 /* ------------------------------------------------------------------ */
