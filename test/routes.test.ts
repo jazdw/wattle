@@ -56,6 +56,25 @@ describe('accounts', () => {
 });
 
 describe('portfolio', () => {
+  it('lists asset accounts with no holdings as balances, cash accounts in their cash row, and not liabilities', async () => {
+    const { api, create } = await household();
+    const house = await create({ name: 'House', type: 'property', balance: 500000 });
+    const savings = await create({ name: 'Savings', type: 'depository', balance: 20000 });
+    const bonds = await create({ name: 'Bond savings', type: 'depository', category: 'us_bond', balance: 5000 });
+    await create({ name: 'Card', type: 'credit', balance: 250 });
+    const portfolio = (await api('/api/portfolio')).body;
+    expect(portfolio.balances).toEqual([
+      { accountId: house, name: 'House', type: 'property', subtype: null, category: 'real_estate', value: 500000_00 },
+      // Given a category other than cash, so it isn't cash.
+      { accountId: bonds, name: 'Bond savings', type: 'depository', subtype: null, category: 'us_bond', value: 5000_00 },
+    ]);
+    expect(portfolio.holdings).toEqual([
+      expect.objectContaining({ securityId: 'cash:USD', ticker: 'USD', quantity: 20000, value: 20000_00, accounts: [{ accountId: savings, name: 'Savings', quantity: 20000, value: 20000_00 }] }),
+    ]);
+    const listed = [...portfolio.holdings, ...portfolio.balances].reduce((sum: number, row: { value: number }) => sum + row.value, 0);
+    expect(listed).toBe(portfolio.assets);
+  });
+
   it('respects target exclusions for allocation but not for net worth', async () => {
     const { api, create } = await household();
     const house = await create({ name: 'House', type: 'property', balance: 500000 });

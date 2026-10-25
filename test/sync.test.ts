@@ -323,6 +323,22 @@ describe('cash positions', () => {
     const { currencyName } = await import('../shared/money');
     expect([currencyName('AUD'), currencyName('JPY'), currencyName('XYZ')]).toEqual(['Australian Dollar', 'Japanese Yen', 'XYZ']);
   });
+  it("are one row per currency, with a cash account's balance beside cash held in investment accounts", async () => {
+    const plaid = brokerage();
+    plaid.state.accounts.push(account('cash-mgmt', 'depository', 2000, { subtype: 'cash management' }));
+    // A second institution-style cash security in the same currency.
+    plaid.state.securities.push(security('s-sweep', null, 'cash', 1, 'Sweep Fund'));
+    plaid.state.holdings.push(holding('joint', 's-sweep', 100, 1));
+    const { api, byName } = await linked(plaid);
+    const portfolio = (await api('/api/portfolio')).body;
+    const cash = portfolio.holdings.filter((row: { type: string }) => row.type === 'cash');
+    expect(cash).toHaveLength(1);
+    expect(cash[0]).toMatchObject({ ticker: 'USD', name: 'US Dollar (cash)', quantity: 2600, value: 2600_00, classifiable: false });
+    expect(cash[0].accounts.map((row: { accountId: string; value: number }) => [row.accountId, row.value]).sort()).toEqual(
+      [[byName('brk').id, 500_00], [byName('joint').id, 100_00], [byName('cash-mgmt').id, 2000_00]].sort(),
+    );
+    expect(portfolio.balances).toEqual([]);
+  });
 });
 
 describe('disconnecting', () => {

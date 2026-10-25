@@ -233,10 +233,12 @@ export interface HoldingRow {
   type: string | null;
   /** Entered by hand (not from an institution), so you can set its type. */
   typeEditable: boolean;
+  /** False for a currency's cash row, which can't be reclassified (a bank account's category is set on the account). */
+  classifiable: boolean;
   isPublic: boolean;
+  quantity: number;
   /** The security's own currency, which its price is in. */
   currency: Currency;
-  quantity: number;
   /** Unit price in native currency. */
   price: number | null;
   /** Display currency, minor units. */
@@ -246,6 +248,18 @@ export interface HoldingRow {
   classification: Classification;
   classificationSource: ClassificationSource | null;
   needsReview: boolean;
+}
+
+/** An asset account with no holdings, valued at its balance (a home, a super fund); cash accounts join their currency's cash row instead. */
+export interface BalanceRow {
+  accountId: string;
+  name: string;
+  type: string;
+  subtype: string | null;
+  /** The account's allocation category (set on the account, else from its type). */
+  category: Category;
+  /** Display currency, minor units. */
+  value: number;
 }
 
 export interface PortfolioResponse {
@@ -259,6 +273,8 @@ export interface PortfolioResponse {
   /** Totals by category across all assets (ignores target scope). */
   allCategories: Record<Category, number>;
   holdings: HoldingRow[];
+  /** Asset accounts with no holdings that aren't cash, so holdings and balances add up to the assets. */
+  balances: BalanceRow[];
   style: StyleBreakdown;
   fxRate: number | null;
 }
