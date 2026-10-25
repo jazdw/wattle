@@ -375,7 +375,7 @@ function asOf<T extends { date: IsoDate }, R>(list: T[] | undefined, date: IsoDa
 }
 
 /** Tickers whose unknown split factors one night fills in (a Tiingo request each). */
-export const SPLIT_FILL_TICKERS = 20;
+export const SPLIT_FILL_TICKERS = 40;
 
 /**
  * Fill in these tickers' split factors that are still unknown (closes from

@@ -102,8 +102,8 @@ describe('work budgets (2 accounts, 30 positions, 500 transactions, 2 years)', (
     expect(cron.dbCalls).toBeLessThanOrEqual(22); // 19
     // A sync, the split factor check, a snapshot and the finish, each in its own invocation.
     expect(jobs.map((job) => job.type).sort()).toEqual(['nightly_finish', 'snapshot', 'split_factors', 'sync']);
-    // At most 20 tickers' split factors a night, one request each.
-    expect(largest(jobs, 'outside')).toBeLessThanOrEqual(21);
+    // At most 40 tickers' split factors a night, one request each.
+    expect(largest(jobs, 'outside')).toBeLessThanOrEqual(41);
     expect(largest(jobs.filter((job) => job.type !== 'split_factors'), 'outside')).toBeLessThanOrEqual(5); // 3
     expect(largest(jobs, 'dbCalls')).toBeLessThanOrEqual(33); // 26
     expect(largest(jobs, 'statements')).toBeLessThanOrEqual(170); // 137
