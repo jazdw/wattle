@@ -72,8 +72,6 @@ export async function runDaily(deps: Deps): Promise<DailyReport> {
         { id: `${syncs}:sync:${connection.id}`, type: 'sync', payload: { connectionId: connection.id, trigger: 'nightly' }, connectionId: connection.id, groupId: syncs },
       ]);
     }
-    // Split factors still unknown for the household's tickers (a few Tiingo requests).
-    entries.push([tenant, { id: `${syncs}:splits`, type: 'split_factors', payload: {}, groupId: nightlyGroup(id) }]);
     entries.push([
       tenant,
       {

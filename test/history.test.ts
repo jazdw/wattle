@@ -1,12 +1,10 @@
-import { and, eq } from 'drizzle-orm';
+import { eq } from 'drizzle-orm';
 import { describe, expect, it } from 'vitest';
 import * as schema from '../server/db/schema';
 import { Tenant } from '../server/db/tenant';
 import type { Deps } from '../server/ports';
 import { reconstructHistory } from '../server/services/backfillCore';
-import { runJob } from '../server/services/jobHandlers';
-import { enqueue } from '../server/services/jobRunner';
-import { fillSplitFactors, saveCloses } from '../server/services/pricing';
+import { ensureCloses, saveCloses } from '../server/services/pricing';
 import { syncConnection } from '../server/services/sync';
 import { account, closes, fakePlaid, fakePrices, holding, security, signWebhook } from './fakes';
 import { client, createHousehold, createTestDeps, flush, settle, TODAY } from './helpers';
@@ -155,27 +153,25 @@ describe('share splits', () => {
     expect(await heldOn(deps, '2026-03-15')).toEqual({ quantity: 50, value: 15000_00 });
   });
 
-  it('unknown split factors are filled in nightly, and a split found rebuilds the history', async () => {
+  it('a history load first fetches days stored without a split factor again, so a split among them counts', async () => {
     const { plaid, prices } = splitLogin();
-    // Prices stored before split factors were kept: all unknown, so the load used today's shares throughout.
+    // Closes stored without split factors (as Tiingo's IEX endpoint saves them).
     const unknown = (await prices.dailyCloses('XYZ', '2024-10-01', TODAY)).map((row) => ({ ticker: 'XYZ', date: row.date, close: row.close, currency: 'USD', source: 'tiingo' }));
     const deps = await createTestDeps({ plaid, prices });
     await saveCloses(deps, unknown, { replace: false });
     const home = await createHousehold(deps, 'Home', 'me@example.com');
     await client(deps, home.cookie)('/api/plaid/exchange', { method: 'POST', json: { publicToken: 'p', kind: 'investments' } });
     await settle(deps, 20);
-    expect(await heldOn(deps, '2026-03-15')).toEqual({ quantity: 200, value: 60000_00 });
-
-    const tenant = new Tenant(deps.db, home.householdId);
-    await enqueue(deps, tenant, [{ id: 'splits', type: 'split_factors', payload: {} }]);
-    await runJob(deps, 'splits');
-    const factors = await deps.db.select().from(schema.pricesDaily).where(and(eq(schema.pricesDaily.ticker, 'XYZ')));
-    expect(factors.filter((row) => row.splitFactor === null)).toEqual([]);
-    expect(factors.filter((row) => row.splitFactor !== 1).map((row) => [row.date, row.splitFactor])).toEqual([['2026-03-16', 4]]);
-    await settle(deps, 20);
     expect(await heldOn(deps, '2026-03-15')).toEqual({ quantity: 50, value: 15000_00 });
-    // Nothing left to fill: no more requests.
-    expect(await fillSplitFactors(deps, ['XYZ'])).toEqual([]);
+    const factors = await deps.db.select().from(schema.pricesDaily).where(eq(schema.pricesDaily.ticker, 'XYZ'));
+    // Within the two years the load covers (older days aren't needed, so they stay unknown).
+    expect(factors.filter((row) => row.date >= '2024-10-08' && row.splitFactor === null)).toEqual([]);
+    expect(factors.filter((row) => row.splitFactor !== null && row.splitFactor !== 1).map((row) => [row.date, row.splitFactor])).toEqual([['2026-03-16', 4]]);
+
+    // Known now: asking for the same range again needs no request.
+    const before = prices.calls.length;
+    await ensureCloses(deps, ['XYZ'], '2024-10-08', TODAY);
+    expect(prices.calls.slice(before)).toEqual([]);
   });
 
   it('a close saved without a split factor keeps the one already known', async () => {

@@ -12,5 +12,4 @@ export const JOB_TEXT: Record<JobType, string> = {
   report_collect: 'collecting balance history',
   report_account: 'collecting balance history',
   report_finish: 'collecting balance history',
-  split_factors: 'checking for share splits',
 };
