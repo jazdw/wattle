@@ -112,6 +112,7 @@ export async function loadPortfolio(deps: Deps, tenant: Tenant, currency: Curren
       type: row.type,
       typeEditable: row.externalId === null,
       isPublic: row.isPublic,
+      currency: toCurrency(row.currency),
       quantity: 0,
       price: close ?? row.price,
       value: 0,

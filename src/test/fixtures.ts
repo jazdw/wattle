@@ -79,6 +79,7 @@ function holding(overrides: Partial<HoldingRow>): HoldingRow {
     type: 'etf',
     typeEditable: false,
     isPublic: true,
+    currency: 'USD',
     quantity: 1,
     price: 1,
     value: 100,

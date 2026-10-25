@@ -234,6 +234,8 @@ export interface HoldingRow {
   /** Entered by hand (not from an institution), so you can set its type. */
   typeEditable: boolean;
   isPublic: boolean;
+  /** The security's own currency, which its price is in. */
+  currency: Currency;
   quantity: number;
   /** Unit price in native currency. */
   price: number | null;

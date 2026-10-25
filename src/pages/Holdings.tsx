@@ -21,6 +21,11 @@ function mainCategory(holding: HoldingRow): string {
   return entries.length > 1 && (share ?? 0) < 0.95 ? `Mixed (${label} ${formatPercent(share ?? 0, 0)})` : label;
 }
 
+/** A unit price (in units) as minor units for money(); null stays null. */
+function unitPrice(price: number | null | undefined): number | null {
+  return price === null || price === undefined ? null : Math.round(price * 100);
+}
+
 /** Plaid's security types (and those looked up for hand-entered tickers), as shown. */
 const TYPE_LABELS: Record<string, string> = {
   equity: 'Stock',
@@ -143,6 +148,7 @@ export function Holdings() {
               <tbody className="divide-y">
                 {rows.map(({ holding, quote, scale, dayChange: change, liveValue, share }) => {
                   const close = holding.ticker ? closeByTicker.get(holding.ticker) : undefined;
+                  const price = quote?.price ?? close?.close ?? holding.price;
                   const isOpen = expanded.has(holding.securityId);
                   return (
                     <Fragment key={holding.securityId}>
@@ -187,7 +193,8 @@ export function Holdings() {
                         </Td>
                         <Td className="text-right">{quantity(holding.quantity)}</Td>
                         <Td className="text-right">
-                          {quote ? quote.price.toFixed(2) : close ? close.close.toFixed(2) : holding.price?.toFixed(2) ?? '—'}
+                          {/* In the selected currency, so quantity × price = value. */}
+                          {money(unitPrice(price === null ? null : price * scale), currency)}
                           {quote && (
                             // When this quote was last updated (quotes refresh separately, so times differ).
                             <p
