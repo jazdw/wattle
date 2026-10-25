@@ -453,9 +453,10 @@ export function ImportDialog({ accounts, open, onOpenChange }: { accounts: Accou
   const [overwrite, setOverwrite] = useState(false);
 
   async function loadFile(file: File) {
-    const rows = parseCsv(await file.text());
+    const parsed = parseCsv(await file.text());
+    const preset = parsed.length > 0 ? PRESETS.find((candidate) => candidate.detect(parsed[0])) : undefined;
+    const rows = preset?.transform ? preset.transform(parsed) : parsed;
     setTable(rows);
-    const preset = rows.length > 0 ? PRESETS.find((candidate) => candidate.detect(rows[0])) : undefined;
     setPresetLabel(preset?.label ?? null);
     setMapping(
       preset?.mapping(rows[0]) ?? {
