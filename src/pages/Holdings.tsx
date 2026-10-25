@@ -117,7 +117,7 @@ export function Holdings() {
               <CardContent className="pt-4">
                 <p className="text-sm text-muted-foreground">Needs review</p>
                 <p className="text-2xl font-semibold">{rows.filter((row) => row.holding.needsReview).length}</p>
-                <p className="text-xs text-muted-foreground">Funds classified by a best guess. Click one to fix.</p>
+                <p className="text-xs text-muted-foreground">Classified by a best guess. Click its category to check or change it.</p>
               </CardContent>
             </Card>
           </div>
@@ -171,13 +171,18 @@ export function Holdings() {
                           <p className="max-w-64 truncate text-xs text-muted-foreground">{holding.name}</p>
                         </Td>
                         <Td>
-                          <button type="button" className="text-left hover:underline" onClick={() => setEditing(holding)}>
+                          <button
+                            type="button"
+                            className="text-left underline decoration-muted-foreground/50 decoration-dotted underline-offset-4 hover:decoration-solid"
+                            title="Change how this is classified"
+                            onClick={() => setEditing(holding)}
+                          >
                             {mainCategory(holding)}
                           </button>
                           {holding.needsReview && (
-                            <Badge variant="warning" className="ml-1.5">
-                              Review
-                            </Badge>
+                            <button type="button" className="ml-1.5" aria-label="Review classification" onClick={() => setEditing(holding)}>
+                              <Badge variant="warning">Review</Badge>
+                            </button>
                           )}
                         </Td>
                         <Td className="text-right">{quantity(holding.quantity)}</Td>

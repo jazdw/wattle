@@ -282,6 +282,27 @@ describe('security identifiers', () => {
   });
 });
 
+describe('classification', () => {
+  it('guesses again on each sync, keeping a classification you set', async () => {
+    const plaid = brokerage();
+    plaid.state.securities.push(security('s-xyz', 'XYZ', 'equity', 50, 'International Widget Holdings'));
+    plaid.state.holdings.push(holding('brk', 's-xyz', 10, 50));
+    const { deps, api, connection } = await linked(plaid);
+    // Stored by an older guess that read the stock's name as an international fund's.
+    const old = { classification: { categories: { intl_stock: 1 } }, classificationSource: 'heuristic' as const, needsReview: true };
+    await deps.db.update(schema.securities).set(old).where(eq(schema.securities.ticker, 'XYZ'));
+    await deps.db.update(schema.securities).set({ ...old, classificationSource: 'user', needsReview: false }).where(eq(schema.securities.ticker, 'VTI'));
+
+    await deps.db.update(schema.connections).set({ lastSyncedAt: null });
+    await api(`/api/connections/${connection.id}/sync`, { method: 'POST' });
+
+    const [xyz] = await deps.db.select().from(schema.securities).where(eq(schema.securities.ticker, 'XYZ'));
+    expect(xyz).toMatchObject({ classification: { categories: { us_stock: 1 } }, classificationSource: 'heuristic', needsReview: false });
+    const [vti] = await deps.db.select().from(schema.securities).where(eq(schema.securities.ticker, 'VTI'));
+    expect(vti).toMatchObject({ classification: { categories: { intl_stock: 1 } }, classificationSource: 'user', needsReview: false });
+  });
+});
+
 describe('cash positions', () => {
   it('show their ISO currency code and name, whatever the institution calls them', async () => {
     const plaid = brokerage();

@@ -58,8 +58,8 @@ describe('Holdings page', () => {
   it('flags guessed classifications and saves a correction', async () => {
     const { user } = renderPage(<Holdings />);
     const plan = (await screen.findByText('Example 401k Stable Value Trust')).closest('tr') as HTMLElement;
-    expect(within(plan).getByText('Review')).toBeInTheDocument();
-    await user.click(within(plan).getByRole('button', { name: 'Cash' }));
+    expect(within(plan).getByRole('button', { name: 'Cash' })).toBeInTheDocument(); // the category opens the editor too
+    await user.click(within(plan).getByRole('button', { name: 'Review classification' }));
 
     const dialog = await screen.findByRole('dialog');
     const cash = within(dialog).getByLabelText('Cash');

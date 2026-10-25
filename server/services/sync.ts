@@ -652,8 +652,12 @@ async function planSecurities(
     const plaidClose = lastPrice !== null && security.close_price_as_of ? { plaidClose: lastPrice, plaidCloseDate: security.close_price_as_of } : { plaidClose: null, plaidCloseDate: null };
     const currency = security.iso_currency_code ?? 'USD';
     const isPublic = isPublicSecurity(security);
+    const suggestion = suggestClassification({ ticker, name: security.name, type: security.type, currency });
     const id = byExternal.get(security.security_id);
     if (id) {
+      // A guess is made again each sync, so a better guess reaches securities
+      // already stored; a classification you set is kept.
+      const guessed = sql`${securities.classificationSource} is not 'user'`;
       writes.push(
         tenant.db
           .update(securities)
@@ -668,13 +672,15 @@ async function planSecurities(
             isPublic,
             ...(lastPrice !== null ? { lastPrice, lastPriceDate } : {}),
             ...plaidClose,
+            classification: sql`case when ${guessed} then ${JSON.stringify(suggestion.classification)} else ${securities.classification} end`,
+            classificationSource: sql`case when ${guessed} then ${suggestion.source} else ${securities.classificationSource} end`,
+            needsReview: sql`case when ${guessed} then ${suggestion.needsReview ? 1 : 0} else ${securities.needsReview} end`,
           })
           .where(tenant.scope(securities, eq(securities.id, id))),
       );
       ids.set(security.security_id, id);
       continue;
     }
-    const suggestion = suggestClassification({ ticker, name: security.name, type: security.type, currency });
     // Derived, not random: two connections syncing at once that both meet a
     // new security insert the same row (the second insert is ignored).
     const newId = await stableId(`security:${tenant.householdId}:${security.security_id}`);
