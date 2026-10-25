@@ -36,6 +36,10 @@ Look for names, masks, amounts, institution names and anything copied from produ
 
 Never read secret values into the conversation: `.dev.vars`, Worker secrets (`wrangler secret`), GitHub secrets, tokens or keys. Tell the owner where to put a value and verify only that it's set or that the feature works. Never print, log or commit them.
 
+## Money
+
+Handle amounts of money as integer minor units (cents) with a currency code, never as floating-point dollars. Convert at the edges: `toMinor` where an amount comes in (a CSV cell, a Plaid or market data value), `formatMoney` or `fromMinor` only where it's shown or written out. Add, subtract and compare in cents, so sums are exact and nothing needs rounding afterwards (`0.1 + 0.2` isn't `0.3` in floating point). `shared/money.ts` has the helpers.
+
 ## Working agreements
 
 - Commit and push only when the owner asks. A push to `main` deploys to production through GitHub Actions.
