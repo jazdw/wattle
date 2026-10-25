@@ -7,7 +7,7 @@ import { categoryTotals, styleBreakdown, type Position } from '../../shared/allo
 import { marketDate } from '../../shared/dates';
 import { convertMinor, currencyName, isCurrency, type Currency, type FxRates } from '../../shared/money';
 import type { Category, Classification } from '../../shared/taxonomy';
-import type { HoldingRow, PortfolioResponse } from '../../shared/types';
+import type { BalanceRow, HoldingRow, PortfolioResponse } from '../../shared/types';
 import { accounts, holdings, securities, targets } from '../db/schema';
 import type { Tenant } from '../db/tenant';
 import type { Deps } from '../ports';
@@ -15,6 +15,32 @@ import { closeLookup, fxLookup } from './pricing';
 import { isCashSecurity } from './valuation';
 
 const LIABILITY_TYPES = new Set(['credit', 'loan']);
+
+const cashKey = (code: string) => `cash:${code}`;
+
+/** A currency's cash row when no investment account holds that cash, only bank accounts. */
+function cashRow(code: Currency): HoldingRow {
+  return {
+    securityId: cashKey(code),
+    ticker: code,
+    cusip: null,
+    isin: null,
+    name: `${currencyName(code)} (cash)`,
+    type: 'cash',
+    typeEditable: false,
+    classifiable: false,
+    isPublic: false,
+    currency: code,
+    quantity: 0,
+    price: 1,
+    value: 0,
+    costBasis: null,
+    accounts: [],
+    classification: { categories: { cash: 1 } },
+    classificationSource: null,
+    needsReview: false,
+  };
+}
 
 export function defaultCategory(type: string): Category {
   if (type === 'depository') return 'cash';
@@ -102,8 +128,10 @@ export async function loadPortfolio(deps: Deps, tenant: Tenant, currency: Curren
     // Cash positions: institutions name them inconsistently (Plaid: "U S
     // Dollar", no ticker), so show the ISO 4217 code and its name instead,
     // for any currency. Plaid's CUR:XXX ticker names the currency when given.
+    // One row per currency for cash, whichever security an institution uses.
     const cashCode = isCashSecurity(row) ? (row.ticker?.startsWith('CUR:') ? row.ticker.slice(4) : row.currency).toUpperCase() : null;
-    const entry = aggregated.get(row.securityId) ?? {
+    const key = cashCode ? cashKey(cashCode) : row.securityId;
+    const entry = aggregated.get(key) ?? {
       securityId: row.securityId,
       ticker: cashCode ?? row.ticker,
       cusip: row.cusip,
@@ -111,6 +139,7 @@ export async function loadPortfolio(deps: Deps, tenant: Tenant, currency: Curren
       name: cashCode ? `${currencyName(cashCode)} (cash)` : row.name,
       type: row.type,
       typeEditable: row.externalId === null,
+      classifiable: cashCode === null,
       isPublic: row.isPublic,
       currency: toCurrency(row.currency),
       quantity: 0,
@@ -126,11 +155,12 @@ export async function loadPortfolio(deps: Deps, tenant: Tenant, currency: Curren
     entry.value += value;
     if (row.costBasis !== null) entry.costBasis = (entry.costBasis ?? 0) + convert(row.costBasis, row.currency);
     entry.accounts.push({ accountId: row.accountId, name: account.name, quantity: row.quantity, value });
-    aggregated.set(row.securityId, entry);
+    aggregated.set(key, entry);
   }
 
   let assets = 0;
   let liabilities = 0;
+  const balances: BalanceRow[] = [];
   for (const account of accountRows) {
     const fromHoldings = byAccountTotal.get(account.id);
     const value = fromHoldings ?? (account.balance !== null ? convert(account.balance, account.currency) : 0);
@@ -142,6 +172,17 @@ export async function loadPortfolio(deps: Deps, tenant: Tenant, currency: Curren
     if (fromHoldings === undefined && value !== 0) {
       const category = (account.category as Category | null) ?? defaultCategory(account.type);
       addPosition(account.id, value, { categories: { [category]: 1 } });
+      if (category === 'cash' && account.balance !== null) {
+        // Cash in a bank account joins its currency's cash row, beside cash held in investment accounts.
+        const code = toCurrency(account.currency);
+        const entry = aggregated.get(cashKey(code)) ?? cashRow(code);
+        entry.quantity += account.balance / 100;
+        entry.value += value;
+        entry.accounts.push({ accountId: account.id, name: account.name, quantity: account.balance / 100, value });
+        aggregated.set(cashKey(code), entry);
+      } else {
+        balances.push({ accountId: account.id, name: account.name, type: account.type, subtype: account.subtype, category, value });
+      }
     }
   }
 
@@ -158,6 +199,7 @@ export async function loadPortfolio(deps: Deps, tenant: Tenant, currency: Curren
     categories: scoped,
     allCategories: categoryTotals(allPositions),
     holdings: [...aggregated.values()].sort((a, b) => b.value - a.value),
+    balances: balances.sort((a, b) => b.value - a.value),
     style: styleBreakdown(scopedPositions),
     fxRate: usdAud,
   };

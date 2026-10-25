@@ -100,7 +100,7 @@ describe('Holdings page', () => {
     expect(within(vti).getByText('$303.00')).toBeInTheDocument();
     expect(within(vti).getByTitle(/^Price, last updated /)).toBeInTheDocument();
     expect(screen.queryByLabelText('Live')).not.toBeInTheDocument();
-    expect(screen.getByText('Holdings value')).toBeInTheDocument();
+    expect(screen.getByText('Total value')).toBeInTheDocument();
     const todays = screen.getByText("Today's change").closest('div') as HTMLElement;
     expect(within(todays).getByText('$1,500.00')).toBeInTheDocument(); // today's change still shown
   });
@@ -134,8 +134,35 @@ describe('Holdings page', () => {
     expect(screen.queryByLabelText('Live')).not.toBeInTheDocument();
   });
 
+  it('lists accounts valued by their balance, so the total adds up to the assets, and edits their category', async () => {
+    server.use(http.get('*/api/quotes', () => HttpResponse.json({ quotes: [], closes: [] })));
+    const { user } = renderPage(<Holdings />);
+    const home = (await screen.findByText('Home')).closest('tr') as HTMLElement;
+    expect(within(home).getByText('Property')).toBeInTheDocument();
+    expect(within(home).getByText('Account balance')).toBeInTheDocument();
+    expect(within(home).getByText('$900,000.00')).toBeInTheDocument();
+    const total = screen.getByText('Total value').closest('div') as HTMLElement;
+    expect(within(total).getByText('$1,268,500.00')).toBeInTheDocument(); // holdings $268,500 + balances $1,000,000
+
+    await user.click(within(home).getByRole('button', { name: 'Real estate' }));
+    expect(await screen.findByRole('dialog', { name: 'Home' })).toBeInTheDocument();
+  });
+
+  it("lists bank accounts' cash in their currency's cash row, which isn't reclassified", async () => {
+    const { user } = renderPage(<Holdings />);
+    const usd = (await screen.findByText('US Dollar (cash)')).closest('tr') as HTMLElement;
+    expect(within(usd).getByText('$8,500.00')).toBeInTheDocument();
+    expect(within(usd).queryByRole('button', { name: 'Cash' })).not.toBeInTheDocument();
+    await user.click(within(usd).getByRole('button', { name: 'Show accounts' }));
+    expect(screen.getByText('Northwind Checking')).toBeInTheDocument();
+    // Another currency's cash, its own row: priced in the selected currency (A$1 = US$0.67 here).
+    const aud = screen.getByText('AUD').closest('tr') as HTMLElement;
+    expect(within(aud).getByText('$0.67')).not.toHaveAttribute('title');
+    expect(within(aud).getByText('$10,000.00')).toBeInTheDocument();
+  });
+
   it('shows an empty state', async () => {
-    server.use(http.get('*/api/portfolio', () => HttpResponse.json({ ...portfolio(), holdings: [] })));
+    server.use(http.get('*/api/portfolio', () => HttpResponse.json({ ...portfolio(), holdings: [], balances: [] })));
     renderPage(<Holdings />);
     expect(await screen.findByText('No holdings yet')).toBeInTheDocument();
   });

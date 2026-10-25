@@ -1,16 +1,17 @@
 import { ChevronDown, ChevronRight, Radio } from 'lucide-react';
 import { Fragment, useMemo, useState } from 'react';
 import { CATEGORY_LABELS, normalizeWeights, type Category } from '../../shared/taxonomy';
-import type { HoldingRow } from '../../shared/types';
+import type { AccountSummary, HoldingRow } from '../../shared/types';
+import { EditAccountDialog } from '../components/AccountDialogs';
 import { ClassificationDialog } from '../components/ClassificationDialog';
 import { PageHeader } from '../components/Layout';
 import { Badge } from '../components/ui/badge';
 import { Card, CardContent } from '../components/ui/card';
 import { Input } from '../components/ui/input';
 import { EmptyState, Skeleton, Td, Th } from '../components/ui/misc';
-import { isLiveQuote, usePortfolio, useQuotes } from '../hooks/queries';
+import { isLiveQuote, useAccounts, usePortfolio, useQuotes } from '../hooks/queries';
 import { useAuth } from '../hooks/useAuth';
-import { changeClass, formatPercent, longDate, money, quantity, shortDate } from '../lib/format';
+import { accountKind, changeClass, formatPercent, longDate, money, quantity, shortDate } from '../lib/format';
 
 function mainCategory(holding: HoldingRow): string {
   const weights = normalizeWeights(holding.classification.categories);
@@ -41,18 +42,22 @@ export function Holdings() {
   const { currency } = useAuth();
   const portfolio = usePortfolio();
   const quotes = useQuotes();
+  const accounts = useAccounts();
   const [filter, setFilter] = useState('');
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
   const [editing, setEditing] = useState<HoldingRow | null>(null);
+  const [editingAccount, setEditingAccount] = useState<AccountSummary | null>(null);
 
   const quoteByTicker = useMemo(() => new Map(quotes.data?.quotes.map((quote) => [quote.ticker, quote]) ?? []), [quotes.data]);
   const closeByTicker = useMemo(() => new Map(quotes.data?.closes.map((close) => [close.ticker, close]) ?? []), [quotes.data]);
 
-  const rows = useMemo(() => {
+  const { rows, balances, total } = useMemo(() => {
     const holdings = portfolio.data?.holdings ?? [];
-    const total = holdings.reduce((sum, holding) => sum + holding.value, 0);
+    const balances = portfolio.data?.balances ?? [];
+    // Weights are of everything listed: holdings and balance-only accounts.
+    const total = [...holdings, ...balances].reduce((sum, row) => sum + row.value, 0);
     const needle = filter.trim().toLowerCase();
-    return holdings
+    const rows = holdings
       .filter((holding) => !needle || `${holding.ticker ?? ''} ${holding.name ?? ''}`.toLowerCase().includes(needle))
       .map((holding) => {
         const quote = holding.ticker ? quoteByTicker.get(holding.ticker) : undefined;
@@ -64,10 +69,11 @@ export function Holdings() {
         const liveValue = quote ? Math.round(holding.quantity * quote.price * 100 * scale) : holding.value;
         return { holding, quote, scale, dayChange, liveValue, share: total ? holding.value / total : 0 };
       });
+    return { rows, balances: balances.filter((balance) => !needle || balance.name.toLowerCase().includes(needle)), total };
   }, [portfolio.data, filter, quoteByTicker]);
 
   const dayChange = rows.reduce((sum, row) => sum + (row.dayChange ?? 0), 0);
-  const liveTotal = rows.reduce((sum, row) => sum + row.liveValue, 0);
+  const liveTotal = rows.reduce((sum, row) => sum + row.liveValue, 0) + balances.reduce((sum, balance) => sum + balance.value, 0);
   // Against the holdings' value at the previous close, as brokerages show it.
   const previousTotal = liveTotal - dayChange;
   const dayChangePercent = previousTotal ? dayChange / previousTotal : 0;
@@ -85,17 +91,17 @@ export function Holdings() {
 
   return (
     <>
-      <PageHeader title="Holdings" description="Every position across accounts, combined by security." />
+      <PageHeader title="Holdings" description="Every position across accounts, combined by security (cash by currency, bank accounts included), and the accounts valued by their balance." />
       {portfolio.isPending ? (
         <Skeleton className="h-96 w-full" />
-      ) : rows.length === 0 && !filter ? (
+      ) : rows.length === 0 && balances.length === 0 && !filter ? (
         <EmptyState title="No holdings yet">Link an investment account or add holdings to a manual account.</EmptyState>
       ) : (
         <>
           <div className="mb-4 grid gap-4 sm:grid-cols-3">
             <Card>
               <CardContent className="pt-4">
-                <p className="text-sm text-muted-foreground">Holdings value</p>
+                <p className="text-sm text-muted-foreground">Total value</p>
                 <p className="text-2xl font-semibold">{money(liveTotal, currency)}</p>
               </CardContent>
             </Card>
@@ -177,14 +183,18 @@ export function Holdings() {
                           <p className="max-w-64 truncate text-xs text-muted-foreground">{holding.name}</p>
                         </Td>
                         <Td>
-                          <button
-                            type="button"
-                            className="text-left underline decoration-muted-foreground/50 decoration-dotted underline-offset-4 hover:decoration-solid"
-                            title="Change how this is classified"
-                            onClick={() => setEditing(holding)}
-                          >
-                            {mainCategory(holding)}
-                          </button>
+                          {holding.classifiable ? (
+                            <button
+                              type="button"
+                              className="text-left underline decoration-muted-foreground/50 decoration-dotted underline-offset-4 hover:decoration-solid"
+                              title="Change how this is classified"
+                              onClick={() => setEditing(holding)}
+                            >
+                              {mainCategory(holding)}
+                            </button>
+                          ) : (
+                            mainCategory(holding)
+                          )}
                           {holding.needsReview && (
                             <button type="button" className="ml-1.5" aria-label="Review classification" onClick={() => setEditing(holding)}>
                               <Badge variant="warning">Review</Badge>
@@ -251,12 +261,49 @@ export function Holdings() {
                     </Fragment>
                   );
                 })}
+                {balances.map((balance) => {
+                  const account = accounts.data?.accounts.find((row) => row.id === balance.accountId);
+                  return (
+                    <tr key={balance.accountId} className="hover:bg-muted/40">
+                      <Td />
+                      <Td>
+                        <p className="flex items-center gap-1.5 font-medium">
+                          {balance.name}
+                          <Badge variant="outline" className="px-1.5 py-0 text-[10px] font-normal">
+                            {accountKind(balance.type, balance.subtype)}
+                          </Badge>
+                        </p>
+                        <p className="text-xs text-muted-foreground">Account balance</p>
+                      </Td>
+                      <Td>
+                        {account ? (
+                          <button
+                            type="button"
+                            className="text-left underline decoration-muted-foreground/50 decoration-dotted underline-offset-4 hover:decoration-solid"
+                            title="Change this account's category"
+                            onClick={() => setEditingAccount(account)}
+                          >
+                            {CATEGORY_LABELS[balance.category]}
+                          </button>
+                        ) : (
+                          CATEGORY_LABELS[balance.category]
+                        )}
+                      </Td>
+                      <Td />
+                      <Td />
+                      <Td className="text-right text-muted-foreground">—</Td>
+                      <Td className="text-right font-medium">{money(balance.value, currency)}</Td>
+                      <Td className="text-right text-muted-foreground">{formatPercent(total ? balance.value / total : 0)}</Td>
+                    </tr>
+                  );
+                })}
               </tbody>
             </table>
           </Card>
         </>
       )}
       <ClassificationDialog security={editing} onClose={() => setEditing(null)} />
+      <EditAccountDialog account={editingAccount} onClose={() => setEditingAccount(null)} />
     </>
   );
 }

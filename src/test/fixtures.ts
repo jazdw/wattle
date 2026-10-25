@@ -78,6 +78,7 @@ function holding(overrides: Partial<HoldingRow>): HoldingRow {
     name: null,
     type: 'etf',
     typeEditable: false,
+    classifiable: true,
     isPublic: true,
     currency: 'USD',
     quantity: 1,
@@ -109,6 +110,17 @@ export const HOLDINGS: HoldingRow[] = [
     securityId: 's-plan', ticker: null, name: 'Example 401k Stable Value Trust', type: 'mutual fund', isPublic: false, quantity: 3000, price: 10, value: 30000_00,
     classification: { categories: { cash: 1 } }, classificationSource: 'heuristic', needsReview: true,
   }),
+  // Bank accounts' cash, in their currency's cash row.
+  holding({
+    securityId: 'cash:USD', ticker: 'USD', name: 'US Dollar (cash)', type: 'cash', classifiable: false, isPublic: false, quantity: 8500, price: 1, value: 8500_00,
+    accounts: [{ accountId: 'chk', name: 'Northwind Checking', quantity: 8500, value: 8500_00 }],
+    classification: { categories: { cash: 1 } }, classificationSource: null,
+  }),
+  holding({
+    securityId: 'cash:AUD', ticker: 'AUD', name: 'Australian Dollar (cash)', type: 'cash', classifiable: false, isPublic: false, currency: 'AUD', quantity: 15000, price: 1, value: 10000_00,
+    accounts: [{ accountId: 'wbc', name: 'Example Bank Everyday', quantity: 15000, value: 10000_00 }],
+    classification: { categories: { cash: 1 } }, classificationSource: null,
+  }),
 ];
 
 export function portfolio(): PortfolioResponse {
@@ -122,6 +134,10 @@ export function portfolio(): PortfolioResponse {
     categories,
     allCategories: { ...categories, real_estate: 900000_00 },
     holdings: structuredClone(HOLDINGS),
+    balances: [
+      { accountId: 'home', name: 'Home', type: 'property', subtype: null, category: 'real_estate', value: 900000_00 },
+      { accountId: 'super', name: 'Example Super', type: 'investment', subtype: null, category: 'au_stock', value: 100000_00 },
+    ],
     style: {
       grid: {
         large: { value: 40000_00, blend: 45000_00, growth: 55000_00 },
