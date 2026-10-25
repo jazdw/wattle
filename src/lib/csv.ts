@@ -3,6 +3,7 @@
  * in the browser; the server validates the normalised rows.
  */
 import { addDays } from '../../shared/dates';
+import { fromMinor, toMinor } from '../../shared/money';
 
 /** RFC 4180-ish parser: quoted fields, escaped quotes, CRLF. */
 export function parseCsv(text: string): string[][] {
@@ -94,7 +95,7 @@ const VANGUARD_INTERNAL = new Set(['sweep in', 'sweep out', 'buy', 'sell', 'rein
  * walking back from today's total through those gives each day's balance.
  * Accounts holding anything priced otherwise are left out: their value moves
  * with prices every day. One balance column per account; the first row is
- * the day before the first transaction.
+ * the day before the first transaction. Sums are in integer cents, so exact.
  */
 export function vanguardBalances(rows: string[][]): string[][] {
   const transactionsAt = rows.findIndex((row) => row[0] === 'Account Number' && row[1] === 'Trade Date');
@@ -108,17 +109,17 @@ export function vanguardBalances(rows: string[][]): string[][] {
   const priced = new Set<string>();
   for (const row of positions) {
     if (parseAmount(row[4] ?? '') !== 1) priced.add(row[0]);
-    totals.set(row[0], (totals.get(row[0]) ?? 0) + (parseAmount(row[5] ?? '') ?? 0));
+    totals.set(row[0], (totals.get(row[0]) ?? 0) + toMinor(parseAmount(row[5] ?? '') ?? 0));
   }
   const accounts = [...totals.keys()].filter((account) => !priced.has(account));
 
-  // Money in or out per account and day.
+  // Money in or out per account and day, in cents.
   const flows = new Map<string, Map<string, number>>(accounts.map((account) => [account, new Map()]));
   for (const row of rows.slice(transactionsAt + 1)) {
     const byDate = flows.get(row[0]);
     const date = parseDate(row[dateAt] ?? '', 'YYYY-MM-DD');
     if (!byDate || !date || VANGUARD_INTERNAL.has((row[typeAt] ?? '').toLowerCase())) continue;
-    byDate.set(date, (byDate.get(date) ?? 0) + (parseAmount(row[amountAt] ?? '') ?? 0));
+    byDate.set(date, (byDate.get(date) ?? 0) + toMinor(parseAmount(row[amountAt] ?? '') ?? 0));
   }
   const dates = [...new Set([...flows.values()].flatMap((byDate) => [...byDate.keys()]))].sort();
   if (accounts.length === 0 || dates.length === 0) return [];
@@ -127,15 +128,12 @@ export function vanguardBalances(rows: string[][]): string[][] {
   const running = new Map(accounts.map((account) => [account, totals.get(account)!]));
   const table: string[][] = [];
   for (const date of [...dates].reverse()) {
-    table.push([date, ...accounts.map((account) => cents(running.get(account)!))]);
+    table.push([date, ...accounts.map((account) => fromMinor(running.get(account)!).toFixed(2))]);
     for (const account of accounts) running.set(account, running.get(account)! - (flows.get(account)!.get(date) ?? 0));
   }
-  table.push([addDays(dates[0], -1), ...accounts.map((account) => cents(running.get(account)!))]);
+  table.push([addDays(dates[0], -1), ...accounts.map((account) => fromMinor(running.get(account)!).toFixed(2))]);
   return [['Date', ...accounts.map((account) => `Account ending ${account.slice(-4)}`)], ...table.reverse()];
 }
-
-/** To the cent, without a "-0.00" from floating-point leftovers. */
-const cents = (value: number) => (Math.round(value * 100) / 100 + 0).toFixed(2);
 
 export const PRESETS: Preset[] = [
   {
