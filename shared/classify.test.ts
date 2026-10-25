@@ -59,6 +59,13 @@ describe('heuristics', () => {
     expect(guess('Some ASX Fund', 'etf', { currency: 'AUD' }).categories).toEqual({ au_stock: 1 });
   });
 
+  it("doesn't read a single stock's name as a fund's", () => {
+    const stock = suggestClassification({ ticker: 'XYZ', name: 'International Widget Holdings', type: 'equity' });
+    expect(stock.classification.categories).toEqual({ us_stock: 1 });
+    expect(stock.needsReview).toBe(false);
+    expect(guess('Example Mining', 'equity', { currency: 'AUD' }).categories).toEqual({ au_stock: 1 });
+  });
+
   it('infers size and style from names', () => {
     expect(guess('Small Cap Value Index')).toMatchObject({ sizes: { small: 0.8, mid: 0.2 }, styles: { value: 0.85, blend: 0.15 } });
     expect(guess('Mid Cap Growth')).toMatchObject({ sizes: { mid: 0.85 }, styles: { growth: 0.85 } });

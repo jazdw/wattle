@@ -91,6 +91,10 @@ export function suggestClassification(facts: SecurityFacts): Suggestion {
   if (type === 'cryptocurrency') return heuristic({ categories: { crypto: 1 } });
   if (type === 'derivative') return heuristic({ categories: { other: 1 } }, true);
 
+  // A single stock: its name says nothing about a fund's mix ("International
+  // Business Machines" is a US stock), so only its currency is used.
+  if (type === 'equity') return heuristic({ categories: { [facts.currency === 'AUD' ? 'au_stock' : 'us_stock']: 1 } });
+
   const targetYear = name.match(/(?:target|retirement|lifecycle|freedom)[^0-9]*(20[2-7]\d)/)?.[1];
   if (targetYear) return heuristic(resolveProfile({ mix: targetDateMix(Number(targetYear)) }), true);
 
@@ -128,7 +132,6 @@ export function suggestClassification(facts: SecurityFacts): Suggestion {
   const classification: Classification = { categories: { us_stock: 1 } };
   if (sizes) classification.sizes = sizes;
   if (styles) classification.styles = styles;
-  // Single stocks are fine as US stocks (size/style unknown); funds without a
-  // profile need a look.
-  return heuristic(classification, type !== 'equity');
+  // A fund without a profile needs a look.
+  return heuristic(classification, true);
 }
