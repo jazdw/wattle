@@ -39,7 +39,7 @@ function describeChange(change: SyncChange): string {
       return `${change.account}: reported again, with its history`;
     case 'balance': {
       const currency = change.currency as Currency;
-      return `${change.account}: balance ${money(change.before, currency, { cents: true })} → ${money(change.after, currency, { cents: true })}`;
+      return `${change.account}: balance ${money(change.before, currency)} → ${money(change.after, currency)}`;
     }
     case 'holding': {
       const units = (value: number | null) => (value === null ? 'none' : `${quantity(value)} units`);

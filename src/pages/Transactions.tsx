@@ -96,9 +96,9 @@ export function Transactions() {
                       )}
                     </Td>
                     {investment && <Td className="text-right tabular-nums">{entry.quantity ? quantity(entry.quantity) : ''}</Td>}
-                    {investment && <Td className="text-right tabular-nums">{entry.price && entry.quantity ? money(Math.round(entry.price * 100), data.currency, { cents: true }) : ''}</Td>}
+                    {investment && <Td className="text-right tabular-nums">{entry.price && entry.quantity ? money(Math.round(entry.price * 100), data.currency) : ''}</Td>}
                     {/* Money in is positive here (Plaid's amounts are positive when money leaves). */}
-                    <Td className={`text-right tabular-nums ${changeClass(-entry.amount)}`}>{entry.amount === 0 ? '' : money(-entry.amount, data.currency, { cents: true })}</Td>
+                    <Td className={`text-right tabular-nums ${changeClass(-entry.amount)}`}>{entry.amount === 0 ? '' : money(-entry.amount, data.currency)}</Td>
                   </tr>
                 ))}
               </tbody>
