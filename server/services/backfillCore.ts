@@ -6,7 +6,8 @@
  * after D undone. Undoing a transaction subtracts its quantity from its
  * security; when the account holds cash as a security (Plaid's CUR:USD or a
  * cash-type sweep), cash is rebuilt from transaction amounts too (Plaid
- * amounts are positive when cash leaves the account).
+ * amounts are positive when cash leaves the account), in integer cents so the
+ * sums are exact.
  *
  * A share split (`splitFactor`, on the first day at the new price) is undone
  * the same way: walking back past it divides that security's shares by the
@@ -23,6 +24,7 @@
  * independent jobs, one window each.
  */
 import { addDays, type IsoDate } from '../../shared/dates';
+import { fromMinor, toMinor } from '../../shared/money';
 
 export interface BackfillHolding {
   securityId: string;
@@ -76,11 +78,14 @@ export interface BackfillDay {
 const EPSILON = 1e-6;
 
 export function reconstructHistory(input: BackfillInput): BackfillDay[] {
+  // Shares per security; the cash security's entry is in cents instead.
+  const cashId = input.cashSecurityId;
   const quantities = new Map<string, number>();
   for (const holding of input.holdings) {
     quantities.set(holding.securityId, (quantities.get(holding.securityId) ?? 0) + holding.quantity);
   }
-  if (input.cashSecurityId && !quantities.has(input.cashSecurityId)) quantities.set(input.cashSecurityId, 0);
+  if (cashId) quantities.set(cashId, toMinor(quantities.get(cashId) ?? 0));
+  const isEmpty = (securityId: string, quantity: number) => (securityId === cashId ? quantity === 0 : Math.abs(quantity) < EPSILON);
 
   const byDate = new Map<IsoDate, BackfillTransaction[]>();
   for (const txn of input.transactions) {
@@ -99,15 +104,21 @@ export function reconstructHistory(input: BackfillInput): BackfillDay[] {
 
   for (let date = input.end; date >= input.start; date = addDays(date, -1)) {
     let held = false;
-    for (const quantity of quantities.values()) held ||= Math.abs(quantity) >= EPSILON;
+    for (const [securityId, quantity] of quantities) held ||= !isEmpty(securityId, quantity);
     if (held) firstHeld = date;
     if (date >= emitFrom && date <= emitTo) {
       const positions: BackfillPosition[] = [];
       let total = 0;
       let dayEstimated = broken;
       for (const [securityId, quantity] of quantities) {
-        if (Math.abs(quantity) < EPSILON) continue;
-        const priced = securityId === input.cashSecurityId ? { price: 1, estimated: false } : input.price(securityId, date);
+        if (isEmpty(securityId, quantity)) continue;
+        if (securityId === cashId) {
+          dayEstimated ||= broken;
+          total += quantity;
+          positions.push({ securityId, quantity: fromMinor(quantity), price: 1, value: quantity, estimated: broken });
+          continue;
+        }
+        const priced = input.price(securityId, date);
         const value = priced ? Math.round(quantity * priced.price * 100) : 0;
         const estimated = broken || !priced || priced.estimated;
         dayEstimated ||= estimated;
@@ -119,22 +130,25 @@ export function reconstructHistory(input: BackfillInput): BackfillDay[] {
 
     // Undo this day's transactions to get the previous day's closing state.
     for (const txn of byDate.get(date) ?? []) {
-      if (txn.securityId) {
+      if (txn.securityId === cashId && cashId) {
+        quantities.set(cashId, quantities.get(cashId)! - toMinor(txn.quantity));
+      } else if (txn.securityId) {
         quantities.set(txn.securityId, (quantities.get(txn.securityId) ?? 0) - txn.quantity);
       }
-      if (input.cashSecurityId && txn.securityId !== input.cashSecurityId) {
-        quantities.set(input.cashSecurityId, (quantities.get(input.cashSecurityId) ?? 0) + txn.amount / 100);
+      if (cashId && txn.securityId !== cashId) {
+        quantities.set(cashId, quantities.get(cashId)! + txn.amount);
       }
     }
     // And a split that took effect today: the day before had fewer shares.
     if (input.splitFactor) {
       for (const [securityId, quantity] of quantities) {
+        if (securityId === cashId) continue;
         const factor = input.splitFactor(securityId, date);
         if (factor !== 1 && factor > 0) quantities.set(securityId, quantity / factor);
       }
     }
     for (const [securityId, quantity] of quantities) {
-      if (quantity < -EPSILON) {
+      if (securityId === cashId ? quantity < 0 : quantity < -EPSILON) {
         quantities.set(securityId, 0);
         broken = true;
       }
