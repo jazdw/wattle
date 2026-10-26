@@ -54,6 +54,39 @@ describe('transaction history arriving after the link', () => {
   });
 });
 
+describe('rebuild from transactions', () => {
+  it('a fee sent with the sign for money in still takes money out, so the walk back stays whole', async () => {
+    const cashRow = (id: string, type: string, subtype: string, amount: number) => ({
+      investment_transaction_id: id,
+      account_id: 'brk',
+      security_id: 's-vti',
+      date: '2026-10-06',
+      name: subtype,
+      type,
+      subtype,
+      quantity: 0,
+      amount,
+      price: 0,
+      fees: 0,
+      iso_currency_code: 'USD',
+    });
+    // A dividend reinvested less a fee: no net cash. The fee arrives as if it paid money in.
+    const plaid = fakePlaid({
+      accounts: [account('brk', 'investment', 1000.1)],
+      securities: [security('s-vti', 'VTI', 'etf', 100), security('s-cash', 'CUR:USD', 'cash', 1, 'US Dollar')],
+      holdings: [holding('brk', 's-vti', 10, 100), holding('brk', 's-cash', 0.1, 1)],
+      transactions: [cashRow('t-div', 'cash', 'dividend', -8), buy('t-buy', '2026-10-06', 0.0775, 100), cashRow('t-fee', 'fee', 'account fee', -0.25)],
+    });
+    const { deps } = await link(plaid);
+    // Cash is flagged only when the walk back breaks (prices don't affect it).
+    const [cash] = await deps.db.select().from(schema.securities).where(eq(schema.securities.ticker, 'CUR:USD'));
+    const rows = await deps.db.select().from(schema.holdingDaily).where(eq(schema.holdingDaily.securityId, cash.id));
+    expect(rows.filter((row) => row.date < '2026-10-06').length).toBeGreaterThan(0);
+    expect(rows.filter((row) => row.estimated)).toEqual([]);
+    expect(rows.find((row) => row.date === '2026-10-05')).toMatchObject({ quantity: 0.1, value: 10 });
+  });
+});
+
 describe('Plaid webhooks kept', () => {
   it('stores each verified webhook, and HISTORICAL_UPDATE fetches transactions', async () => {
     const plaid = fakePlaid({

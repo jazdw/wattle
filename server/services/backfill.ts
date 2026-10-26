@@ -432,16 +432,19 @@ export async function historyBlock({ deps, tenant, job, renew }: JobContext): Pr
     .select({ securityId: holdings.securityId, quantity: holdings.quantity })
     .from(holdings)
     .where(tenant.scope(holdings, eq(holdings.accountId, account.id)));
-  const transactions = await tenant.db
-    .select({
-      date: investmentTransactions.date,
-      securityId: investmentTransactions.securityId,
-      quantity: investmentTransactions.quantity,
-      amount: investmentTransactions.amount,
-      subtype: investmentTransactions.subtype,
-    })
-    .from(investmentTransactions)
-    .where(tenant.scope(investmentTransactions, eq(investmentTransactions.accountId, account.id), gte(investmentTransactions.date, block.start)));
+  const transactions = (
+    await tenant.db
+      .select({
+        date: investmentTransactions.date,
+        securityId: investmentTransactions.securityId,
+        quantity: investmentTransactions.quantity,
+        amount: investmentTransactions.amount,
+        type: investmentTransactions.type,
+        subtype: investmentTransactions.subtype,
+      })
+      .from(investmentTransactions)
+      .where(tenant.scope(investmentTransactions, eq(investmentTransactions.accountId, account.id), gte(investmentTransactions.date, block.start)))
+  ).map(paidOut);
   const involved = new Set([...current.map((row) => row.securityId), ...transactions.flatMap((row) => (row.securityId ? [row.securityId] : []))]);
   const securityRows = [];
   for (const chunk of inChunks([...involved])) {
@@ -672,6 +675,15 @@ async function splitLookup(
 }
 
 /** Snapshot rows that carried a balance forward because the sync was missed. */
+/**
+ * A fee always takes money out (positive amount), whatever its sign: an
+ * institution has sent one with the sign for money in, which made the walk
+ * back find cash below zero.
+ */
+export function paidOut<T extends { type: string; amount: number }>(txn: T): T {
+  return txn.type === 'fee' ? { ...txn, amount: Math.abs(txn.amount) } : txn;
+}
+
 function carriedForward(tenant: Tenant, accountIds: string[], from: IsoDate, before: IsoDate) {
   return tenant.scope(
     accountDaily,

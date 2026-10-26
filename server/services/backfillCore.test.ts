@@ -116,3 +116,25 @@ describe('reconstructHistory in windows', () => {
     expect(reconstructHistory({ ...input, emitFrom: '2026-01-01', emitTo: '2026-01-09' })).toEqual([]);
   });
 });
+
+describe('cash in the walk back', () => {
+  it('adds amounts in whole cents, so many small ones leave cash exact', () => {
+    // Ten deposits of 3¢ make today's 30¢; walking back undoes them one by one.
+    const days = reconstructHistory({
+      start: '2026-01-01',
+      end: '2026-01-11',
+      holdings: [
+        { securityId: 'A', quantity: 1 },
+        { securityId: 'cash', quantity: 0.3 },
+      ],
+      transactions: Array.from({ length: 10 }, (_, index) => ({ date: `2026-01-${String(index + 2).padStart(2, '0')}`, securityId: null, quantity: 0, amount: -3 })),
+      cashSecurityId: 'cash',
+      price: () => ({ price: 10, estimated: false }),
+    });
+    const cashOn = (date: string) => days.find((day) => day.date === date)!.positions.find((position) => position.securityId === 'cash');
+    expect(cashOn('2026-01-02')).toMatchObject({ quantity: 0.03, value: 3 });
+    expect(cashOn('2026-01-08')).toMatchObject({ quantity: 0.21, value: 21 });
+    expect(cashOn('2026-01-01')).toBeUndefined(); // none before the first deposit
+    expect(days.some((day) => day.estimated)).toBe(false);
+  });
+});
