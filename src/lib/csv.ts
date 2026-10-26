@@ -135,6 +135,11 @@ export function vanguardBalances(rows: string[][]): string[][] {
   return [['Date', ...accounts.map((account) => `Account ending ${account.slice(-4)}`)], ...table.reverse()];
 }
 
+/** The balance column for an account by its last digits (a column named "Account ending 1234"), else -1. */
+export function accountColumn(header: string[], mask: string | null | undefined): number {
+  return mask ? header.findIndex((cell) => cell === `Account ending ${mask.slice(-4)}`) : -1;
+}
+
 export const PRESETS: Preset[] = [
   {
     id: 'vanguard',

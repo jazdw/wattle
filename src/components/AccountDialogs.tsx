@@ -7,7 +7,7 @@ import { CATEGORIES, CATEGORY_LABELS } from '../../shared/taxonomy';
 import type { AccountSummary } from '../../shared/types';
 import { api } from '../api';
 import { useAuth } from '../hooks/useAuth';
-import { extractBalances, parseCsv, PRESETS, type BalanceMapping, type DateFormat } from '../lib/csv';
+import { accountColumn, extractBalances, parseCsv, PRESETS, type BalanceMapping, type DateFormat } from '../lib/csv';
 import { accountKind, longDate, money } from '../lib/format';
 import { Button } from './ui/button';
 import { Dialog, DialogContent } from './ui/dialog';
@@ -458,14 +458,24 @@ export function ImportDialog({ accounts, open, onOpenChange }: { accounts: Accou
     const rows = preset?.transform ? preset.transform(parsed) : parsed;
     setTable(rows);
     setPresetLabel(preset?.label ?? null);
-    setMapping(
-      preset?.mapping(rows[0]) ?? {
-        dateColumn: 0,
-        balanceColumn: Math.max(0, (rows[0]?.length ?? 1) - 1),
-        dateFormat: 'YYYY-MM-DD',
-        hasHeader: true,
-      },
-    );
+    const next = preset?.mapping(rows[0]) ?? {
+      dateColumn: 0,
+      balanceColumn: Math.max(0, (rows[0]?.length ?? 1) - 1),
+      dateFormat: 'YYYY-MM-DD',
+      hasHeader: true,
+    };
+    setMapping(withAccountColumn(next, rows[0] ?? [], accountId));
+  }
+
+  /** A file with a balance column per account: the chosen account's, by its last digits. */
+  function withAccountColumn(current: BalanceMapping, header: string[], id: string): BalanceMapping {
+    const column = accountColumn(header, accounts.find((candidate) => candidate.id === id)?.mask);
+    return column >= 0 ? { ...current, balanceColumn: column } : current;
+  }
+
+  function chooseAccount(id: string) {
+    setAccountId(id);
+    if (table && mapping) setMapping(withAccountColumn(mapping, table[0] ?? [], id));
   }
 
   const preview = table && mapping ? extractBalances(table, mapping) : null;
@@ -507,7 +517,7 @@ export function ImportDialog({ accounts, open, onOpenChange }: { accounts: Accou
       >
         <div className="grid gap-3 sm:grid-cols-2">
           <Field label="Account">
-            <NativeSelect value={accountId} onChange={(event) => setAccountId(event.target.value)}>
+            <NativeSelect value={accountId} onChange={(event) => chooseAccount(event.target.value)}>
               <option value="">Choose…</option>
               {accounts
                 .filter((candidate) => !candidate.isHidden)
