@@ -172,6 +172,38 @@ describe('CSV import', () => {
     expect(within(reopened).queryByText(/Imported/)).not.toBeInTheDocument();
   });
 
+  // Made up: two cash accounts in one download, a column each.
+  const vanguard = `Account Number,Investment Name,Symbol,Shares,Share Price,Total Value,
+66665678,EXAMPLE MONEY MARKET FUND,XYZMM,500.00,1,500.00,
+55551234,EXAMPLE MONEY MARKET FUND,XYZMM,2000.00,1,2000.00,
+
+Account Number,Trade Date,Settlement Date,Transaction Type,Transaction Description,Investment Name,Symbol,Shares,Share Price,Principal Amount,Commissions and Fees,Net Amount,Accrued Interest,Account Type,
+66665678,2026-09-01,2026-09-01,Deposit,Electronic Funds Transfer,CASH,,0.00000,1.0,500.00,0.0,500.00,0.0,CASH,
+55551234,2026-09-02,2026-09-02,Deposit,Electronic Funds Transfer,CASH,,0.00000,1.0,2000.00,0.0,2000.00,0.0,CASH,
+`;
+
+  it("picks the balance column of the chosen account by its last digits, whichever is chosen first", async () => {
+    const { user } = await openAccounts();
+    await user.click(screen.getByRole('button', { name: /Import CSV/ }));
+    const dialog = await screen.findByRole('dialog', { name: 'Import balance history' });
+    const load = () => fireEvent.change(within(dialog).getByLabelText('CSV file'), { target: { files: [new File([vanguard], 'download.csv', { type: 'text/csv' })] } });
+
+    load();
+    expect(await within(dialog).findByText(/Recognised a Vanguard download/)).toBeInTheDocument();
+    expect(within(dialog).getByLabelText('Balance column')).toHaveDisplayValue('Account ending 5678'); // the first
+    await user.selectOptions(within(dialog).getByLabelText('Account'), 'chk'); // mask 1234
+    expect(within(dialog).getByLabelText('Balance column')).toHaveDisplayValue('Account ending 1234');
+
+    // Account first, then the file.
+    await user.click(within(dialog).getByText('Close', { selector: 'button' }));
+    await user.click(screen.getByRole('button', { name: /Import CSV/ }));
+    const again = await screen.findByRole('dialog', { name: 'Import balance history' });
+    await user.selectOptions(within(again).getByLabelText('Account'), 'chk');
+    fireEvent.change(within(again).getByLabelText('CSV file'), { target: { files: [new File([vanguard], 'download.csv', { type: 'text/csv' })] } });
+    await within(again).findByText(/Recognised a Vanguard download/);
+    expect(within(again).getByLabelText('Balance column')).toHaveDisplayValue('Account ending 1234');
+  });
+
   it('lets you map columns for other files', async () => {
     const { user } = await openAccounts();
     await user.click(screen.getByRole('button', { name: /Import CSV/ }));
