@@ -6,7 +6,7 @@ import type { Deps } from '../server/ports';
 import { reconstructHistory } from '../server/services/backfillCore';
 import { ensureCloses, saveCloses } from '../server/services/pricing';
 import { syncConnection } from '../server/services/sync';
-import { account, closes, fakePlaid, fakePrices, holding, security, signWebhook } from './fakes';
+import { account, closes, fakePlaid, fakePrices, firstBuy, holding, security, signWebhook } from './fakes';
 import { client, createHousehold, createTestDeps, flush, settle, TODAY } from './helpers';
 
 async function link(plaid: ReturnType<typeof fakePlaid>, overrides: Partial<Deps> = {}, kind: 'investments' | 'account' = 'investments') {
@@ -75,7 +75,7 @@ describe('rebuild from transactions', () => {
       accounts: [account('brk', 'investment', 1000.1)],
       securities: [security('s-vti', 'VTI', 'etf', 100), security('s-cash', 'CUR:USD', 'cash', 1, 'US Dollar')],
       holdings: [holding('brk', 's-vti', 10, 100), holding('brk', 's-cash', 0.1, 1)],
-      transactions: [cashRow('t-div', 'cash', 'dividend', -8), buy('t-buy', '2026-10-06', 0.0775, 100), cashRow('t-fee', 'fee', 'account fee', -0.25)],
+      transactions: [firstBuy('brk', 's-vti'), cashRow('t-div', 'cash', 'dividend', -8), buy('t-buy', '2026-10-06', 0.0775, 100), cashRow('t-fee', 'fee', 'account fee', -0.25)],
     });
     const { deps } = await link(plaid);
     const days = await deps.db.select().from(schema.accountDaily);
@@ -84,6 +84,23 @@ describe('rebuild from transactions', () => {
     const [cash] = await deps.db.select().from(schema.securities).where(eq(schema.securities.ticker, 'CUR:USD'));
     const cashRows = await deps.db.select().from(schema.holdingDaily).where(eq(schema.holdingDaily.securityId, cash.id));
     expect(cashRows.find((row) => row.date === '2026-10-05')).toMatchObject({ quantity: 0.1, value: 10, source: 'rebuilt' });
+  });
+});
+
+describe('where history starts', () => {
+  it("from an account's first transaction: today's holdings aren't copied back before it", async () => {
+    const plaid = fakePlaid({
+      accounts: [account('brk', 'investment', 1000), account('ira', 'investment', 500)],
+      securities: [security('s-vti', 'VTI', 'etf', 100)],
+      holdings: [holding('brk', 's-vti', 10, 100), holding('ira', 's-vti', 5, 100)],
+      transactions: [buy('t-first', '2026-06-01', 2, 90)],
+    });
+    const { deps } = await link(plaid, { prices: fakePrices({ VTI: closes('2024-09-01', 800, 80, 0.05) }) });
+    const accounts = new Map((await deps.db.select().from(schema.accounts)).map((row) => [row.externalId, row.id]));
+    const days = await deps.db.select().from(schema.accountDaily);
+    const dates = (externalId: string) => days.filter((row) => row.accountId === accounts.get(externalId)).map((row) => row.date).sort();
+    expect(dates('brk')[0]).toBe('2026-06-01');
+    expect(dates('ira')).toEqual([TODAY]); // no transactions: only what was synced
   });
 });
 
@@ -161,9 +178,12 @@ describe('share splits', () => {
       accounts: [account('brk', 'investment', 200 * 75)],
       securities: [security('s-xyz', 'XYZ', 'etf', 75)],
       holdings: [holding('brk', 's-xyz', 200, 75)],
-      transactions: splitTransaction
-        ? [{ investment_transaction_id: 't-split', account_id: 'brk', security_id: 's-xyz', date: '2026-03-16', name: 'Split', type: 'transfer', subtype: 'split', quantity: 150, amount: 0, price: 0, fees: 0, iso_currency_code: 'USD' }]
-        : [],
+      transactions: [
+        firstBuy('brk', 's-xyz', 300),
+        ...(splitTransaction
+          ? [{ investment_transaction_id: 't-split', account_id: 'brk', security_id: 's-xyz', date: '2026-03-16', name: 'Split', type: 'transfer', subtype: 'split', quantity: 150, amount: 0, price: 0, fees: 0, iso_currency_code: 'USD' }]
+          : []),
+      ],
     });
     return { plaid, prices: fakePrices({ XYZ: series }) };
   }

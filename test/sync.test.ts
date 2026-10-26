@@ -11,7 +11,7 @@ import { snapshotHousehold } from '../server/services/snapshots';
 import { institutionPriceTime, shownName, syncConnection } from '../server/services/sync';
 import { runJob } from '../server/services/jobHandlers';
 import { marketDate } from '../shared/dates';
-import { account, closes, fakePlaid, fakePrices, holding, security } from './fakes';
+import { account, closes, fakePlaid, fakePrices, firstBuy, holding, security } from './fakes';
 import { client, createHousehold, createTestDeps, flush, nightly, settle, TODAY } from './helpers';
 
 /** A brokerage (VTI + cash) and a joint IRA (VTI) at one institution. */
@@ -413,7 +413,9 @@ describe('history backfill', () => {
 
   it('rebuilds investment history from transactions and daily closes', async () => {
     const prices = fakePrices({ VTI: closes('2024-10-01', 740, 50, 0.1) });
-    const { deps, byName } = await linked(brokerage(), { prices });
+    const plaid = brokerage();
+    plaid.state.transactions.push(firstBuy('brk', 's-vti') as never);
+    const { deps, byName } = await linked(plaid, { prices });
     const brk = byName('brk');
     const rows = await deps.db
       .select()
@@ -529,6 +531,7 @@ describe('history backfill', () => {
       accounts: [account('brk', 'investment', 1000, { subtype: 'brokerage' }), account('cash', 'depository', 300, { subtype: 'cash management' })],
       securities: [security('s-vti', 'VTI', 'etf', 100)],
       holdings: [holding('brk', 's-vti', 10, 100)],
+      transactions: [firstBuy('brk', 's-vti')],
       historicalBalances: { brk: [{ date: '2026-10-01', current: 1 }], cash: [{ date: '2026-10-01', current: 250 }] },
       itemProducts: ['assets', 'investments'],
       assetReportReady: false,

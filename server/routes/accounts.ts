@@ -32,7 +32,7 @@ import type { AppEnv } from '../env';
 import { HttpError, notFound, readBody, requestCurrency } from '../lib/http';
 import type { Deps, SecurityDescription } from '../ports';
 import { connectionActivity, SyncRun } from '../services/activity';
-import { historyProgress, queueHistory } from '../services/backfill';
+import { historyProgress, historyUnderway, queueHistory } from '../services/backfill';
 import { signedBalance, writeBalances } from '../services/balances';
 import { toCurrency } from '../services/portfolio';
 import { closeLookup, describeTickers, ensureRecentCloses, fxLookup } from '../services/pricing';
@@ -154,7 +154,10 @@ connectionRoutes.post('/:id/accounts-chosen', async (c) => {
   const bank = latest.hasBalanceHistory && !latest.assetReportTokenEnc ? fresh.filter((account) => account.type !== 'investment') : [];
   let historyQueued = false;
   if (fresh.length > 0 && bank.length === 0) {
-    historyQueued = await queueHistory(deps, tenant, connection.id, 'load', 'manual', hookFor(c.req.url), { accountIds: freshIds, bankReport: false });
+    // The sync may have queued a rebuild already (the new accounts' transactions predate the history), which covers them.
+    historyQueued =
+      (await queueHistory(deps, tenant, connection.id, 'load', 'manual', hookFor(c.req.url), { accountIds: freshIds, bankReport: false })) ||
+      (await historyUnderway(tenant, connection.id));
   }
   await snapshotHousehold(deps, tenant, marketDate(deps.now()));
   const newAccounts = bank.length > 0 ? fresh.map((account) => ({ id: account.id, name: account.name, bank: bank.includes(account) })) : [];
