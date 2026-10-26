@@ -10,6 +10,7 @@ import { accountDaily, accounts } from '../db/schema';
 import type { Tenant } from '../db/tenant';
 import type { Deps } from '../ports';
 import { accountLease, Lease } from './lease';
+import { QUALITY_SET, replaceWhere } from './quality';
 import { snapshotHousehold } from './snapshots';
 
 const LIABILITY_TYPES = new Set(['credit', 'loan']);
@@ -33,12 +34,12 @@ function fillDays(byDate: Map<string, number>) {
 
 /**
  * Write dated balances (major units) for an account, all or none.
- * - 'manual' (Record a balance): replaces whatever that day held.
- * - 'import' (CSV): fills gaps and replaces estimates (backfilled, or carried
- *   forward while syncing failed) and earlier imports;
- *   with `overwrite`, replaces synced and recorded values too. A balance holds
- *   until the file's next one, so every day from its first date to its last
- *   is written (a sparse file would otherwise leave old values in between).
+ * - 'manual' (Record a balance) and 'import' (CSV) replace whatever those
+ *   days held: your values are trusted over anything from the institution
+ *   (shared/quality.ts), and the later of an entry and an import wins.
+ * - An import's balance holds until the file's next one, so every day from
+ *   its first date to its last is written (a sparse file would otherwise
+ *   leave old values in between).
  * For a manual account, the newest recorded or imported day is its current
  * balance; when that changes, later carried-forward snapshot copies are
  * dropped and today's snapshot is redone.
@@ -49,7 +50,6 @@ export async function writeBalances(
   account: Account,
   entries: { date: string; balance: number }[],
   source: 'manual' | 'import',
-  overwrite = false,
 ): Promise<number> {
   // Last value wins when several entries are for one day.
   const byDate = new Map(entries.map((entry) => [entry.date, entry.balance]));
@@ -61,6 +61,8 @@ export async function writeBalances(
     balance: signedBalance(account.type, balance),
     currency: account.currency,
     source,
+    priceSource: null,
+    unmatched: false,
   }));
   const write = () =>
     chunkRows(accountDaily, rows).map((chunk) =>
@@ -69,11 +71,8 @@ export async function writeBalances(
         .values(chunk)
         .onConflictDoUpdate({
           target: [accountDaily.accountId, accountDaily.date],
-          set: { balance: sql`excluded.balance`, source: sql`excluded.source`, estimated: sql`0` },
-          setWhere:
-            source === 'manual' || overwrite
-              ? sql`1 = 1`
-              : sql`${accountDaily.source} in ('backfill', 'import') or (${accountDaily.source} = 'sync' and ${accountDaily.estimated} = 1)`,
+          set: { balance: sql`excluded.balance`, ...QUALITY_SET },
+          setWhere: replaceWhere(accountDaily.source),
         }),
     );
 
@@ -108,7 +107,7 @@ export async function writeBalances(
         // Carried-forward snapshot copies after it are stale now.
         tenant.db
           .delete(accountDaily)
-          .where(tenant.scope(accountDaily, eq(accountDaily.accountId, account.id), eq(accountDaily.source, 'sync'), sql`${accountDaily.date} > ${after.date}`)),
+          .where(tenant.scope(accountDaily, eq(accountDaily.accountId, account.id), inArray(accountDaily.source, ['snapshot', 'carried']), sql`${accountDaily.date} > ${after.date}`)),
       ]);
     }
   } finally {

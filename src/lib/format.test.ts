@@ -43,8 +43,7 @@ describe('foldSeries', () => {
     currency: 'USD' as const,
     group: 'account' as const,
     dates: ['2026-10-07', '2026-10-08'],
-    estimated: [false, false],
-    series: Array.from({ length: count }, (_, index) => ({ key: `a${index}`, label: `A${index}`, values: [index, index === 0 ? null : index * 10] })),
+    series: Array.from({ length: count }, (_, index) => ({ key: `a${index}`, label: `A${index}`, values: [index, index === 0 ? null : index * 10], quality: [null, null] })),
   });
 
   it('keeps up to eight series with fixed palette slots', () => {

@@ -1,12 +1,11 @@
 /**
  * Daily snapshots: one account_daily row per visible account and one
  * holding_daily row per holding, valued at the day's close. Idempotent —
- * rerunning a day overwrites that day's synced rows. A linked account's
- * balance reported that day replaces anything entered or imported for it (the
- * institution's figure is the real one); otherwise entered and imported values
- * are never overwritten. A balance carried forward (the sync failed, or the
- * login is disconnected) is marked estimated, so a later bank-history report
- * can replace it.
+ * rerunning a day overwrites that day's synced rows. Entered and imported
+ * values are never overwritten (shared/quality.ts: they're trusted most). A
+ * linked account not synced that day (the sync failed, or the login is
+ * disconnected) has its last balance and holdings carried forward, marked
+ * `carried`, so a later rebuild or bank-history report can replace them.
  *
  * One snapshot per household at a time (its lease), written atomically. A
  * change that finds a snapshot running leaves a note, and the running one goes
@@ -23,7 +22,7 @@
  * A price is never assigned to a day by when it was fetched. Until a day's
  * dated close exists (mutual fund NAVs often reach Tiingo the next morning)
  * the holding carries its last dated close and is provisional
- * (holding_daily.estimated); each snapshot reprices the past week's
+ * (price_source 'provisional'); each snapshot reprices the past week's
  * provisional rows once a dated close for their day exists, correcting
  * their accounts' balances by the difference. A final row isn't rewritten.
  */
@@ -39,6 +38,8 @@ import type { Deps } from '../ports';
 import { holdWhile, Lease, snapshotLease } from './lease';
 import { datedCloseLookup, ensureRecentCloses, type DatedCloseLookup } from './pricing';
 import { priceOn } from './valuation';
+import { QUALITY_SET, replaceWhere } from './quality';
+import { leastFinal, type PriceSource } from '../../shared/quality';
 
 /** How far back a snapshot looks for provisional prices to correct. */
 export const REPRICE_DAYS = 7;
@@ -120,14 +121,23 @@ async function snapshotOnce(deps: Deps, tenant: Tenant, date: IsoDate, lease: Le
   const closes = (ticker: string, day: IsoDate) => dated(ticker, day)?.close ?? null;
 
   const visible = new Set(accountRows.map((account) => account.id));
+  // Linked (or disconnected) accounts not synced that day carry their last balance and holdings forward.
+  const carried = new Set(
+    accountRows
+      .filter((account) => account.connectionId !== null && !(account.source === 'plaid' && account.balanceAsOf !== null && marketDate(new Date(account.balanceAsOf)) >= date))
+      .map((account) => account.id),
+  );
   const holdingDailyRows: (typeof holdingDaily.$inferInsert)[] = [];
   const totals = new Map<string, number>();
+  const prices = new Map<string, (PriceSource | null)[]>();
   for (const row of holdingRows) {
     if (!visible.has(row.accountId)) continue;
     const priced = dayClose(row, date, dated) ?? priceOn({ ...row, lastPrice: row.lastPrice ?? row.price }, date, closes);
     const price = priced?.price ?? row.price ?? 0;
+    const priceSource = priced?.source ?? 'institution';
     const value = Math.round(row.quantity * price * 100);
     totals.set(row.accountId, (totals.get(row.accountId) ?? 0) + value);
+    prices.set(row.accountId, [...(prices.get(row.accountId) ?? []), priceSource]);
     holdingDailyRows.push({
       householdId: tenant.householdId,
       accountId: row.accountId,
@@ -137,29 +147,29 @@ async function snapshotOnce(deps: Deps, tenant: Tenant, date: IsoDate, lease: Le
       price,
       value,
       currency: row.currency,
-      source: 'sync',
-      estimated: priced?.estimated ?? true,
+      source: carried.has(row.accountId) ? 'carried' : 'snapshot',
+      priceSource,
+      unmatched: false,
     });
   }
 
-  // Snapshot rows are always `sync`; `manual` is reserved for values a person
-  // entered. Reported: a linked account synced that day, whose figure wins.
-  const reportedRows: (typeof accountDaily.$inferInsert)[] = [];
-  const otherRows: (typeof accountDaily.$inferInsert)[] = [];
+  // A balance from holdings or a synced one is a snapshot; a manual
+  // account's balance without holdings is its last entry, carried.
+  const accountDailyRows: (typeof accountDaily.$inferInsert)[] = [];
   for (const account of accountRows) {
-    const balance = totals.get(account.id) ?? account.balance;
+    const fromHoldings = totals.get(account.id);
+    const balance = fromHoldings ?? account.balance;
     if (balance === null) continue;
-    const reported = account.source === 'plaid' && account.balanceAsOf !== null && marketDate(new Date(account.balanceAsOf)) >= date;
-    // Linked (or disconnected) accounts not synced that day carry their last balance forward.
-    const estimated = !reported && account.connectionId !== null;
-    (reported ? reportedRows : otherRows).push({
+    const source = carried.has(account.id) || (account.connectionId === null && fromHoldings === undefined) ? 'carried' : 'snapshot';
+    accountDailyRows.push({
       householdId: tenant.householdId,
       accountId: account.id,
       date,
       balance,
       currency: account.currency,
-      source: 'sync',
-      estimated,
+      source,
+      priceSource: leastFinal(prices.get(account.id) ?? []),
+      unmatched: false,
     });
   }
 
@@ -177,7 +187,7 @@ async function snapshotOnce(deps: Deps, tenant: Tenant, date: IsoDate, lease: Le
     ...repriced(tenant, provisional.filter((row) => visible.has(row.accountId)), dated),
     lease.clearNotesBefore(startedAt),
     // Replace the day's synced positions so a sale made today drops out.
-    // Imported rows are left alone.
+    // Imported and entered rows are left alone.
     ...(visible.size > 0
       ? [
           tenant.db
@@ -187,7 +197,7 @@ async function snapshotOnce(deps: Deps, tenant: Tenant, date: IsoDate, lease: Le
                 holdingDaily,
                 eq(holdingDaily.date, date),
                 inArray(holdingDaily.accountId, [...visible]),
-                inArray(holdingDaily.source, ['sync', 'backfill']),
+                inArray(holdingDaily.source, ['snapshot', 'rebuilt', 'carried']),
               ),
             ),
         ]
@@ -198,38 +208,23 @@ async function snapshotOnce(deps: Deps, tenant: Tenant, date: IsoDate, lease: Le
         .values(chunk)
         .onConflictDoUpdate({
           target: [holdingDaily.accountId, holdingDaily.securityId, holdingDaily.date],
-          set: {
-            quantity: sql`excluded.quantity`,
-            price: sql`excluded.price`,
-            value: sql`excluded.value`,
-            source: sql`excluded.source`,
-            estimated: sql`excluded.estimated`,
-          },
-          setWhere: sql`${holdingDaily.source} in ('sync', 'backfill')`,
+          set: { quantity: sql`excluded.quantity`, price: sql`excluded.price`, value: sql`excluded.value`, ...QUALITY_SET },
+          setWhere: replaceWhere(holdingDaily.source),
         }),
     ),
-    ...chunkRows(accountDaily, reportedRows).map((chunk) =>
+    ...chunkRows(accountDaily, accountDailyRows).map((chunk) =>
       tenant.db
         .insert(accountDaily)
         .values(chunk)
         .onConflictDoUpdate({
           target: [accountDaily.accountId, accountDaily.date],
-          set: { balance: sql`excluded.balance`, source: sql`excluded.source`, estimated: sql`0` },
-        }),
-    ),
-    ...chunkRows(accountDaily, otherRows).map((chunk) =>
-      tenant.db
-        .insert(accountDaily)
-        .values(chunk)
-        .onConflictDoUpdate({
-          target: [accountDaily.accountId, accountDaily.date],
-          set: { balance: sql`excluded.balance`, source: sql`excluded.source`, estimated: sql`excluded.estimated` },
-          setWhere: sql`${accountDaily.source} in ('sync', 'backfill')`,
+          set: { balance: sql`excluded.balance`, ...QUALITY_SET },
+          setWhere: replaceWhere(accountDaily.source),
         }),
     ),
   ]);
 
-  return { accounts: reportedRows.length + otherRows.length, holdings: holdingDailyRows.length };
+  return { accounts: accountDailyRows.length, holdings: holdingDailyRows.length };
 }
 
 interface DatedPrices {
@@ -260,13 +255,13 @@ function latestDatedClose(row: DatedPrices, date: IsoDate, dated: DatedCloseLook
  * otherwise provisional at the latest dated close before it. Null for a
  * holding without a public ticker or any dated close (priceOn decides).
  */
-function dayClose(row: DatedPrices, date: IsoDate, dated: DatedCloseLookup): { price: number; estimated: boolean } | null {
+function dayClose(row: DatedPrices, date: IsoDate, dated: DatedCloseLookup): { price: number; source: 'close' | 'provisional' } | null {
   if (!row.isPublic || !row.ticker) return null;
   const close = latestDatedClose(row, date, dated);
-  return close ? { price: close.close, estimated: close.date < lastTradingDay(date) } : null;
+  return close ? { price: close.close, source: close.date < lastTradingDay(date) ? 'provisional' : 'close' } : null;
 }
 
-/** The provisional (estimated) synced rows of public holdings in [from, before), with their dated prices from Plaid. */
+/** Public holdings' rows in [from, before) not yet at a close for their day (provisional, or the institution's price), with their dated prices from Plaid. */
 async function provisionalRows(tenant: Tenant, from: IsoDate, before: IsoDate) {
   const rows = await tenant.db
     .select({
@@ -288,14 +283,20 @@ async function provisionalRows(tenant: Tenant, from: IsoDate, before: IsoDate) {
     .where(
       tenant.scope(
         holdingDaily,
-        eq(holdingDaily.estimated, true),
-        inArray(holdingDaily.source, ['sync', 'backfill']),
+        inArray(holdingDaily.priceSource, ['provisional', 'institution']),
+        inArray(holdingDaily.source, ['snapshot', 'rebuilt', 'carried']),
         gte(holdingDaily.date, from),
         lt(holdingDaily.date, before),
         eq(securities.isPublic, true),
       ),
     );
   return rows.filter((row): row is typeof row & { ticker: string } => row.ticker !== null);
+}
+
+/** The least final price source among an account's holdings that day (shared/quality.ts leastFinal, in SQL). */
+function leastFinalSql(accountId: string, date: IsoDate) {
+  const priced = (source: string) => sql`sum(${holdingDaily.priceSource} = ${source}) > 0`;
+  return sql`(select case when ${priced('provisional')} then 'provisional' when ${priced('institution')} then 'institution' when count(${holdingDaily.priceSource}) > 0 then 'close' end from ${holdingDaily} where ${holdingDaily.accountId} = ${accountId} and ${holdingDaily.date} = ${date})`;
 }
 
 /**
@@ -308,12 +309,12 @@ function repriced(tenant: Tenant, rows: Awaited<ReturnType<typeof provisionalRow
   const deltas = new Map<string, { accountId: string; date: IsoDate; delta: number }>();
   for (const row of rows) {
     const priced = dayClose(row, row.date, dated);
-    if (!priced || priced.estimated) continue;
+    if (!priced || priced.source !== 'close') continue;
     const value = Math.round(row.quantity * priced.price * 100);
     statements.push(
       tenant.db
         .update(holdingDaily)
-        .set({ price: priced.price, value, estimated: false })
+        .set({ price: priced.price, value, priceSource: 'close' })
         .where(tenant.scope(holdingDaily, eq(holdingDaily.accountId, row.accountId), eq(holdingDaily.securityId, row.securityId), eq(holdingDaily.date, row.date))),
     );
     const key = `${row.accountId}|${row.date}`;
@@ -322,13 +323,18 @@ function repriced(tenant: Tenant, rows: Awaited<ReturnType<typeof provisionalRow
     deltas.set(key, entry);
   }
   for (const { accountId, date, delta } of deltas.values()) {
-    if (delta === 0) continue;
+    // The balance moves by the difference, and its price source is its holdings' least final again.
     statements.push(
       tenant.db
         .update(accountDaily)
-        .set({ balance: sql`${accountDaily.balance} + ${delta}` })
+        .set({ balance: sql`${accountDaily.balance} + ${delta}`, priceSource: leastFinalSql(accountId, date) })
         .where(
-          tenant.scope(accountDaily, eq(accountDaily.accountId, accountId), eq(accountDaily.date, date), inArray(accountDaily.source, ['sync', 'backfill'])),
+          tenant.scope(
+            accountDaily,
+            eq(accountDaily.accountId, accountId),
+            eq(accountDaily.date, date),
+            inArray(accountDaily.source, ['snapshot', 'rebuilt', 'carried']),
+          ),
         ),
     );
   }

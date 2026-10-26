@@ -6,7 +6,6 @@ import {
   Cell,
   Pie,
   PieChart,
-  ReferenceArea,
   ResponsiveContainer,
   Tooltip,
   XAxis,
@@ -20,22 +19,6 @@ import type { ChartSeries } from '../lib/series';
 /* ------------------------------------------------------------------ */
 /* Time series                                                         */
 /* ------------------------------------------------------------------ */
-
-
-/** Contiguous runs of estimated dates, for shading. */
-function estimatedRanges(dates: string[], estimated: boolean[]): [string, string][] {
-  const ranges: [string, string][] = [];
-  let start: string | null = null;
-  dates.forEach((date, index) => {
-    if (estimated[index] && start === null) start = date;
-    if (!estimated[index] && start !== null) {
-      ranges.push([start, dates[index - 1]]);
-      start = null;
-    }
-  });
-  if (start !== null) ranges.push([start, dates.at(-1)!]);
-  return ranges;
-}
 
 interface TooltipPayload {
   dataKey: string;
@@ -108,7 +91,6 @@ export function TimeSeriesChart({
       }),
     [history.dates, series],
   );
-  const shaded = useMemo(() => estimatedRanges(history.dates, history.estimated), [history.dates, history.estimated]);
   const single = series.length === 1;
 
   return (
@@ -132,9 +114,6 @@ export function TimeSeriesChart({
             width={64}
             domain={['auto', 'auto']}
           />
-          {shaded.map(([from, to]) => (
-            <ReferenceArea key={from} x1={from} x2={to} fill="var(--color-muted-foreground)" fillOpacity={0.07} ifOverflow="hidden" />
-          ))}
           <Tooltip
             content={<SeriesTooltip currency={currency} showTotal={stacked} />}
             cursor={{ stroke: 'var(--color-muted-foreground)', strokeWidth: 1 }}

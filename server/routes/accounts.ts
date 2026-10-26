@@ -1,5 +1,5 @@
 /** Connections, accounts (Plaid and manual), manual balances and holdings. */
-import { and, count, desc, eq, inArray, isNotNull, isNull, lt, max, min, ne } from 'drizzle-orm';
+import { and, count, desc, eq, inArray, isNotNull, isNull, lt, max, min, notInArray } from 'drizzle-orm';
 import { Hono } from 'hono';
 import { suggestClassification } from '../../shared/classify';
 import { marketDate } from '../../shared/dates';
@@ -495,7 +495,7 @@ accountRoutes.get('/:id/balances', async (c) => {
   const rows = await tenant.db
     .select({ date: accountDaily.date, balance: accountDaily.balance, source: accountDaily.source })
     .from(accountDaily)
-    .where(tenant.scope(accountDaily, eq(accountDaily.accountId, account.id), ne(accountDaily.source, 'sync')))
+    .where(tenant.scope(accountDaily, eq(accountDaily.accountId, account.id), notInArray(accountDaily.source, ['snapshot', 'carried'])))
     .orderBy(desc(accountDaily.date))
     .limit(100);
   return c.json({ balances: rows });

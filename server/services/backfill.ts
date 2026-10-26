@@ -18,9 +18,10 @@
  * never overwrite synced, imported or manual rows, and every job can run
  * again safely.
  */
-import { and, eq, gte, inArray, isNotNull, isNull, lt, lte, max, min, ne, notLike, or, sql } from 'drizzle-orm';
+import { and, eq, gte, inArray, isNotNull, isNull, lt, lte, max, min, ne, notLike, sql } from 'drizzle-orm';
 import type { BatchItem } from 'drizzle-orm/batch';
 import { addDays, dateRange, marketDate, type IsoDate } from '../../shared/dates';
+import { leastFinal, type DailySource } from '../../shared/quality';
 import { PlaidApiError } from '../adapters/plaid';
 import { chunkRows, inChunks, runAtomic, runBatch } from '../db/batch';
 import { accountDaily, accounts, connections, holdingDaily, holdings, investmentTransactions, jobs, pricesDaily, securities, syncRuns } from '../db/schema';
@@ -33,6 +34,7 @@ import { enqueue, RetryLater, type JobContext, type JobSpec, type JobType } from
 import { WAITING_FOR_TOMORROW } from './writeBudget';
 import { queueReportCollection } from './assetReports';
 import { closeLookup, ensureCloses, ensureFx } from './pricing';
+import { QUALITY_SET, replaceWhere } from './quality';
 import { connectionLease, Lease } from './lease';
 import { accessTokenFor, getConnection, HISTORY_DAYS, isActive, type ConnectionRow } from './sync';
 import { isCashSecurity, priceOn } from './valuation';
@@ -314,12 +316,12 @@ export async function planHistory({ deps, tenant, job, renew }: JobContext): Pro
           .filter((row) => !plan.only || plan.only.accountIds.includes(row.id))
           .map((row) => row.id);
         if (plan.mode === 'rebuild' && accountIds.length > 0) {
-          // Drop the previous estimate (only backfilled rows; synced, imported
-          // and manual ones stay) and reconstruct with every transaction.
+          // Drop what was rebuilt or carried before (synced, imported and
+          // manual rows stay) and reconstruct with every transaction.
           run.note = 'Rebuilt with the latest transactions and share splits.';
           outcome.push(
-            tenant.db.delete(accountDaily).where(tenant.scope(accountDaily, inArray(accountDaily.accountId, accountIds), eq(accountDaily.source, 'backfill'))),
-            tenant.db.delete(holdingDaily).where(tenant.scope(holdingDaily, inArray(holdingDaily.accountId, accountIds), eq(holdingDaily.source, 'backfill'))),
+            tenant.db.delete(accountDaily).where(tenant.scope(accountDaily, inArray(accountDaily.accountId, accountIds), inArray(accountDaily.source, REPLACEABLE))),
+            tenant.db.delete(holdingDaily).where(tenant.scope(holdingDaily, inArray(holdingDaily.accountId, accountIds), inArray(holdingDaily.source, REPLACEABLE))),
           );
         }
         investments = accountIds.map((accountId) => ({ accountId, from: addDays(today, -HISTORY_DAYS) }));
@@ -386,7 +388,7 @@ export async function planHistory({ deps, tenant, job, renew }: JobContext): Pro
 /**
  * history_prices: daily closes for some tickers over the load's days. A
  * ticker that couldn't be fetched fails the attempt (and so is retried):
- * history built without its closes would be estimated, and look right. While
+ * history built without its closes would be priced at stand-ins, and look right. While
  * the provider is refusing for too many requests, it waits without using up
  * attempts, for up to a day.
  */
@@ -403,7 +405,7 @@ export async function historyPrices({ deps, job }: JobContext): Promise<Record<s
   return { tickers: tickers.length };
 }
 
-/** The load's price jobs that failed for good (their tickers' history would only be estimated). */
+/** The load's price jobs that failed for good (their tickers' history would be priced at stand-ins). */
 async function failedPriceJobs(tenant: Tenant, runId: string): Promise<number> {
   const [row] = await tenant.db
     .select({ count: sql<number>`count(*)` })
@@ -495,8 +497,9 @@ export async function historyBlock({ deps, tenant, job, renew }: JobContext): Pr
       price: position.price,
       value: position.value,
       currency: account.currency,
-      source: 'backfill' as const,
-      estimated: position.estimated,
+      source: 'rebuilt' as const,
+      priceSource: position.priceSource,
+      unmatched: day.unmatched,
     })),
   );
   const accountRows = days.map((day) => ({
@@ -505,12 +508,32 @@ export async function historyBlock({ deps, tenant, job, renew }: JobContext): Pr
     date: day.date,
     balance: day.total,
     currency: account.currency,
-    source: 'backfill' as const,
-    estimated: day.estimated,
+    source: 'rebuilt' as const,
+    priceSource: leastFinal(day.positions.map((position) => position.priceSource)),
+    unmatched: day.unmatched,
   }));
+  // Rebuilt rows replace rebuilt and carried ones; synced, imported and manual ones stay.
   const inserts = [
-    ...chunkRows(holdingDaily, holdingRows).map((chunk) => tenant.db.insert(holdingDaily).values(chunk).onConflictDoNothing()),
-    ...chunkRows(accountDaily, accountRows).map((chunk) => tenant.db.insert(accountDaily).values(chunk).onConflictDoNothing()),
+    ...chunkRows(holdingDaily, holdingRows).map((chunk) =>
+      tenant.db
+        .insert(holdingDaily)
+        .values(chunk)
+        .onConflictDoUpdate({
+          target: [holdingDaily.accountId, holdingDaily.securityId, holdingDaily.date],
+          set: { quantity: sql`excluded.quantity`, price: sql`excluded.price`, value: sql`excluded.value`, ...QUALITY_SET },
+          setWhere: replaceWhere(holdingDaily.source),
+        }),
+    ),
+    ...chunkRows(accountDaily, accountRows).map((chunk) =>
+      tenant.db
+        .insert(accountDaily)
+        .values(chunk)
+        .onConflictDoUpdate({
+          target: [accountDaily.accountId, accountDaily.date],
+          set: { balance: sql`excluded.balance`, ...QUALITY_SET },
+          setWhere: replaceWhere(accountDaily.source),
+        }),
+    ),
   ];
 
   // Written holding the connection's lease, like every change to its data.
@@ -538,7 +561,7 @@ export async function historyBlock({ deps, tenant, job, renew }: JobContext): Pr
                 tenant.scope(
                   holdingDaily,
                   eq(holdingDaily.accountId, account.id),
-                  eq(holdingDaily.source, 'sync'),
+                  eq(holdingDaily.source, 'carried'),
                   inArray(holdingDaily.date, tenant.db.select({ date: accountDaily.date }).from(accountDaily).where(carriedRows)),
                 ),
               ),
@@ -684,12 +707,14 @@ export function paidOut<T extends { type: string; amount: number }>(txn: T): T {
   return txn.type === 'fee' ? { ...txn, amount: Math.abs(txn.amount) } : txn;
 }
 
+/** Rows a rebuild may delete and write again: what it made before, or carried forward. */
+const REPLACEABLE: DailySource[] = ['rebuilt', 'carried'];
+
 function carriedForward(tenant: Tenant, accountIds: string[], from: IsoDate, before: IsoDate) {
   return tenant.scope(
     accountDaily,
     inArray(accountDaily.accountId, accountIds),
-    eq(accountDaily.source, 'sync'),
-    eq(accountDaily.estimated, true),
+    eq(accountDaily.source, 'carried'),
     gte(accountDaily.date, from),
     lt(accountDaily.date, before),
   );
@@ -732,7 +757,7 @@ export async function missedDays(tenant: Tenant, connection: ConnectionRow, toda
           accountDaily.accountId,
           accountRows.map((row) => row.id),
         ),
-        or(eq(accountDaily.source, 'backfill'), and(eq(accountDaily.source, 'sync'), eq(accountDaily.estimated, false))),
+        inArray(accountDaily.source, ['rebuilt', 'snapshot']),
       ),
     )
     .groupBy(accountDaily.accountId);

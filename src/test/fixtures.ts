@@ -1,5 +1,6 @@
 /** Realistic API responses for component tests. */
 import { emptyCategoryTotals } from '../../shared/allocation';
+import type { Quality } from '../../shared/quality';
 import type {
   AccountSummary,
   ConnectionsResponse,
@@ -170,7 +171,12 @@ export function history(group = 'total'): HistoryResponse {
               { key: 'brk', label: 'Vanguard Brokerage', values: [240000_00, 245000_00, 248000_00, 250000_00] },
               { key: 'chk', label: 'Northwind Checking', values: [8000_00, 8200_00, 8400_00, 8500_00] },
             ];
-  return { currency: 'USD', group: group as HistoryResponse['group'], dates, series, estimated: [true, false, false, false] };
+  // The first day rebuilt from transactions, the rest synced.
+  const quality: Quality[] = [
+    { source: 'rebuilt', priceSource: 'close', unmatched: false },
+    ...dates.slice(1).map(() => ({ source: 'snapshot' as const, priceSource: 'close' as const, unmatched: false })),
+  ];
+  return { currency: 'USD', group: group as HistoryResponse['group'], dates, series: series.map((item) => ({ ...item, quality })) };
 }
 
 export const TARGET: TargetResponse = {

@@ -406,8 +406,9 @@ describe('history backfill', () => {
     expect(series('mtg')[0]).toBe(-200000_00); // carried back from today
     expect(series('mtg')[yesterday]).toBe(-200000_00);
     expect(series('House')[0]).toBeNull(); // manual: starts on its entry date
-    expect(history.estimated[0]).toBe(true);
-    expect(history.estimated.at(-1)).toBe(false); // today is reported
+    const quality = history.series.find((row: { label: string }) => row.label === 'mtg').quality;
+    expect(quality[0].source).toBe('carried');
+    expect(quality.at(-1).source).toBe('snapshot'); // today is reported
   });
 
   it('rebuilds investment history from transactions and daily closes', async () => {
@@ -420,7 +421,7 @@ describe('history backfill', () => {
       .where(and(eq(schema.holdingDaily.accountId, brk.id), eq(schema.holdingDaily.date, '2026-09-30')));
     const vti = rows.find((row) => row.price !== 1)!;
     expect(vti.quantity).toBe(6); // 10 today, minus the 4 bought on Oct 1
-    expect(vti.source).toBe('backfill');
+    expect(vti.source).toBe('rebuilt');
     expect(vti.price).toBeGreaterThan(50);
     const [connection] = await deps.db.select().from(schema.connections);
     expect(connection.backfillStatus).toBe('done');
@@ -453,7 +454,7 @@ describe('history backfill', () => {
     plaid.state.assetReportReady = true;
     await settle(deps);
 
-    const rows = await deps.db.select().from(schema.accountDaily).where(eq(schema.accountDaily.source, 'backfill'));
+    const rows = await deps.db.select().from(schema.accountDaily).where(eq(schema.accountDaily.source, 'rebuilt'));
     expect(rows.map((row) => row.balance).sort((a, b) => a - b)).toEqual([-300_00, 900_00, 950_00]);
     const [after] = await deps.db.select().from(schema.connections);
     expect(after).toMatchObject({ backfillStatus: 'done', assetReportTokenEnc: null });
@@ -482,7 +483,7 @@ describe('history backfill', () => {
 
     const types = (await deps.db.select({ type: schema.jobs.type, status: schema.jobs.status }).from(schema.jobs)).filter((job) => job.type.startsWith('report_'));
     expect(types.map((job) => `${job.type}:${job.status}`).sort()).toEqual(['report_account:done', 'report_account:done', 'report_collect:done', 'report_finish:done']);
-    const rows = await deps.db.select().from(schema.accountDaily).where(eq(schema.accountDaily.source, 'backfill'));
+    const rows = await deps.db.select().from(schema.accountDaily).where(eq(schema.accountDaily.source, 'rebuilt'));
     expect(rows.map((row) => row.balance).sort((a, b) => a - b)).toEqual([-300_00, 900_00, 950_00]);
     expect((await deps.db.select().from(schema.connections))[0]).toMatchObject({ backfillStatus: 'done', assetReportTokenEnc: null });
     const [run] = await deps.db.select().from(schema.syncRuns).where(eq(schema.syncRuns.action, 'balance_history'));
@@ -514,7 +515,7 @@ describe('history backfill', () => {
     await flush(deps);
     const [after] = await deps.db.select().from(schema.connections);
     expect(after).toMatchObject({ backfillStatus: 'done', assetReportTokenEnc: null });
-    expect(await deps.db.select().from(schema.accountDaily).where(eq(schema.accountDaily.source, 'backfill'))).toHaveLength(1);
+    expect(await deps.db.select().from(schema.accountDaily).where(eq(schema.accountDaily.source, 'rebuilt'))).toHaveLength(1);
 
     // Nothing pending any more: Sync doesn't ask Plaid for it again.
     const calls = plaid.state.calls.filter((call) => call === 'asset_report:get').length;
@@ -542,7 +543,7 @@ describe('history backfill', () => {
     const cash = accounts.find((row) => row.name === 'cash')!;
     expect(brk.holdingCount).toBe(1);
     const backfilled = async (accountId: string) =>
-      deps.db.select().from(schema.accountDaily).where(and(eq(schema.accountDaily.accountId, accountId), eq(schema.accountDaily.source, 'backfill')));
+      deps.db.select().from(schema.accountDaily).where(and(eq(schema.accountDaily.accountId, accountId), eq(schema.accountDaily.source, 'rebuilt')));
 
     // Investments rebuilt straight away; still waiting for the bank's report.
     let [connection] = await deps.db.select().from(schema.connections);
@@ -665,25 +666,25 @@ describe('missed days', () => {
     return { deps, plaid, api, tenant, connection, chk, night: nights(deps), day, nightly: () => nightlyRun(deps, tenant, connection.id), failing };
   }
 
-  it("a linked account's reported balance replaces one imported for that day", async () => {
+  it("an imported balance stays when the linked account reports that day: your values beat the institution's", async () => {
     const { api, chk, night, day, nightly } = await bank();
     night(1);
     await api('/api/imports/balances', { method: 'POST', json: { accountId: chk.id, rows: [{ date: '2026-10-09', balance: 5 }] } });
     expect(await day('2026-10-09')).toMatchObject({ balance: 5_00, source: 'import' });
     await nightly();
-    expect(await day('2026-10-09')).toMatchObject({ balance: 1000_00, source: 'sync', estimated: false });
+    expect(await day('2026-10-09')).toMatchObject({ balance: 5_00, source: 'import' });
   });
 
-  it('an import fills every day between its dates, replacing backfilled days in between but not synced ones', async () => {
+  it('an import fills every day between its dates, replacing what was there, synced days too', async () => {
     const { deps, api, tenant, chk, day } = await bank();
     // A flat history from a bank report, and one synced day.
-    const row = (date: string, source: 'backfill' | 'sync') => ({ householdId: tenant.householdId, accountId: chk.id, date, balance: 900_00, currency: 'USD', source });
-    await deps.db.insert(schema.accountDaily).values([row('2026-09-01', 'backfill'), row('2026-09-02', 'backfill'), row('2026-09-03', 'sync'), row('2026-09-04', 'backfill')]);
+    const row = (date: string, source: 'rebuilt' | 'snapshot') => ({ householdId: tenant.householdId, accountId: chk.id, date, balance: 900_00, currency: 'USD', source });
+    await deps.db.insert(schema.accountDaily).values([row('2026-09-01', 'rebuilt'), row('2026-09-02', 'rebuilt'), row('2026-09-03', 'snapshot'), row('2026-09-04', 'rebuilt')]);
     // Only the days the balance changed.
     const response = await api('/api/imports/balances', { method: 'POST', json: { accountId: chk.id, rows: [{ date: '2026-08-31', balance: 500 }, { date: '2026-09-05', balance: 600 }] } });
     expect(response.body.imported).toBe(6);
     expect(await day('2026-09-02')).toMatchObject({ balance: 500_00, source: 'import' });
-    expect(await day('2026-09-03')).toMatchObject({ balance: 900_00, source: 'sync' });
+    expect(await day('2026-09-03')).toMatchObject({ balance: 500_00, source: 'import' });
     expect(await day('2026-09-04')).toMatchObject({ balance: 500_00, source: 'import' });
     expect(await day('2026-09-05')).toMatchObject({ balance: 600_00, source: 'import' });
   });
@@ -696,7 +697,7 @@ describe('missed days', () => {
     night(2);
     await nightly();
     // Carried forward, and marked as an estimate.
-    expect(await day('2026-10-09')).toMatchObject({ balance: 1000_00, source: 'sync', estimated: true });
+    expect(await day('2026-10-09')).toMatchObject({ balance: 1000_00, source: 'carried' });
     // An import replaces an estimate.
     await api('/api/imports/balances', { method: 'POST', json: { accountId: chk.id, rows: [{ date: '2026-10-10', balance: 1150 }] } });
 
@@ -717,14 +718,14 @@ describe('missed days', () => {
 
     await syncConnection(deps, new Tenant(deps.db, connection.householdId), connection.id, 'manual');
     await flush(deps); // collects it
-    expect(await day('2026-10-08')).toMatchObject({ balance: 1000_00, source: 'sync' }); // reported that day: kept
-    expect(await day('2026-10-09')).toMatchObject({ balance: 1100_00, source: 'backfill', estimated: false });
+    expect(await day('2026-10-08')).toMatchObject({ balance: 1000_00, source: 'snapshot' }); // reported that day: kept
+    expect(await day('2026-10-09')).toMatchObject({ balance: 1100_00, source: 'rebuilt' });
     expect(await day('2026-10-10')).toMatchObject({ balance: 1150_00, source: 'import' }); // yours: kept
     const [after] = await deps.db.select().from(schema.connections);
     expect(after).toMatchObject({ backfillStatus: 'done', assetReportTokenEnc: null });
   });
 
-  it("asks once per gap: days the bank can't fill stay estimated", async () => {
+  it("asks once per gap: days the bank can't fill keep their carried balance, counted as bank history", async () => {
     const { deps, plaid, tenant, connection, night, day, nightly, failing } = await bank();
     failing(true);
     night(1);
@@ -742,7 +743,7 @@ describe('missed days', () => {
     await syncConnection(deps, tenant, connection.id, 'manual');
     await flush(deps);
     expect(plaid.state.assetReportDays).toHaveLength(asked);
-    expect(await day('2026-10-09')).toMatchObject({ balance: 1000_00, source: 'backfill', estimated: true }); // asked: still an estimate
+    expect(await day('2026-10-09')).toMatchObject({ balance: 1000_00, source: 'rebuilt' }); // asked: the carried balance, as bank history
   });
 
   it("doesn't ask when every night synced", async () => {
@@ -775,7 +776,7 @@ describe('missed days', () => {
     await nightlyRun(deps, tenant, connection.id);
     night(2);
     await nightlyRun(deps, tenant, connection.id);
-    expect(await vti('2026-10-10')).toMatchObject({ quantity: 10, source: 'sync' }); // last known holdings, carried forward
+    expect(await vti('2026-10-10')).toMatchObject({ quantity: 10, source: 'carried' }); // last known holdings, carried forward
 
     // Bought 6 more on the 10th, while syncs were failing.
     plaid.getHoldings = working;
@@ -783,13 +784,13 @@ describe('missed days', () => {
     plaid.state.transactions.push({ ...plaid.state.transactions[0], investment_transaction_id: 't2', date: '2026-10-10', quantity: 6, amount: 600 });
     night(3);
     await nightlyRun(deps, tenant, connection.id);
-    expect(await vti('2026-10-09')).toMatchObject({ quantity: 10, source: 'backfill' });
-    expect(await vti('2026-10-10')).toMatchObject({ quantity: 16, source: 'backfill' });
+    expect(await vti('2026-10-09')).toMatchObject({ quantity: 10, source: 'rebuilt' });
+    expect(await vti('2026-10-10')).toMatchObject({ quantity: 16, source: 'rebuilt' });
     const [day] = await deps.db
       .select()
       .from(schema.accountDaily)
       .where(and(eq(schema.accountDaily.accountId, brk.id), eq(schema.accountDaily.date, '2026-10-10')));
-    expect(day.source).toBe('backfill');
+    expect(day.source).toBe('rebuilt');
   });
 });
 
@@ -934,7 +935,7 @@ describe("a fund's close that reaches the price provider late", () => {
     const day = async (date: string) => {
       const [row] = await deps.db.select().from(schema.holdingDaily).where(eq(schema.holdingDaily.date, date));
       const [balance] = await deps.db.select().from(schema.accountDaily).where(eq(schema.accountDaily.date, date));
-      return { price: row.price, value: row.value, estimated: row.estimated, balance: balance.balance };
+      return { price: row.price, value: row.value, provisional: row.priceSource === 'provisional', balance: balance.balance };
     };
     return { ...setup, day };
   }
@@ -942,30 +943,30 @@ describe("a fund's close that reaches the price provider late", () => {
   it("carries the last dated close, provisionally, rather than an undated price, then reprices once the day's close is out", async () => {
     // Plaid's institution price (101, labelled Wednesday) has no time: not used.
     const { deps, tenant, day } = await fund();
-    expect(await day(TODAY)).toEqual({ price: 100, value: 1000_00, estimated: true, balance: 1000_00 });
+    expect(await day(TODAY)).toEqual({ price: 100, value: 1000_00, provisional: true, balance: 1000_00 });
 
     // Overnight Tiingo publishes Thursday's close; Friday morning's snapshot corrects Thursday.
     await saveCloses(deps, [{ ticker: 'VTSAX', date: TODAY, close: 100.5, currency: 'USD', source: 'tiingo' }], { replace: true });
     deps.now = () => new Date('2026-10-09T10:00:00Z');
     await snapshotHousehold(deps, tenant, '2026-10-09');
-    expect(await day(TODAY)).toEqual({ price: 100.5, value: 1005_00, estimated: false, balance: 1005_00 });
+    expect(await day(TODAY)).toEqual({ price: 100.5, value: 1005_00, provisional: false, balance: 1005_00 });
     // Friday itself, before its close: Thursday's, provisional.
-    expect(await day('2026-10-09')).toEqual({ price: 100.5, value: 1005_00, estimated: true, balance: 1005_00 });
+    expect(await day('2026-10-09')).toEqual({ price: 100.5, value: 1005_00, provisional: true, balance: 1005_00 });
   });
 
   it("uses the institution's price when its time is after the day's close", async () => {
     const { day } = await fund({ priceDatetime: '2026-10-08T22:00:00Z' }); // 6pm New York
-    expect(await day(TODAY)).toEqual({ price: 101, value: 1010_00, estimated: false, balance: 1010_00 });
+    expect(await day(TODAY)).toEqual({ price: 101, value: 1010_00, provisional: false, balance: 1010_00 });
   });
 
   it("ignores an institution time that's intraday or a midnight placeholder", async () => {
-    expect(await (await fund({ priceDatetime: '2026-10-08T17:00:00Z' })).day(TODAY)).toMatchObject({ price: 100, estimated: true }); // 1pm
-    expect(await (await fund({ priceDatetime: '2026-10-09T00:00:00Z' })).day(TODAY)).toMatchObject({ price: 100, estimated: true });
+    expect(await (await fund({ priceDatetime: '2026-10-08T17:00:00Z' })).day(TODAY)).toMatchObject({ price: 100, provisional: true }); // 1pm
+    expect(await (await fund({ priceDatetime: '2026-10-09T00:00:00Z' })).day(TODAY)).toMatchObject({ price: 100, provisional: true });
   });
 
   it("uses Plaid's own close when it's dated for the day", async () => {
     const { day } = await fund({ plaidClose: 100.25, plaidCloseAsOf: TODAY });
-    expect(await day(TODAY)).toEqual({ price: 100.25, value: 1002_50, estimated: false, balance: 1002_50 });
+    expect(await day(TODAY)).toEqual({ price: 100.25, value: 1002_50, provisional: false, balance: 1002_50 });
   });
 
   it('a final day is left alone by later snapshots', async () => {
@@ -973,7 +974,7 @@ describe("a fund's close that reaches the price provider late", () => {
     await saveCloses(deps, [{ ticker: 'VTSAX', date: TODAY, close: 100.5, currency: 'USD', source: 'tiingo' }], { replace: true });
     deps.now = () => new Date('2026-10-09T10:00:00Z');
     await snapshotHousehold(deps, tenant, '2026-10-09');
-    expect(await day(TODAY)).toEqual({ price: 100.25, value: 1002_50, estimated: false, balance: 1002_50 });
+    expect(await day(TODAY)).toEqual({ price: 100.25, value: 1002_50, provisional: false, balance: 1002_50 });
   });
 
   it("keeps the sync's Plaid responses with it, for 30 days", async () => {

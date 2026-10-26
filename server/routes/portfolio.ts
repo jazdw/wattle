@@ -29,6 +29,7 @@ import { activeTarget, loadPortfolio } from '../services/portfolio';
 import { stableId } from '../services/ids';
 import { Lease, targetsLease } from '../services/lease';
 import { writeBalances } from '../services/balances';
+import { QUALITY_SET, replaceWhere } from '../services/quality';
 import { describeTickers } from '../services/pricing';
 import { snapshotHousehold } from '../services/snapshots';
 import { activeConnections, MANUAL_SYNC_INTERVAL_MS, syncConnection } from '../services/sync';
@@ -324,7 +325,7 @@ portfolioRoutes.post('/imports/balances', async (c) => {
   const tenant = c.get('tenant');
   const body = await readBody(c, importBalancesSchema);
   const account = await importTarget(tenant, body.accountId);
-  const imported = await writeBalances(deps, tenant, account, body.rows, 'import', body.overwrite);
+  const imported = await writeBalances(deps, tenant, account, body.rows, 'import');
   return c.json({ imported });
 });
 
@@ -379,7 +380,8 @@ portfolioRoutes.post('/imports/holdings', async (c) => {
     value: row.price !== undefined ? Math.round(row.quantity * row.price * 100) : 0,
     currency: account.currency,
     source: 'import' as const,
-    estimated: row.price === undefined,
+    priceSource: row.price !== undefined ? ('close' as const) : null,
+    unmatched: false,
   }));
   // New securities and the whole file together, or none of it.
   await runAtomic(tenant.db, [
@@ -390,14 +392,8 @@ portfolioRoutes.post('/imports/holdings', async (c) => {
         .values(chunk)
         .onConflictDoUpdate({
           target: [holdingDaily.accountId, holdingDaily.securityId, holdingDaily.date],
-          set: {
-            quantity: sql`excluded.quantity`,
-            price: sql`excluded.price`,
-            value: sql`excluded.value`,
-            source: sql`excluded.source`,
-            estimated: sql`excluded.estimated`,
-          },
-          setWhere: body.overwrite ? sql`1 = 1` : sql`${holdingDaily.source} in ('backfill', 'import')`,
+          set: { quantity: sql`excluded.quantity`, price: sql`excluded.price`, value: sql`excluded.value`, ...QUALITY_SET },
+          setWhere: replaceWhere(holdingDaily.source),
         }),
     ),
   ]);

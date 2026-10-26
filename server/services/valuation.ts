@@ -15,20 +15,15 @@ export function isCashSecurity(security: Pick<PricedSecurity, 'ticker' | 'type'>
 }
 
 /**
- * Unit price of a security on a date: market close for public tickers,
- * otherwise the institution's latest unit price (flagged as a stand-in when
- * it isn't from that day).
+ * Unit price of a security on a date: market close for public tickers (cash
+ * is 1), otherwise the institution's latest unit price.
  */
 export function priceOn(security: PricedSecurity, date: IsoDate, closes: CloseLookup): PriceResult | null {
-  if (isCashSecurity(security)) return { price: 1, estimated: false };
+  if (isCashSecurity(security)) return { price: 1, source: 'close' };
   if (security.isPublic && security.ticker) {
     const close = closes(security.ticker, date);
-    if (close !== null) return { price: close, estimated: false };
+    if (close !== null) return { price: close, source: 'close' };
   }
-  if (security.lastPrice !== null) {
-    // The latest institution price is the best value from its date onward;
-    // used for earlier days it's a stand-in.
-    return { price: security.lastPrice, estimated: !security.lastPriceDate || date < security.lastPriceDate };
-  }
+  if (security.lastPrice !== null) return { price: security.lastPrice, source: 'institution' };
   return null;
 }

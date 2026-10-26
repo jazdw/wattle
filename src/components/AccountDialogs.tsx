@@ -450,7 +450,6 @@ export function ImportDialog({ accounts, open, onOpenChange }: { accounts: Accou
   const [table, setTable] = useState<string[][] | null>(null);
   const [mapping, setMapping] = useState<BalanceMapping | null>(null);
   const [presetLabel, setPresetLabel] = useState<string | null>(null);
-  const [overwrite, setOverwrite] = useState(false);
 
   async function loadFile(file: File) {
     const parsed = parseCsv(await file.text());
@@ -485,7 +484,7 @@ export function ImportDialog({ accounts, open, onOpenChange }: { accounts: Accou
     mutationFn: () =>
       api<{ imported: number }>('/api/imports/balances', {
         method: 'POST',
-        body: JSON.stringify({ accountId, rows: preview!.rows, overwrite }),
+        body: JSON.stringify({ accountId, rows: preview!.rows }),
       }),
     onSuccess: () => invalidate(),
   });
@@ -496,7 +495,6 @@ export function ImportDialog({ accounts, open, onOpenChange }: { accounts: Accou
     setTable(null);
     setMapping(null);
     setPresetLabel(null);
-    setOverwrite(false);
     commit.reset();
     onOpenChange(false);
   }
@@ -557,9 +555,6 @@ export function ImportDialog({ accounts, open, onOpenChange }: { accounts: Accou
             </div>
             <label className="flex items-center gap-2 text-sm">
               <Switch checked={mapping.hasHeader} onCheckedChange={(hasHeader) => setMapping({ ...mapping, hasHeader })} /> First row is a header
-            </label>
-            <label className="flex items-center gap-2 text-sm">
-              <Switch checked={overwrite} onCheckedChange={setOverwrite} /> Replace values already synced for the same days
             </label>
             {preview && (
               <div className="rounded-md border p-3 text-sm">

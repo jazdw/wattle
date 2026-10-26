@@ -254,7 +254,7 @@ describe('quotes', () => {
 });
 
 describe('imports', () => {
-  it('imports balance history, filling gaps unless asked to overwrite', async () => {
+  it('imports balance history; between an entered and an imported value, the later one wins', async () => {
     const { deps, api, create } = await household();
     const id = await create({ name: 'Example Bank', type: 'depository', balance: 100, date: '2026-10-01' });
     const rows = [
@@ -262,13 +262,13 @@ describe('imports', () => {
       { date: '2026-09-30', balance: 90 },
     ];
     expect((await api('/api/imports/balances', { method: 'POST', json: { accountId: id, rows } })).body.imported).toBe(2);
-    const balance = async (date: string) =>
-      (await deps.db.select().from(schema.accountDaily).where(eq(schema.accountDaily.accountId, id))).find((row) => row.date === date)?.balance;
-    expect(await balance('2026-10-01')).toBe(100_00); // entered value kept
-    expect(await balance('2026-09-30')).toBe(90_00);
+    const day = async (date: string) =>
+      (await deps.db.select().from(schema.accountDaily).where(eq(schema.accountDaily.accountId, id))).find((row) => row.date === date);
+    expect(await day('2026-10-01')).toMatchObject({ balance: 999_00, source: 'import' }); // after the entry: replaces it
+    expect(await day('2026-09-30')).toMatchObject({ balance: 90_00, source: 'import' });
 
-    await api('/api/imports/balances', { method: 'POST', json: { accountId: id, rows, overwrite: true } });
-    expect(await balance('2026-10-01')).toBe(999_00);
+    await api(`/api/accounts/${id}/balances`, { method: 'POST', json: { date: '2026-10-01', balance: 100 } });
+    expect(await day('2026-10-01')).toMatchObject({ balance: 100_00, source: 'manual' }); // an entry after the import replaces it
   });
 
   it("makes a manual account's latest imported day its current balance", async () => {
@@ -300,7 +300,7 @@ describe('imports', () => {
     expect(response.body).toEqual({ imported: 2, newSecurities: 2 });
     const rows = await deps.db.select().from(schema.holdingDaily);
     expect(rows.find((row) => row.price === 60)?.value).toBe(600_00);
-    expect(rows.find((row) => row.price === null)?.estimated).toBe(true);
+    expect(rows.find((row) => row.price === null)?.priceSource).toBeNull();
   });
 
   it('refuses hidden accounts', async () => {

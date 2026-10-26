@@ -104,8 +104,6 @@ export const householdPatchSchema = z.object({
 export const importBalancesSchema = z.object({
   accountId: z.string(),
   rows: z.array(z.object({ date: isoDate, balance: z.number().finite() })).min(1).max(5000),
-  /** Replace synced/backfilled values for the same dates. */
-  overwrite: z.boolean().default(false),
 });
 
 export const importHoldingsSchema = z.object({
@@ -121,7 +119,6 @@ export const importHoldingsSchema = z.object({
     )
     .min(1)
     .max(20000),
-  overwrite: z.boolean().default(false),
 });
 
 /** Where a page of the household's activity ends (GET /api/activity?after=…). */

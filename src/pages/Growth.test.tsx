@@ -13,7 +13,6 @@ describe('Growth page', () => {
     expect(within(row).getByText('$240,000.00')).toBeInTheDocument();
     expect(within(row).getByText('$250,000.00')).toBeInTheDocument();
     expect(within(row).getByText('$10,000.00', { exact: false, selector: 'td *, td' })).toBeInTheDocument();
-    expect(screen.getByText(/Shaded periods/)).toBeInTheDocument();
     expect(lastGroup()).toBe('account');
   });
 

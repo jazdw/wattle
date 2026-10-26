@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { reconstructHistory } from './backfillCore';
 
-const flat = (price: number) => () => ({ price, estimated: false });
+const flat = (price: number) => () => ({ price, source: 'close' as const });
 
 describe('reconstructHistory', () => {
   it('walks buys and sells backwards from current holdings', () => {
@@ -23,7 +23,7 @@ describe('reconstructHistory', () => {
       ['2026-01-05', 10],
     ]);
     expect(days[0].total).toBe(600_00);
-    expect(days.every((day) => !day.estimated)).toBe(true);
+    expect(days.every((day) => !day.unmatched)).toBe(true);
   });
 
   it('rebuilds cash from transaction amounts', () => {
@@ -49,7 +49,7 @@ describe('reconstructHistory', () => {
     expect(days.at(-1)!.total).toBe(100_00);
   });
 
-  it('clamps impossible states and marks earlier days estimated', () => {
+  it('clamps impossible states and marks earlier days unmatched', () => {
     const days = reconstructHistory({
       start: '2026-01-01',
       end: '2026-01-03',
@@ -59,8 +59,8 @@ describe('reconstructHistory', () => {
       cashSecurityId: null,
       price: flat(1),
     });
-    expect(days.at(-1)!.estimated).toBe(false);
-    expect(days.find((day) => day.date === '2026-01-02')?.estimated ?? true).toBe(true);
+    expect(days.at(-1)!.unmatched).toBe(false);
+    expect(days.find((day) => day.date === '2026-01-02')?.unmatched ?? true).toBe(true);
   });
 });
 
@@ -76,11 +76,11 @@ describe('reconstructHistory in windows', () => {
       transactions: [
         { date: '2026-03-10', securityId: 'vti', quantity: 4, amount: 40_000 },
         { date: '2026-02-01', securityId: 'bnd', quantity: -3, amount: -21_000 }, // sold something not held now
-        { date: '2026-01-20', securityId: 'vti', quantity: 20, amount: 200_000 }, // more than held: clamped, estimated before
+        { date: '2026-01-20', securityId: 'vti', quantity: 20, amount: 200_000 }, // more than held: clamped, unmatched before
         { date: '2026-01-15', securityId: null, quantity: 0, amount: -1_000_00 }, // a deposit
       ],
       cashSecurityId: 'cash',
-      price: (securityId: string, date: string) => (securityId === 'bnd' && date < '2026-01-10' ? null : { price: date < '2026-02-15' ? 90 : 100, estimated: false }),
+      price: (securityId: string, date: string) => (securityId === 'bnd' && date < '2026-01-10' ? null : { price: date < '2026-02-15' ? 90 : 100, source: 'close' as const }),
     };
     const full = reconstructHistory(input);
     expect(full.length).toBeGreaterThan(30);
@@ -107,7 +107,7 @@ describe('reconstructHistory in windows', () => {
         { date: '2026-01-10', securityId: 'vti', quantity: 1, amount: 100 }, // first buy
       ],
       cashSecurityId: null,
-      price: () => ({ price: 1, estimated: false }),
+      price: () => ({ price: 1, source: 'close' as const }),
     };
     const full = reconstructHistory(input);
     expect(full[0].date).toBe('2026-01-10');
@@ -129,12 +129,12 @@ describe('cash in the walk back', () => {
       ],
       transactions: Array.from({ length: 10 }, (_, index) => ({ date: `2026-01-${String(index + 2).padStart(2, '0')}`, securityId: null, quantity: 0, amount: -3 })),
       cashSecurityId: 'cash',
-      price: () => ({ price: 10, estimated: false }),
+      price: () => ({ price: 10, source: 'close' as const }),
     });
     const cashOn = (date: string) => days.find((day) => day.date === date)!.positions.find((position) => position.securityId === 'cash');
     expect(cashOn('2026-01-02')).toMatchObject({ quantity: 0.03, value: 3 });
     expect(cashOn('2026-01-08')).toMatchObject({ quantity: 0.21, value: 21 });
     expect(cashOn('2026-01-01')).toBeUndefined(); // none before the first deposit
-    expect(days.some((day) => day.estimated)).toBe(false);
+    expect(days.some((day) => day.unmatched)).toBe(false);
   });
 });
