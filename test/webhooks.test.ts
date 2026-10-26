@@ -119,7 +119,7 @@ describe('Plaid webhooks', () => {
     const brkId = rows.find((row) => row.externalId === 'brk')!.id;
     const brkHistory = await deps.db.select().from(schema.accountDaily);
     expect(brkHistory.some((row) => row.accountId === rows.find((r) => r.externalId === 'brk')!.id)).toBe(true); // kept
-    expect(brkHistory.some((row) => row.accountId === rows.find((r) => r.externalId === 'ira')!.id && row.source === 'backfill')).toBe(true); // loaded
+    expect(brkHistory.some((row) => row.accountId === rows.find((r) => r.externalId === 'ira')!.id && row.source === 'rebuilt')).toBe(true); // loaded
     expect((await deps.db.select().from(schema.syncRuns)).filter((run) => run.action === 'history').length).toBe(historyBefore + 1);
     expect((await connection()).newAccountsAt).toBeNull();
     expect((await api('/api/portfolio')).body.netWorth).toBe(2000_00); // only what's shared counts
@@ -138,7 +138,7 @@ describe('Plaid webhooks', () => {
     const back = (await deps.db.select().from(schema.accounts)).filter((row) => row.plaidName === 'brk');
     expect(back).toEqual([expect.objectContaining({ id: brkId, externalId: 'brk-again', missingSince: null })]);
     const days = (await deps.db.select().from(schema.accountDaily)).filter((row) => row.accountId === brkId);
-    expect(days.some((row) => row.source === 'backfill')).toBe(true); // its old history
+    expect(days.some((row) => row.source === 'rebuilt')).toBe(true); // its old history
     expect(days.some((row) => row.date === TODAY)).toBe(true); // and today's
     expect((await deps.db.select().from(schema.holdings)).filter((row) => row.accountId === brkId)).toHaveLength(1);
     expect((await deps.db.select().from(schema.syncRuns)).flatMap((run) => (run.changes as { kind: string }[] | null) ?? []).some((change) => change.kind === 'account_returned')).toBe(true);
@@ -159,7 +159,7 @@ describe('Plaid webhooks', () => {
     const before = reports();
     const daily = async (externalId: string) => {
       const [row] = (await deps.db.select().from(schema.accounts)).filter((candidate) => candidate.externalId === externalId);
-      return (await deps.db.select().from(schema.accountDaily)).filter((day) => day.accountId === row.id && day.source === 'backfill');
+      return (await deps.db.select().from(schema.accountDaily)).filter((day) => day.accountId === row.id && day.source === 'rebuilt');
     };
 
     // An IRA and a card chosen in Link.

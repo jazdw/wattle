@@ -15,7 +15,7 @@
  *
  * Gaps in the institution's history show up as impossible states (negative
  * quantities). They are clamped to zero and that day and every earlier day
- * is marked `estimated`.
+ * is marked `unmatched`.
  *
  * With a window (`emitFrom`/`emitTo`), only the days inside it are priced and
  * returned: the walk from today still covers every day (undoing transactions
@@ -25,6 +25,7 @@
  */
 import { addDays, type IsoDate } from '../../shared/dates';
 import { fromMinor, toMinor } from '../../shared/money';
+import type { PriceSource } from '../../shared/quality';
 
 export interface BackfillHolding {
   securityId: string;
@@ -41,8 +42,7 @@ export interface BackfillTransaction {
 
 export interface PriceResult {
   price: number;
-  /** The price is a stand-in (no market history for this day). */
-  estimated: boolean;
+  source: PriceSource;
 }
 
 export interface BackfillInput {
@@ -65,14 +65,16 @@ export interface BackfillPosition {
   quantity: number;
   price: number | null;
   value: number;
-  estimated: boolean;
+  /** Null when there was no price at all (valued at zero). */
+  priceSource: PriceSource | null;
 }
 
 export interface BackfillDay {
   date: IsoDate;
   positions: BackfillPosition[];
   total: number;
-  estimated: boolean;
+  /** On or before a day the walk found impossible (a gap in the transactions). */
+  unmatched: boolean;
 }
 
 const EPSILON = 1e-6;
@@ -109,23 +111,19 @@ export function reconstructHistory(input: BackfillInput): BackfillDay[] {
     if (date >= emitFrom && date <= emitTo) {
       const positions: BackfillPosition[] = [];
       let total = 0;
-      let dayEstimated = broken;
       for (const [securityId, quantity] of quantities) {
         if (isEmpty(securityId, quantity)) continue;
         if (securityId === cashId) {
-          dayEstimated ||= broken;
           total += quantity;
-          positions.push({ securityId, quantity: fromMinor(quantity), price: 1, value: quantity, estimated: broken });
+          positions.push({ securityId, quantity: fromMinor(quantity), price: 1, value: quantity, priceSource: 'close' });
           continue;
         }
         const priced = input.price(securityId, date);
         const value = priced ? Math.round(quantity * priced.price * 100) : 0;
-        const estimated = broken || !priced || priced.estimated;
-        dayEstimated ||= estimated;
         total += value;
-        positions.push({ securityId, quantity, price: priced?.price ?? null, value, estimated });
+        positions.push({ securityId, quantity, price: priced?.price ?? null, value, priceSource: priced?.source ?? null });
       }
-      days.push({ date, positions, total, estimated: dayEstimated });
+      days.push({ date, positions, total, unmatched: broken });
     }
 
     // Undo this day's transactions to get the previous day's closing state.

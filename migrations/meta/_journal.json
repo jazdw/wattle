@@ -22,6 +22,13 @@
       "when": 1792942154075,
       "tag": "0002_splits_webhooks_bank_transactions",
       "breakpoints": true
+    },
+    {
+      "idx": 3,
+      "version": "6",
+      "when": 1793027540866,
+      "tag": "0003_daily_quality",
+      "breakpoints": true
     }
   ]
 }

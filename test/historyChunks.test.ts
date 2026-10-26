@@ -86,10 +86,10 @@ async function scenario(jobChunkRows: number) {
   const accountsById = new Map((await deps.db.select().from(schema.accounts)).map((row) => [row.id, row.externalId]));
   const tickers = new Map((await deps.db.select().from(schema.securities)).map((row) => [row.id, row.ticker]));
   const accountRows = (await deps.db.select().from(schema.accountDaily))
-    .map((row) => [accountsById.get(row.accountId), row.date, row.balance, row.source, row.estimated].join('|'))
+    .map((row) => [accountsById.get(row.accountId), row.date, row.balance, row.source, row.priceSource, row.unmatched].join('|'))
     .sort();
   const holdingRows = (await deps.db.select().from(schema.holdingDaily))
-    .map((row) => [accountsById.get(row.accountId), tickers.get(row.securityId), row.date, row.quantity, row.price, row.value, row.source, row.estimated].join('|'))
+    .map((row) => [accountsById.get(row.accountId), tickers.get(row.securityId), row.date, row.quantity, row.price, row.value, row.source, row.priceSource, row.unmatched].join('|'))
     .sort();
   const runs = (await deps.db.select().from(schema.syncRuns).where(eq(schema.syncRuns.action, 'history'))).map((run) => run.outcome);
   return { accountRows, holdingRows, runs, blocks: { afterLoad, total: await blocks() } };
@@ -165,7 +165,7 @@ describe('history prices', () => {
     const state = async () => {
       const [connection] = await deps.db.select().from(schema.connections);
       const runs = await deps.db.select().from(schema.syncRuns).where(eq(schema.syncRuns.action, 'history'));
-      const backfilled = await deps.db.select().from(schema.holdingDaily).where(eq(schema.holdingDaily.source, 'backfill'));
+      const backfilled = await deps.db.select().from(schema.holdingDaily).where(eq(schema.holdingDaily.source, 'rebuilt'));
       const priceJobs = await deps.db.select().from(schema.jobs).where(eq(schema.jobs.type, 'history_prices'));
       return { connection, runs, backfilled, priceJobs };
     };
@@ -181,7 +181,7 @@ describe('history prices', () => {
     expect(failed.connection.backfillStatus).toBe('failed'); // offers Reload history
     expect(failed.runs).toHaveLength(1);
     expect(failed.runs[0]).toMatchObject({ outcome: 'error', errorCode: 'PRICES_UNAVAILABLE' });
-    expect(failed.backfilled).toEqual([]); // no history estimated without VTI's closes
+    expect(failed.backfilled).toEqual([]); // no history rebuilt without VTI's closes
 
     down = false;
     expect((await api(`/api/connections/${failed.connection.id}/backfill`, { method: 'POST' })).body.queued).toBe(true);
@@ -190,7 +190,7 @@ describe('history prices', () => {
     expect(rebuilt.connection.backfillStatus).toBe('done');
     expect(rebuilt.runs.map((run) => run.outcome).sort()).toEqual(['error', 'ok']);
     expect(rebuilt.backfilled.length).toBeGreaterThan(700);
-    expect(rebuilt.backfilled.every((row) => !row.estimated)).toBe(true);
+    expect(rebuilt.backfilled.every((row) => row.priceSource === 'close')).toBe(true);
   });
 
   it('waits out a rate limit without using up attempts', async () => {
@@ -204,7 +204,7 @@ describe('history prices', () => {
     const done = await state();
     expect(done.connection.backfillStatus).toBe('done');
     expect(done.runs[0]).toMatchObject({ outcome: 'ok' });
-    expect(done.backfilled.every((row) => !row.estimated)).toBe(true);
+    expect(done.backfilled.every((row) => row.priceSource === 'close')).toBe(true);
   });
 });
 
@@ -235,7 +235,7 @@ describe('missed days', () => {
     const at = (ms: number) => (deps.now = () => new Date(ms));
     const snapshot = () => snapshotHousehold(deps, tenant, marketDate(new Date(deps.now().getTime() - 5 * 3600_000)));
     const carried = async () =>
-      (await deps.db.select().from(schema.accountDaily).where(eq(schema.accountDaily.source, 'sync'))).filter((row) => row.estimated).length;
+      (await deps.db.select().from(schema.accountDaily).where(eq(schema.accountDaily.source, 'carried'))).length;
     const plans = async () => (await deps.db.select().from(schema.jobs).where(eq(schema.jobs.type, 'history_plan'))).length;
     const sync = async () => {
       await syncConnection(deps, tenant, connection.id, 'manual');

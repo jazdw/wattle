@@ -2,12 +2,14 @@
  * Daily history series for the growth chart: total, per account, per
  * allocation category, or per holding within one account. Missing days are
  * carried forward from the last known value; values are converted to the
- * display currency at each day's FX rate.
+ * display currency at each day's FX rate. Each value comes with its quality
+ * (shared/quality.ts): where it came from, combined over its parts.
  */
 import { and, eq, gte, inArray, lte, min } from 'drizzle-orm';
 import { normalizeWeights, CATEGORY_LABELS, type Category, type Classification } from '../../shared/taxonomy';
 import { addDays, dateRange, marketDate, type IsoDate } from '../../shared/dates';
 import { convertMinor, type Currency } from '../../shared/money';
+import { dayQuality, type DailySource, type PriceSource, type Quality } from '../../shared/quality';
 import type { HistoryGroup, HistoryResponse, HistorySeries } from '../../shared/types';
 import { inChunks } from '../db/batch';
 import { accountDaily, accounts, holdingDaily, securities } from '../db/schema';
@@ -72,7 +74,7 @@ export async function loadHistory(deps: Deps, tenant: Tenant, options: Options):
       ),
     );
   const accountIds = accountRows.map((account) => account.id);
-  const empty: HistoryResponse = { currency: options.currency, group: options.group, dates, series: [], estimated: dates.map(() => false) };
+  const empty: HistoryResponse = { currency: options.currency, group: options.group, dates, series: [] };
   if (accountIds.length === 0) return empty;
 
   const balanceRows = await tenant.db
@@ -88,7 +90,6 @@ export async function loadHistory(deps: Deps, tenant: Tenant, options: Options):
     )
     .orderBy(accountDaily.date);
 
-  const estimated = dates.map(() => false);
   const index = new Map(dates.map((date, position) => [date, position]));
 
   // Per account: carried-forward display-currency value for each date.
@@ -97,8 +98,8 @@ export async function loadHistory(deps: Deps, tenant: Tenant, options: Options):
   // balance history doesn't cover; accounts at an investment login other
   // than the investment ones) would otherwise appear from nowhere on that day
   // and make the total lurch. Its first known balance is carried back
-  // instead, and those days are marked estimated (shaded). Manual accounts
-  // aren't: their first entry is a date you chose.
+  // instead, and those days are marked carried. Manual accounts aren't:
+  // their first entry is a date you chose.
   // Each account's first stored day overall (the rows above start just
   // before the range, so they can't tell "no history" from a gap).
   const firstDays = new Map<string, IsoDate>();
@@ -111,6 +112,7 @@ export async function loadHistory(deps: Deps, tenant: Tenant, options: Options):
     for (const row of rows) if (row.first) firstDays.set(row.accountId, row.first);
   }
   const perAccount = new Map<string, (number | null)[]>();
+  const perAccountQuality = new Map<string, (Quality | null)[]>();
   for (const account of accountRows) {
     const rows = balanceRows.filter((row) => row.accountId === account.id);
     const firstDay = firstDays.get(account.id);
@@ -119,23 +121,26 @@ export async function loadHistory(deps: Deps, tenant: Tenant, options: Options):
     // No longer reported (closed, or deselected in Plaid): out of totals from that day on, as it is from today's.
     const gone = account.missingSince !== null ? marketDate(new Date(account.missingSince)) : null;
     const values: (number | null)[] = [];
+    const quality: (Quality | null)[] = [];
     let cursor = 0;
     let last: (typeof rows)[number] | null = null;
-    for (const [position, date] of dates.entries()) {
+    for (const date of dates) {
       while (cursor < rows.length && rows[cursor].date <= date) last = rows[cursor++];
       if (gone && date >= gone) {
         values.push(null);
+        quality.push(null);
         continue;
       }
       if (!last && first && date < first.date) {
         values.push(convert(first.balance, first.currency, date));
-        estimated[position] = true;
+        quality.push(carriedFrom(first));
         continue;
       }
       values.push(last ? convert(last.balance, last.currency, date) : null);
-      if (last?.estimated && last.date === date) estimated[position] = true;
+      quality.push(!last ? null : last.date === date ? qualityOf(last) : carriedFrom(last));
     }
     perAccount.set(account.id, values);
+    perAccountQuality.set(account.id, quality);
   }
 
   const sum = (lists: (number | null)[][]) =>
@@ -148,24 +153,35 @@ export async function loadHistory(deps: Deps, tenant: Tenant, options: Options):
   let series: HistorySeries[];
   switch (options.group) {
     case 'total':
-      series = [{ key: 'total', label: 'Net worth', values: sum([...perAccount.values()]) }];
+      series = [{ key: 'total', label: 'Net worth', values: sum([...perAccount.values()]), quality: combined(dates, [...perAccountQuality.values()]) }];
       break;
     case 'account':
       series = accountRows.map((account) => ({
         key: account.id,
         label: account.name,
         values: perAccount.get(account.id)!,
+        quality: perAccountQuality.get(account.id)!,
       }));
       break;
     case 'category':
-      series = await categorySeries(tenant, accountRows, perAccount, dates, start, end, convert);
+      series = await categorySeries(tenant, accountRows, perAccount, perAccountQuality, dates, start, end, convert);
       break;
     case 'holding':
-      series = await holdingSeries(tenant, accountIds, dates, start, end, convert, estimated, index);
+      series = await holdingSeries(tenant, accountIds, dates, start, end, convert, index);
       break;
   }
 
-  return { currency: options.currency, group: options.group, dates, series: series.filter((s) => s.values.some((value) => value !== null && value !== 0)), estimated };
+  return { currency: options.currency, group: options.group, dates, series: series.filter((s) => s.values.some((value) => value !== null && value !== 0)) };
+}
+
+type QualityRow = { source: DailySource; priceSource: PriceSource | null; unmatched: boolean };
+const qualityOf = (row: QualityRow): Quality => ({ source: row.source, priceSource: row.priceSource, unmatched: row.unmatched });
+/** A stored value shown on a day it isn't for. */
+const carriedFrom = (row: QualityRow): Quality => ({ ...qualityOf(row), source: 'carried' });
+
+/** Per date, the combined quality of the values in several lists. */
+function combined(dates: IsoDate[], lists: (Quality | null)[][]): (Quality | null)[] {
+  return dates.map((_, position) => dayQuality(lists.flatMap((list) => (list[position] ? [list[position]] : []))));
 }
 
 type Convert = (minor: number, from: string, date: IsoDate) => number;
@@ -177,7 +193,6 @@ async function holdingSeries(
   start: IsoDate,
   end: IsoDate,
   convert: Convert,
-  estimated: boolean[],
   index: Map<IsoDate, number>,
 ): Promise<HistorySeries[]> {
   const rows = await tenant.db
@@ -186,7 +201,9 @@ async function holdingSeries(
       date: holdingDaily.date,
       value: holdingDaily.value,
       currency: holdingDaily.currency,
-      estimated: holdingDaily.estimated,
+      source: holdingDaily.source,
+      priceSource: holdingDaily.priceSource,
+      unmatched: holdingDaily.unmatched,
       ticker: securities.ticker,
       name: securities.name,
     })
@@ -201,6 +218,7 @@ async function holdingSeries(
       ),
     );
   const bySecurity = new Map<string, HistorySeries>();
+  const parts = new Map<string, Quality[][]>();
   // Days with any holding row: a security absent on such a day was not held
   // (e.g. sold), so it reads as zero rather than a gap.
   const covered = new Set<number>();
@@ -213,13 +231,16 @@ async function holdingSeries(
     if (position === undefined) continue;
     let entry = bySecurity.get(row.securityId);
     if (!entry) {
-      entry = { key: row.securityId, label: row.ticker ?? row.name ?? 'Unknown', values: dates.map(() => null) };
+      entry = { key: row.securityId, label: row.ticker ?? row.name ?? 'Unknown', values: dates.map(() => null), quality: dates.map(() => null) };
       bySecurity.set(row.securityId, entry);
+      parts.set(row.securityId, dates.map(() => []));
     }
     entry.values[position] = (entry.values[position] ?? 0) + convert(row.value, row.currency, row.date);
-    if (row.estimated) estimated[position] = true;
+    parts.get(row.securityId)![position].push(qualityOf(row));
   }
   for (const series of bySecurity.values()) {
+    series.quality = parts.get(series.key)!.map(dayQuality);
+    // Not held that day: zero, with no quality of its own.
     for (const position of covered) series.values[position] ??= 0;
   }
   return [...bySecurity.values()].sort((a, b) => (b.values.at(-1) ?? 0) - (a.values.at(-1) ?? 0));
@@ -229,6 +250,7 @@ async function categorySeries(
   tenant: Tenant,
   accountRows: (typeof accounts.$inferSelect)[],
   perAccount: Map<string, (number | null)[]>,
+  perAccountQuality: Map<string, (Quality | null)[]>,
   dates: IsoDate[],
   start: IsoDate,
   end: IsoDate,
@@ -236,10 +258,14 @@ async function categorySeries(
 ): Promise<HistorySeries[]> {
   const index = new Map(dates.map((date, position) => [date, position]));
   const totals = new Map<string, number[]>();
-  const add = (key: string, position: number, value: number) => {
+  const parts = new Map<string, Quality[][]>();
+  const add = (key: string, position: number, value: number, quality: Quality | null) => {
     const list = totals.get(key) ?? dates.map(() => 0);
     list[position] += value;
     totals.set(key, list);
+    const qualities = parts.get(key) ?? dates.map(() => []);
+    if (quality) qualities[position].push(quality);
+    parts.set(key, qualities);
   };
 
   const rows = await tenant.db
@@ -249,6 +275,9 @@ async function categorySeries(
       value: holdingDaily.value,
       currency: holdingDaily.currency,
       classification: securities.classification,
+      source: holdingDaily.source,
+      priceSource: holdingDaily.priceSource,
+      unmatched: holdingDaily.unmatched,
     })
     .from(holdingDaily)
     .innerJoin(securities, and(eq(securities.id, holdingDaily.securityId), eq(securities.householdId, holdingDaily.householdId)))
@@ -272,16 +301,17 @@ async function categorySeries(
     covered.add(`${row.accountId}:${row.date}`);
     const weights = normalizeWeights((row.classification as Classification | null)?.categories ?? { other: 1 });
     const value = convert(row.value, row.currency, row.date);
-    for (const [category, weight] of Object.entries(weights)) add(category, position, value * (weight ?? 0));
+    for (const [category, weight] of Object.entries(weights)) add(category, position, value * (weight ?? 0), qualityOf(row));
   }
 
   for (const account of accountRows) {
     const values = perAccount.get(account.id)!;
+    const quality = perAccountQuality.get(account.id)!;
     const liability = account.type === 'credit' || account.type === 'loan';
     const category = liability ? 'liabilities' : ((account.category as Category | null) ?? defaultCategory(account.type));
     for (const [position, date] of dates.entries()) {
       if (values[position] === null || covered.has(`${account.id}:${date}`)) continue;
-      add(category, position, values[position]!);
+      add(category, position, values[position]!, quality[position]);
     }
   }
 
@@ -289,5 +319,6 @@ async function categorySeries(
     key,
     label: key === 'liabilities' ? 'Liabilities' : CATEGORY_LABELS[key as Category],
     values: values.map((value) => Math.round(value)),
+    quality: parts.get(key)!.map(dayQuality),
   }));
 }

@@ -13,7 +13,6 @@ describe('Net worth page', () => {
     expect(screen.getByText(/^\$66,200\.00 \(/)).toBeInTheDocument(); // first → last point of the 1Y history; no + on a gain
     expect(screen.getByText('$1,368,500.00')).toBeInTheDocument();
     expect(screen.getByText('-$2,300.00', { selector: 'p' })).toBeInTheDocument();
-    expect(screen.getByText(/reconstructed from transactions/)).toBeInTheDocument();
   });
 
   it('groups visible accounts by type with owner badges', async () => {
@@ -67,7 +66,7 @@ describe('Net worth page', () => {
   });
 
   it('explains when there is no history yet', async () => {
-    server.use(http.get('*/api/history', () => HttpResponse.json({ currency: 'USD', group: 'total', dates: [], series: [], estimated: [] })));
+    server.use(http.get('*/api/history', () => HttpResponse.json({ currency: 'USD', group: 'total', dates: [], series: [] })));
     renderPage(<NetWorth />);
     expect(await screen.findByText(/History builds up/)).toBeInTheDocument();
   });

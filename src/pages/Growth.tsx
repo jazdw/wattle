@@ -114,9 +114,6 @@ export function Growth() {
                   <Legend items={series.map((item) => ({ key: item.key, label: item.label, color: item.color }))} />
                 </div>
               )}
-              {history.data!.estimated.some(Boolean) && (
-                <p className="mt-2 text-xs text-muted-foreground">Shaded periods are reconstructed from transactions and may be approximate.</p>
-              )}
             </>
           )}
         </CardContent>

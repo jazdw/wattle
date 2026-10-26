@@ -155,7 +155,6 @@ describe('CSV import', () => {
 
     await expect.poll(() => sent('POST /api/imports/balances')[0]?.body).toEqual({
       accountId: 'wbc',
-      overwrite: false,
       rows: [
         { date: '2026-10-01', balance: 1000 },
         { date: '2026-10-03', balance: 1995.5 },

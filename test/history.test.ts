@@ -78,12 +78,12 @@ describe('rebuild from transactions', () => {
       transactions: [cashRow('t-div', 'cash', 'dividend', -8), buy('t-buy', '2026-10-06', 0.0775, 100), cashRow('t-fee', 'fee', 'account fee', -0.25)],
     });
     const { deps } = await link(plaid);
-    // Cash is flagged only when the walk back breaks (prices don't affect it).
+    const days = await deps.db.select().from(schema.accountDaily);
+    expect(days.filter((row) => row.date < '2026-10-06').length).toBeGreaterThan(0);
+    expect(days.filter((row) => row.unmatched)).toEqual([]);
     const [cash] = await deps.db.select().from(schema.securities).where(eq(schema.securities.ticker, 'CUR:USD'));
-    const rows = await deps.db.select().from(schema.holdingDaily).where(eq(schema.holdingDaily.securityId, cash.id));
-    expect(rows.filter((row) => row.date < '2026-10-06').length).toBeGreaterThan(0);
-    expect(rows.filter((row) => row.estimated)).toEqual([]);
-    expect(rows.find((row) => row.date === '2026-10-05')).toMatchObject({ quantity: 0.1, value: 10 });
+    const cashRows = await deps.db.select().from(schema.holdingDaily).where(eq(schema.holdingDaily.securityId, cash.id));
+    expect(cashRows.find((row) => row.date === '2026-10-05')).toMatchObject({ quantity: 0.1, value: 10, source: 'rebuilt' });
   });
 });
 
@@ -142,7 +142,7 @@ describe('share splits', () => {
       holdings: [{ securityId: 'xyz', quantity: 200 }],
       transactions: [],
       cashSecurityId: null,
-      price: (_id, date) => ({ price: date >= '2026-03-16' ? 75 : 300, estimated: false }),
+      price: (_id, date) => ({ price: date >= '2026-03-16' ? 75 : 300, source: 'close' }),
       splitFactor: (_id, date) => (date === '2026-03-16' ? 4 : 1),
     });
     expect(days.map((day) => [day.date, day.positions[0].quantity, day.total])).toEqual([

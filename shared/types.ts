@@ -1,6 +1,7 @@
 /** API types shared by the Worker and the browser. */
 import type { IsoDate } from './dates';
 import type { Currency } from './money';
+import type { Quality } from './quality';
 import type { Category, Classification, ClassificationSource } from './taxonomy';
 import type { StyleBreakdown } from './allocation';
 
@@ -285,6 +286,8 @@ export interface HistorySeries {
   key: string;
   label: string;
   values: (number | null)[];
+  /** Per date, where the value came from (null without a value of its own). */
+  quality: (Quality | null)[];
 }
 
 export interface HistoryResponse {
@@ -292,8 +295,6 @@ export interface HistoryResponse {
   group: HistoryGroup;
   dates: IsoDate[];
   series: HistorySeries[];
-  /** Per date: whether any value was estimated (backfilled with gaps). */
-  estimated: boolean[];
 }
 
 export interface TargetResponse {

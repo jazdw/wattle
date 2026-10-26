@@ -26,12 +26,13 @@ import { decryptToken, loadTokenKeys, tokenAad } from './crypto';
 import { enqueue, RetryLater, type JobContext } from './jobRunner';
 import { connectionLease, Lease } from './lease';
 import { missedRetryStatement } from './backfill';
+import { QUALITY_SET, replaceWhere } from './quality';
 import { getConnection, isActive, type ConnectionRow } from './sync';
 
 /**
  * Days the bank was asked about but had no figure for keep their carried-forward
- * balance, still estimated, relabelled as bank history: missed-days detection
- * (./backfill) then counts them as covered and doesn't ask again.
+ * balance, relabelled as bank history (rebuilt): the bank's history covers
+ * them, so missed-days detection (./backfill) doesn't ask again.
  */
 function askedStatement(deps: Deps, tenant: Tenant, connection: ConnectionRow) {
   const covered = tenant.db
@@ -47,13 +48,12 @@ function askedStatement(deps: Deps, tenant: Tenant, connection: ConnectionRow) {
     );
   return tenant.db
     .update(accountDaily)
-    .set({ source: 'backfill' })
+    .set({ source: 'rebuilt' })
     .where(
       tenant.scope(
         accountDaily,
         inArray(accountDaily.accountId, covered),
-        eq(accountDaily.source, 'sync'),
-        eq(accountDaily.estimated, true),
+        eq(accountDaily.source, 'carried'),
         lt(accountDaily.date, marketDate(deps.now())),
       ),
     );
@@ -149,7 +149,8 @@ async function reportByAccount(deps: Deps, tenant: Tenant, connection: Connectio
           date: balance.date,
           balance: liability ? -Math.abs(minor) : minor,
           currency: balance.iso_currency_code ?? account.currency,
-          source: 'backfill',
+          // The institution's reconstruction of past days, not a reported balance.
+          source: 'rebuilt',
         });
       }
       // Posted only: a pending transaction's id changes when it posts.
@@ -192,10 +193,10 @@ function balanceStatements(tenant: Tenant, rows: (typeof accountDaily.$inferInse
       .values(chunk)
       .onConflictDoUpdate({
         target: [accountDaily.accountId, accountDaily.date],
-        set: { balance: sql`excluded.balance`, source: sql`excluded.source`, estimated: sql`0` },
-        // Only balances carried forward because a sync was missed; reported,
-        // entered and imported ones stay.
-        setWhere: sql`${accountDaily.source} = 'sync' and ${accountDaily.estimated} = 1`,
+        set: { balance: sql`excluded.balance`, ...QUALITY_SET },
+        // Replaces carried-forward and earlier bank history; reported, entered
+        // and imported balances stay.
+        setWhere: replaceWhere(accountDaily.source),
       }),
   );
 }

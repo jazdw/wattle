@@ -21,6 +21,7 @@ import {
   text,
   uniqueIndex,
 } from 'drizzle-orm/sqlite-core';
+import { DAILY_SOURCES, PRICE_SOURCES } from '../../shared/quality';
 import type { Classification } from '../../shared/taxonomy';
 import type { SyncChange } from '../../shared/types';
 
@@ -322,7 +323,8 @@ export const investmentTransactions = sqliteTable(
 /* Daily history                                                       */
 /* ------------------------------------------------------------------ */
 
-export const SNAPSHOT_SOURCES = ['sync', 'backfill', 'import', 'manual'] as const;
+// Each row says where its value came from (shared/quality.ts has the meanings
+// and the trust order that decides which write may replace which).
 
 export const accountDaily = sqliteTable(
   'account_daily',
@@ -337,9 +339,11 @@ export const accountDaily = sqliteTable(
     /** Minor units in `currency`; liabilities negative. */
     balance: integer('balance').notNull(),
     currency: text('currency').notNull(),
-    source: text('source', { enum: SNAPSHOT_SOURCES }).notNull(),
-    /** Backfilled values that hit an inconsistency (e.g. a negative position). */
-    estimated: integer('estimated', { mode: 'boolean' }).notNull().default(false),
+    source: text('source', { enum: DAILY_SOURCES }).notNull(),
+    /** How its holdings were priced (the least final of them); null for a balance. */
+    priceSource: text('price_source', { enum: PRICE_SOURCES }),
+    /** Rebuilt from transactions that don't reconcile with what's known. */
+    unmatched: integer('unmatched', { mode: 'boolean' }).notNull().default(false),
   },
   (table) => [
     primaryKey({ columns: [table.accountId, table.date] }),
@@ -364,8 +368,9 @@ export const holdingDaily = sqliteTable(
     price: real('price'),
     value: integer('value').notNull(),
     currency: text('currency').notNull(),
-    source: text('source', { enum: SNAPSHOT_SOURCES }).notNull(),
-    estimated: integer('estimated', { mode: 'boolean' }).notNull().default(false),
+    source: text('source', { enum: DAILY_SOURCES }).notNull(),
+    priceSource: text('price_source', { enum: PRICE_SOURCES }),
+    unmatched: integer('unmatched', { mode: 'boolean' }).notNull().default(false),
   },
   (table) => [
     primaryKey({ columns: [table.accountId, table.securityId, table.date] }),

@@ -145,9 +145,6 @@ export function NetWorth() {
               ) : (
                 <p className="py-16 text-center text-sm text-muted-foreground">History builds up from the first daily snapshot.</p>
               )}
-              {history.data?.estimated.some(Boolean) && (
-                <p className="mt-2 text-xs text-muted-foreground">Shaded periods are reconstructed from transactions and may be approximate.</p>
-              )}
             </CardContent>
           </Card>
 
