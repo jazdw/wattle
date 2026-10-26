@@ -1,7 +1,7 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { Plus, Trash2 } from 'lucide-react';
 import { useState } from 'react';
-import { marketDate } from '../../shared/dates';
+import { dateRange, marketDate } from '../../shared/dates';
 import { CURRENCIES, fromMinor, type Currency } from '../../shared/money';
 import { CATEGORIES, CATEGORY_LABELS } from '../../shared/taxonomy';
 import type { AccountSummary } from '../../shared/types';
@@ -554,7 +554,9 @@ export function ImportDialog({ accounts, open, onOpenChange }: { accounts: Accou
             {preview && (
               <div className="rounded-md border p-3 text-sm">
                 <p className="mb-1 font-medium">
-                  {preview.rows.length} days
+                  {preview.rows.length} {preview.rows.length === 1 ? 'balance' : 'balances'}
+                  {/* The import carries each balance forward to the next, so it writes every day in between. */}
+                  {preview.rows.length > 1 && `, filling ${dateRange(preview.rows[0].date, preview.rows.at(-1)!.date).length} days`}
                   {preview.rows.length > 0 && ` · ${longDate(preview.rows[0].date)} – ${longDate(preview.rows.at(-1)!.date)}`}
                   {preview.skipped > 0 && <span className="text-muted-foreground"> · {preview.skipped} rows skipped</span>}
                 </p>

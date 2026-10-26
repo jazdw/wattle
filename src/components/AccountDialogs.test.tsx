@@ -141,7 +141,7 @@ describe('CSV import', () => {
 `;
 
   it('recognises a Example Bank export, previews and imports daily balances', async () => {
-    server.use(http.post('*/api/imports/balances', () => HttpResponse.json({ imported: 2 })));
+    server.use(http.post('*/api/imports/balances', () => HttpResponse.json({ imported: 3 })));
     const { user } = await openAccounts();
     await user.click(screen.getByRole('button', { name: /Import CSV/ }));
     const dialog = await screen.findByRole('dialog', { name: 'Import balance history' });
@@ -150,7 +150,7 @@ describe('CSV import', () => {
     fireEvent.change(within(dialog).getByLabelText('CSV file'), { target: { files: [file] } });
 
     expect(await within(dialog).findByText(/Recognised a bank transactions export/)).toBeInTheDocument();
-    expect(within(dialog).getByText(/2 days/)).toBeInTheDocument();
+    expect(within(dialog).getByText(/2 balances, filling 3 days/)).toBeInTheDocument(); // the 2nd carries the 1st
     await user.click(within(dialog).getByRole('button', { name: 'Import' }));
 
     await expect.poll(() => sent('POST /api/imports/balances')[0]?.body).toEqual({
@@ -161,7 +161,7 @@ describe('CSV import', () => {
         { date: '2026-10-03', balance: 1995.5 },
       ],
     });
-    expect(await within(dialog).findByText('Imported 2 days.')).toBeInTheDocument();
+    expect(await within(dialog).findByText('Imported 3 days.')).toBeInTheDocument();
 
     // Closing clears it for the next import.
     await user.click(within(dialog).getByText('Close', { selector: 'button' })); // the footer button, not the ×
@@ -180,9 +180,9 @@ describe('CSV import', () => {
     fireEvent.change(within(dialog).getByLabelText('CSV file'), { target: { files: [file] } });
     await within(dialog).findByLabelText('Date column');
     await user.selectOptions(within(dialog).getByLabelText('Date format'), 'MM/DD/YYYY');
-    expect(within(dialog).getByText(/2 days/)).toBeInTheDocument();
+    expect(within(dialog).getByText(/2 balances, filling 2 days/)).toBeInTheDocument();
     expect(within(dialog).getByRole('button', { name: 'Import' })).toBeDisabled(); // no account chosen
     await user.selectOptions(within(dialog).getByLabelText('Balance column'), '1');
-    expect(within(dialog).getByText(/0 days/)).toBeInTheDocument();
+    expect(within(dialog).getByText(/0 balances/)).toBeInTheDocument();
   });
 });
