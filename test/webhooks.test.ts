@@ -1,7 +1,7 @@
 import { desc, sql } from 'drizzle-orm';
 import { describe, expect, it } from 'vitest';
 import * as schema from '../server/db/schema';
-import { account, fakePlaid, holding, security, signWebhook } from './fakes';
+import { account, fakePlaid, firstBuy, holding, security, signWebhook } from './fakes';
 import { client, createHousehold, createTestDeps, flush, nightly, settle, TODAY } from './helpers';
 
 async function setup(kind: 'investments' | 'account' = 'investments') {
@@ -9,6 +9,7 @@ async function setup(kind: 'investments' | 'account' = 'investments') {
     accounts: [account('brk', 'investment', 1000)],
     securities: [security('s-vti', 'VTI', 'etf', 100)],
     holdings: [holding('brk', 's-vti', 10, 100)],
+    transactions: [firstBuy('brk', 's-vti')],
     assetReportReady: true,
     historicalBalances: { brk: [{ date: '2026-10-01', current: 900 }] },
   });
@@ -106,6 +107,7 @@ describe('Plaid webhooks', () => {
     // linked, so a plain Sync would wait out its cooldown; this doesn't.
     plaid.state.accounts = [account('ira', 'investment', 2000)];
     plaid.state.holdings = [holding('ira', 's-vti', 20, 100)];
+    plaid.state.transactions = [firstBuy('ira', 's-vti')];
     const historyBefore = (await deps.db.select().from(schema.syncRuns)).filter((run) => run.action === 'history').length;
     const chosen = await api(`/api/connections/${before.id}/accounts-chosen`, { method: 'POST' });
     expect(chosen.body).toMatchObject({ added: 1, historyQueued: true });
@@ -165,6 +167,7 @@ describe('Plaid webhooks', () => {
     // An IRA and a card chosen in Link.
     plaid.state.accounts = [account('brk', 'investment', 1000), account('ira', 'investment', 2000), account('card', 'credit', 300)];
     plaid.state.holdings = [holding('brk', 's-vti', 10, 100), holding('ira', 's-vti', 20, 100)];
+    plaid.state.transactions = [firstBuy('ira', 's-vti')];
     plaid.state.historicalBalances = { card: [{ date: '2026-10-01', current: 250 }] };
     const chosen = await api(`/api/connections/${login.id}/accounts-chosen`, { method: 'POST' });
     expect(chosen.body).toMatchObject({ added: 2, historyQueued: false });

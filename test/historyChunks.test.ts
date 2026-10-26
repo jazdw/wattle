@@ -14,7 +14,7 @@ import { snapshotHousehold } from '../server/services/snapshots';
 import { syncConnection } from '../server/services/sync';
 import { marketDate } from '../shared/dates';
 import { ProviderHttpError } from '../server/adapters/marketData';
-import { account, closes, fakePlaid, fakePrices, holding, security } from './fakes';
+import { account, closes, fakePlaid, fakePrices, firstBuy, holding, security } from './fakes';
 import { client, createHousehold, createTestDeps, flush, settle } from './helpers';
 
 const buy = (id: string, accountId: string, securityId: string, date: string, quantity: number, price: number) =>
@@ -40,6 +40,8 @@ async function scenario(jobChunkRows: number) {
     securities: [security('s-vti', 'VTI', 'etf', 100), security('s-bnd', 'BND', 'etf', 70), security('s-fund', 'PLANFUND', 'mutual fund', null), security('s-cash', 'CUR:USD', 'cash', 1)],
     holdings: [holding('brk', 's-vti', 20, 100), holding('brk', 's-cash', 400, 1), holding('ira', 's-bnd', 15, 70), holding('ira', 's-fund', 30, 20)],
     transactions: [
+      firstBuy('brk', 's-vti'),
+      firstBuy('ira', 's-bnd', 70),
       buy('t1', 'brk', 's-vti', '2026-09-01', 5, 95),
       buy('t2', 'brk', 's-vti', '2026-03-15', 10, 80),
       buy('t3', 'ira', 's-bnd', '2025-12-01', 15, 68),
@@ -116,7 +118,7 @@ describe('history progress', () => {
       accounts: [account('brk', 'investment', 3000)],
       securities: [security('s-vti', 'VTI', 'etf', 100)],
       holdings: [holding('brk', 's-vti', 20, 100)],
-      transactions: [buy('t1', 'brk', 's-vti', '2026-03-15', 10, 80)] as never,
+      transactions: [firstBuy('brk', 's-vti'), buy('t1', 'brk', 's-vti', '2026-03-15', 10, 80)] as never,
     });
     const deps = await createTestDeps({ plaid, prices: fakePrices({ VTI: closes('2024-09-01', 800, 60, 0.05) }) });
     deps.config.jobChunkRows = 50;
@@ -149,7 +151,7 @@ describe('history prices', () => {
       accounts: [account('brk', 'investment', 3000)],
       securities: [security('s-vti', 'VTI', 'etf', 100), security('s-bnd', 'BND', 'etf', 70)],
       holdings: [holding('brk', 's-vti', 20, 100), holding('brk', 's-bnd', 10, 70)],
-      transactions: [buy('t1', 'brk', 's-vti', '2026-03-15', 10, 80)] as never,
+      transactions: [firstBuy('brk', 's-vti'), buy('t1', 'brk', 's-vti', '2026-03-15', 10, 80)] as never,
     });
     const prices = fakePrices({ VTI: closes('2024-09-01', 800, 60, 0.05), BND: closes('2024-09-01', 800, 65, 0.01) });
     const working = prices.dailyCloses;
@@ -214,7 +216,7 @@ describe('missed days', () => {
       accounts: [account('brk', 'investment', 3000)],
       securities: [security('s-vti', 'VTI', 'etf', 100)],
       holdings: [holding('brk', 's-vti', 30, 100)],
-      transactions: [buy('t1', 'brk', 's-vti', '2026-03-15', 10, 80)] as never,
+      transactions: [firstBuy('brk', 's-vti'), buy('t1', 'brk', 's-vti', '2026-03-15', 10, 80)] as never,
     });
     const prices = fakePrices({ VTI: closes('2024-09-01', 1100, 60, 0.05) });
     const working = prices.dailyCloses;
@@ -291,7 +293,7 @@ describe('history plans', () => {
       accounts: [account('brk', 'investment', 3000)],
       securities: [security('s-vti', 'VTI', 'etf', 100), security('s-bnd', 'BND', 'etf', 70)],
       holdings: [holding('brk', 's-vti', 20, 100), holding('brk', 's-bnd', 10, 70)],
-      transactions: [buy('t1', 'brk', 's-vti', '2026-03-15', 10, 80)] as never,
+      transactions: [firstBuy('brk', 's-vti'), buy('t1', 'brk', 's-vti', '2026-03-15', 10, 80)] as never,
     });
     const deps = await createTestDeps({ plaid, prices: fakePrices({ VTI: closes('2024-09-01', 800, 60, 0.05), BND: closes('2024-09-01', 800, 65, 0.01) }) });
     deps.config.jobChunkRows = 100;

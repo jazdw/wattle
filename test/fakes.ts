@@ -78,6 +78,27 @@ export function holding(accountId: string, securityId: string, quantity: number,
   } as Partialish<Holding>;
 }
 
+/** Two years before the tests' today: as far back as a history load goes. */
+export const TWO_YEARS_AGO = '2024-10-08';
+
+/** One share bought two years back. History starts at an account's first transaction, so this gives it the full two years. */
+export function firstBuy(accountId: string, securityId: string, price = 100) {
+  return {
+    investment_transaction_id: `t-first-${accountId}-${securityId}`,
+    account_id: accountId,
+    security_id: securityId,
+    date: TWO_YEARS_AGO,
+    name: 'Buy',
+    type: 'buy',
+    subtype: 'buy',
+    quantity: 1,
+    amount: price,
+    price,
+    fees: 0,
+    iso_currency_code: 'USD',
+  } as Partialish<InvestmentTransaction>;
+}
+
 export function fakePlaid(initial: Partial<PlaidState> = {}): PlaidApi & { state: PlaidState } {
   const state: PlaidState = {
     itemId: 'item-1',

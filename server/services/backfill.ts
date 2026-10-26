@@ -128,7 +128,7 @@ export function missedRetryStatement(deps: Deps, tenant: Tenant, connectionId: s
 }
 
 /** A history job of this connection is queued, waiting or running (other than run `except`'s, whose ids start history:<run>:). */
-async function historyUnderway(tenant: Tenant, connectionId: string, except?: string): Promise<boolean> {
+export async function historyUnderway(tenant: Tenant, connectionId: string, except?: string): Promise<boolean> {
   const [row] = await tenant.db
     .select({ id: jobs.id })
     .from(jobs)
@@ -324,7 +324,14 @@ export async function planHistory({ deps, tenant, job, renew }: JobContext): Pro
             tenant.db.delete(holdingDaily).where(tenant.scope(holdingDaily, inArray(holdingDaily.accountId, accountIds), inArray(holdingDaily.source, REPLACEABLE))),
           );
         }
-        investments = accountIds.map((accountId) => ({ accountId, from: addDays(today, -HISTORY_DAYS) }));
+        // Each account from where its history is known, at most two years back.
+        const since = await knownSince(tenant, accountIds);
+        investments = accountIds.flatMap((accountId) => {
+          const known = since.get(accountId);
+          if (!known || known >= today) return [];
+          const earliest = addDays(today, -HISTORY_DAYS);
+          return [{ accountId, from: known > earliest ? known : earliest }];
+        });
       }
     }
 
@@ -705,6 +712,33 @@ async function splitLookup(
  */
 export function paidOut<T extends { type: string; amount: number }>(txn: T): T {
   return txn.type === 'fee' ? { ...txn, amount: Math.abs(txn.amount) } : txn;
+}
+
+/**
+ * Where each account's history is known from: its first investment
+ * transaction, or its first day synced, imported or entered. Days before
+ * that aren't rebuilt: today's holdings copied back would be made up.
+ */
+async function knownSince(tenant: Tenant, accountIds: string[]): Promise<Map<string, IsoDate>> {
+  const since = new Map<string, IsoDate>();
+  const keep = (accountId: string, date: string | null) => {
+    if (date && (!since.has(accountId) || date < since.get(accountId)!)) since.set(accountId, date);
+  };
+  for (const chunk of inChunks(accountIds)) {
+    const transactions = await tenant.db
+      .select({ accountId: investmentTransactions.accountId, first: min(investmentTransactions.date) })
+      .from(investmentTransactions)
+      .where(tenant.scope(investmentTransactions, inArray(investmentTransactions.accountId, chunk)))
+      .groupBy(investmentTransactions.accountId);
+    for (const row of transactions) keep(row.accountId, row.first);
+    const days = await tenant.db
+      .select({ accountId: accountDaily.accountId, first: min(accountDaily.date) })
+      .from(accountDaily)
+      .where(tenant.scope(accountDaily, inArray(accountDaily.accountId, chunk), inArray(accountDaily.source, ['snapshot', 'import', 'manual'])))
+      .groupBy(accountDaily.accountId);
+    for (const row of days) keep(row.accountId, row.first);
+  }
+  return since;
 }
 
 /** Rows a rebuild may delete and write again: what it made before, or carried forward. */
