@@ -99,6 +99,17 @@ describe('holdings history import', () => {
     expect(await rows()).toBe(0);
   });
 
+  it("doesn't check a dividend reinvestment's price: it's the dividend over a rounded share count", async () => {
+    const { deps, send } = await linked(20.1);
+    const reinvested: Txn[] = [
+      { date: '2026-07-15', type: 'Dividend', ticker: 'VTI', amount: 10 },
+      { date: '2026-07-15', type: 'Reinvestment', ticker: 'VTI', shares: 0.1, price: 108.4, amount: -10 },
+    ];
+    expect((await send(download([{ ticker: 'VTI', shares: 20.1 }, { ticker: null, shares: 50 }], [...HISTORY, ...reinvested]))).status).toBe(200);
+    await settle(deps);
+    expect((await deps.db.select().from(schema.accountDaily)).filter((row) => row.source === 'import').length).toBeGreaterThan(0);
+  });
+
   it('a second import of the same days replaces the first, holdings it no longer has included', async () => {
     const { deps, send } = await linked();
     const positions = [{ ticker: 'VTI', shares: 20 }, { ticker: null, shares: 50 }];
