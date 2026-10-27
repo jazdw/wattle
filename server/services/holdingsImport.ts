@@ -3,9 +3,9 @@
  * its positions now, then its transactions (a Vanguard download has 18
  * months). Each day's share counts come from walking back from today's
  * positions through the transactions (./backfillCore), priced at the day's
- * close: shares move on the trade date and cash on the settlement date, as a
- * brokerage books them (a purchase paid for by money arriving days later
- * never shows negative cash). They're written as imported: trusted over anything from the
+ * close. Shares and cash both move on the trade date, so a purchase never
+ * counts the money twice while it settles; bought before the money arrived,
+ * cash goes below zero until it does (an amount owed). They're written as imported: trusted over anything from the
  * institution's own feed (shared/quality.ts).
  *
  * Before anything is written the file is checked: every transaction type
@@ -69,8 +69,8 @@ const MAX_PROBLEMS = 5;
 export interface ImportedHoldings {
   /** Today's positions; a null ticker is cash. */
   positions: { ticker: string | null; shares: number }[];
-  /** `amount`: cents the account's cash changed by, as the institution reports it (positive in), on `settled`; shares change on `date`. */
-  transactions: { date: IsoDate; settled: IsoDate; type: string; ticker: string | null; shares: number; price: number; amount: number }[];
+  /** `amount`: cents the account's cash changed by, as the institution reports it (positive in), on the trade date `date`. */
+  transactions: { date: IsoDate; type: string; ticker: string | null; shares: number; price: number; amount: number }[];
 }
 
 interface BlockPayload {
@@ -188,12 +188,8 @@ export async function importHoldingsHistory(
     const cash = isCash(txn.ticker);
     const cashIn = SWEEPS.has(type) || (cash && CASH_FUND_TRADES.has(type)) ? 0 : type === 'fee' ? -Math.abs(txn.amount) : txn.amount;
     const quantity = cash ? 0 : txn.shares;
-    const securityId = cash ? null : securityOf(txn.ticker!);
-    if (txn.settled === txn.date) return quantity === 0 && cashIn === 0 ? [] : [{ date: txn.date, securityId, quantity, amount: -cashIn }];
-    return [
-      ...(quantity !== 0 ? [{ date: txn.date, securityId, quantity, amount: 0 }] : []),
-      ...(cashIn !== 0 ? [{ date: txn.settled, securityId: null, quantity: 0, amount: -cashIn }] : []),
-    ];
+    if (quantity === 0 && cashIn === 0) return [];
+    return [{ date: txn.date, securityId: cash ? null : securityOf(txn.ticker!), quantity, amount: -cashIn }];
   });
 
   const today = marketDate(deps.now());
@@ -326,10 +322,10 @@ export async function importBlock({ deps, tenant, job, renew }: JobContext): Pro
     await renew();
     await lease.renew();
     await runAtomic(tenant.db, [
-      // Positions rebuilt or carried for these days give way: the file says what was held.
+      // Positions rebuilt, carried or imported before for these days give way: the file says what was held.
       tenant.db
         .delete(holdingDaily)
-        .where(tenant.scope(holdingDaily, eq(holdingDaily.accountId, account.id), gte(holdingDaily.date, block.from), lte(holdingDaily.date, block.to), inArray(holdingDaily.source, ['rebuilt', 'carried']))),
+        .where(tenant.scope(holdingDaily, eq(holdingDaily.accountId, account.id), gte(holdingDaily.date, block.from), lte(holdingDaily.date, block.to), inArray(holdingDaily.source, ['rebuilt', 'carried', 'import']))),
       ...chunkRows(holdingDaily, holdingRows).map((chunk) =>
         tenant.db
           .insert(holdingDaily)

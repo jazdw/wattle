@@ -230,8 +230,8 @@ Account Number,Trade Date,Settlement Date,Transaction Type,Transaction Descripti
         { ticker: 'XYZMM', shares: 50 },
       ],
       transactions: [
-        { date: '2026-06-01', settled: '2026-06-02', type: 'Buy', ticker: 'XYZ', shares: 10, price: 100, amount: -1000_00 },
-        { date: '2026-06-01', settled: '2026-06-01', type: 'Funds Received', ticker: null, shares: 0, price: 0, amount: 1050_00 },
+        { date: '2026-06-01', type: 'Buy', ticker: 'XYZ', shares: 10, price: 100, amount: -1000_00 },
+        { date: '2026-06-01', type: 'Funds Received', ticker: null, shares: 0, price: 0, amount: 1050_00 },
       ],
     });
     expect(await within(dialog).findByText(/Importing 120 days of holdings/)).toBeInTheDocument();
