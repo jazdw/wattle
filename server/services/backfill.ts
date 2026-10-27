@@ -21,13 +21,14 @@
 import { and, eq, gte, inArray, isNotNull, isNull, lt, lte, max, min, ne, notLike, sql } from 'drizzle-orm';
 import type { BatchItem } from 'drizzle-orm/batch';
 import { addDays, dateRange, marketDate, type IsoDate } from '../../shared/dates';
+import { toMinor } from '../../shared/money';
 import { leastFinal, type DailySource } from '../../shared/quality';
 import { PlaidApiError } from '../adapters/plaid';
 import { chunkRows, inChunks, runAtomic, runBatch } from '../db/batch';
 import { accountDaily, accounts, connections, holdingDaily, holdings, investmentTransactions, jobs, pricesDaily, securities, syncRuns } from '../db/schema';
 import type { Tenant } from '../db/tenant';
 import type { Deps } from '../ports';
-import { reconstructHistory } from './backfillCore';
+import { reconstructHistory, type BackfillHolding, type BackfillTransaction } from './backfillCore';
 import { completeRunStatements, SyncRun, type SyncTrigger } from './activity';
 import { encryptToken, loadTokenKeys, tokenAad } from './crypto';
 import { enqueue, RetryLater, type JobContext, type JobSpec, type JobType } from './jobRunner';
@@ -494,6 +495,29 @@ export async function historyBlock({ deps, tenant, job, renew }: JobContext): Pr
     },
     splitFactor,
   });
+  // A gap between real snapshots: the walk back must arrive at the holdings
+  // synced the day before it, or a transaction is missing or wrong. Then the
+  // days stay carried, marked unmatched, rather than rebuilt wrongly.
+  if (block.mode === 'missed' && (await gapUnmatched(tenant, account.id, block.start, current, transactions, cashSecurity ?? null, splitFactor, block.end))) {
+    const lease = await Lease.acquireWaiting(deps, tenant, connectionLease(block.connectionId));
+    if (!lease) throw new RetryLater(BUSY_RETRY_SECONDS, 'The connection is busy.');
+    try {
+      await renew();
+      await lease.renew();
+      const window = carriedForward(tenant, [account.id], block.from, addDays(block.to, 1));
+      const carried = await tenant.db.select({ date: accountDaily.date }).from(accountDaily).where(window);
+      await runAtomic(tenant.db, [
+        tenant.db
+          .update(holdingDaily)
+          .set({ unmatched: true })
+          .where(tenant.scope(holdingDaily, eq(holdingDaily.accountId, account.id), eq(holdingDaily.source, 'carried'), gte(holdingDaily.date, block.from), lte(holdingDaily.date, block.to))),
+        tenant.db.update(accountDaily).set({ unmatched: true }).where(window),
+      ]);
+      return { days: 0, unmatched: carried.length };
+    } finally {
+      await lease.forceRelease();
+    }
+  }
   // Days you imported or entered keep their holdings: the rebuild adds none to them.
   const yours = new Set(
     (
@@ -608,6 +632,7 @@ export async function finishHistory({ deps, tenant, job, renew }: JobContext): P
   const pricesFailed = await failedPriceJobs(tenant, finish.runId);
   const failed = parts.filter((part) => part.status === 'failed').length + pricesFailed;
   const days = parts.reduce((sum, part) => sum + (Number(part.result?.days) || 0), 0);
+  const unmatched = parts.reduce((sum, part) => sum + (Number(part.result?.unmatched) || 0), 0);
   const connection = await getConnection(tenant, finish.connectionId);
   if (!connection) return { days, failed };
   const next = finish.mode === 'missed' ? 'Those days keep their carried-forward balances until a later sync fills them.' : 'Reload history to try again.';
@@ -645,8 +670,9 @@ export async function finishHistory({ deps, tenant, job, renew }: JobContext): P
   }
   statements.push(
     ...(await completeRunStatements(deps, tenant, finish.runId, {
-      counts: days > 0 ? { days } : {},
+      counts: { ...(days > 0 ? { days } : {}), ...(unmatched > 0 ? { unmatchedDays: unmatched } : {}) },
       error,
+      ...(unmatched > 0 ? { note: `${unmatched} missed day(s) couldn't be rebuilt: the transactions don't lead back to the holdings synced before them, so they keep the carried-forward values.` } : {}),
     })),
   );
   await renew();
@@ -750,6 +776,38 @@ async function knownSince(tenant: Tenant, accountIds: string[]): Promise<Map<str
   return since;
 }
 
+/**
+ * Whether walking back to the day before a gap misses the holdings synced
+ * that day: share counts, and cash to the cent. False without a snapshot
+ * that day to check against.
+ */
+async function gapUnmatched(
+  tenant: Tenant,
+  accountId: string,
+  gapStart: IsoDate,
+  current: BackfillHolding[],
+  transactions: BackfillTransaction[],
+  cashSecurityId: string | null,
+  splitFactor: (securityId: string, date: IsoDate) => number,
+  end: IsoDate,
+): Promise<boolean> {
+  const before = addDays(gapStart, -1);
+  const synced = await tenant.db
+    .select({ securityId: holdingDaily.securityId, quantity: holdingDaily.quantity })
+    .from(holdingDaily)
+    .where(tenant.scope(holdingDaily, eq(holdingDaily.accountId, accountId), eq(holdingDaily.date, before), eq(holdingDaily.source, 'snapshot')));
+  if (synced.length === 0) return false;
+  const [day] = reconstructHistory({ start: before, end, emitFrom: before, emitTo: before, holdings: current, transactions, cashSecurityId, splitFactor, price: () => ({ price: 1, source: 'close' }) });
+  const walked = new Map((day?.positions ?? []).map((position) => [position.securityId, position.quantity]));
+  const ids = new Set([...walked.keys(), ...synced.map((row) => row.securityId)]);
+  for (const id of ids) {
+    const fromWalk = walked.get(id) ?? 0;
+    const fromSync = synced.find((row) => row.securityId === id)?.quantity ?? 0;
+    if (id === cashSecurityId ? toMinor(fromWalk) !== toMinor(fromSync) : Math.abs(fromWalk - fromSync) > 1e-6) return true;
+  }
+  return false;
+}
+
 /** Rows a rebuild may delete and write again: what it made before, or carried forward. */
 const REPLACEABLE: DailySource[] = ['rebuilt', 'carried'];
 
@@ -812,11 +870,15 @@ export async function missedDays(tenant: Tenant, connection: ConnectionRow, toda
     .select({ accountId: accountDaily.accountId, first: min(accountDaily.date) })
     .from(accountDaily)
     .where(
-      carriedForward(
-        tenant,
-        accountRows.map((row) => row.id),
-        addDays(today, -HISTORY_DAYS),
-        today,
+      and(
+        carriedForward(
+          tenant,
+          accountRows.map((row) => row.id),
+          addDays(today, -HISTORY_DAYS),
+          today,
+        ),
+        // A gap already found unmatched isn't tried again on every sync (a full rebuild redoes it).
+        eq(accountDaily.unmatched, false),
       ),
     )
     .groupBy(accountDaily.accountId);

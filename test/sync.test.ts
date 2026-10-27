@@ -781,10 +781,13 @@ describe('missed days', () => {
     await nightlyRun(deps, tenant, connection.id);
     expect(await vti('2026-10-10')).toMatchObject({ quantity: 10, source: 'carried' }); // last known holdings, carried forward
 
-    // Bought 6 more on the 10th, while syncs were failing.
+    // Paid in $600 and bought 6 more on the 10th, while syncs were failing.
     plaid.getHoldings = working;
     plaid.state.holdings = [holding('brk', 's-vti', 16, 100), holding('brk', 's-cash', 500, 1), holding('joint', 's-vti', 5, 100)];
-    plaid.state.transactions.push({ ...plaid.state.transactions[0], investment_transaction_id: 't2', date: '2026-10-10', quantity: 6, amount: 600 });
+    plaid.state.transactions.push(
+      { ...plaid.state.transactions[0], investment_transaction_id: 't2', date: '2026-10-10', quantity: 6, amount: 600 },
+      { ...plaid.state.transactions[0], investment_transaction_id: 't3', date: '2026-10-10', security_id: 's-cash', type: 'cash', subtype: 'deposit', quantity: 0, amount: -600 },
+    );
     night(3);
     await nightlyRun(deps, tenant, connection.id);
     expect(await vti('2026-10-09')).toMatchObject({ quantity: 10, source: 'rebuilt' });
@@ -794,6 +797,34 @@ describe('missed days', () => {
       .from(schema.accountDaily)
       .where(and(eq(schema.accountDaily.accountId, brk.id), eq(schema.accountDaily.date, '2026-10-10')));
     expect(day.source).toBe('rebuilt');
+  });
+
+  it("leaves missed days carried, and unmatched, when the transactions don't lead back to the holdings synced before them", async () => {
+    const prices = fakePrices({ VTI: closes('2024-10-01', 760, 50, 0.1) });
+    const { deps, plaid, tenant, connection, byName } = await linked(brokerage(), { prices });
+    const night = nights(deps);
+    const brk = byName('brk');
+    const working = plaid.getHoldings;
+    plaid.getHoldings = async () => {
+      throw new Error('network down');
+    };
+    night(1);
+    await nightlyRun(deps, tenant, connection.id);
+    // 6 more VTI turn up after the gap, with no transaction for them.
+    plaid.getHoldings = working;
+    plaid.state.holdings = [holding('brk', 's-vti', 16, 100), holding('brk', 's-cash', 500, 1), holding('joint', 's-vti', 5, 100)];
+    night(2);
+    await nightlyRun(deps, tenant, connection.id);
+    const [day] = await deps.db.select().from(schema.accountDaily).where(and(eq(schema.accountDaily.accountId, brk.id), eq(schema.accountDaily.date, '2026-10-09')));
+    expect(day).toMatchObject({ source: 'carried', unmatched: true });
+    const runs = await deps.db.select().from(schema.syncRuns).where(eq(schema.syncRuns.action, 'history'));
+    expect(runs.at(-1)!.note).toMatch(/couldn't be rebuilt/);
+    // Not tried again on the next sync.
+    const plans = async () => (await deps.db.select().from(schema.jobs).where(eq(schema.jobs.type, 'history_plan'))).length;
+    const before = await plans();
+    night(3);
+    await nightlyRun(deps, tenant, connection.id);
+    expect(await plans()).toBe(before);
   });
 });
 
