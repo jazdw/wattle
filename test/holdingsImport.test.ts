@@ -4,22 +4,22 @@ import * as schema from '../server/db/schema';
 import { account, closes, fakePlaid, fakePrices, holding, security } from './fakes';
 import { client, createHousehold, createTestDeps, settle, TODAY } from './helpers';
 
-type Txn = { date: string; settled?: string; type: string; ticker: string | null; shares?: number; price?: number; amount?: number };
+type Txn = { date: string; type: string; ticker: string | null; shares?: number; price?: number; amount?: number };
 
 /** A made-up download: positions now and transactions (amounts in dollars here, sent in cents). */
 function download(positions: { ticker: string | null; shares: number }[], transactions: Txn[]) {
   return {
     positions,
-    transactions: transactions.map((txn) => ({ settled: txn.date, shares: 0, price: 0, ...txn, amount: Math.round((txn.amount ?? 0) * 100) })),
+    transactions: transactions.map((txn) => ({ shares: 0, price: 0, ...txn, amount: Math.round((txn.amount ?? 0) * 100) })),
   };
 }
 
-/** Deposit $2,500 and buy 25 VTI (settling the next day), a $50 dividend, sell 5 (settling the next day), withdraw the $500. */
+/** Buy 25 VTI the day before the $2,500 paying for it arrives, a $50 dividend, sell 5, withdraw the $500. */
 const HISTORY: Txn[] = [
+  { date: '2026-05-29', type: 'Buy', ticker: 'VTI', shares: 25, price: 100, amount: -2500 },
   { date: '2026-06-01', type: 'Funds Received', ticker: null, amount: 2500 },
-  { date: '2026-06-01', settled: '2026-06-02', type: 'Buy', ticker: 'VTI', shares: 25, price: 100, amount: -2500 },
   { date: '2026-07-15', type: 'Dividend', ticker: 'VTI', amount: 50 },
-  { date: '2026-09-01', settled: '2026-09-02', type: 'Sell', ticker: 'VTI', shares: -5, price: 100, amount: 500 },
+  { date: '2026-09-01', type: 'Sell', ticker: 'VTI', shares: -5, price: 100, amount: 500 },
   { date: '2026-09-02', type: 'Withdrawal', ticker: null, amount: -500 },
 ];
 
@@ -30,7 +30,7 @@ async function linked(shares = 20) {
     securities: [security('s-vti', 'VTI', 'etf', 100), security('s-cash', 'CUR:USD', 'cash', 1, 'US Dollar')],
     holdings: [holding('brk', 's-vti', shares, 100), holding('brk', 's-cash', 50, 1)],
   });
-  const deps = await createTestDeps({ plaid, prices: fakePrices({ VTI: closes('2024-09-01', 800, 100) }) });
+  const deps = await createTestDeps({ plaid, prices: fakePrices({ VTI: closes('2024-09-01', 800, 100), BND: closes('2024-09-01', 800, 70) }) });
   const home = await createHousehold(deps, 'Home', 'me@example.com');
   const api = client(deps, home.cookie);
   await api('/api/plaid/exchange', { method: 'POST', json: { publicToken: 'p', kind: 'investments' } });
@@ -46,16 +46,22 @@ async function linked(shares = 20) {
 }
 
 describe('holdings history import', () => {
-  it('works out each day from the positions and transactions, shares on the trade date and cash on settlement, up to the first synced day', async () => {
+  it('works out each day from the positions and transactions, shares and cash on the trade date, up to the first synced day', async () => {
     const { deps, send, day, vti } = await linked();
     const response = await send(download([{ ticker: 'VTI', shares: 20 }, { ticker: null, shares: 50 }], HISTORY));
     expect(response.status).toBe(200);
-    expect(response.body).toMatchObject({ from: '2026-06-01', to: '2026-10-07', days: 129 });
+    expect(response.body).toMatchObject({ from: '2026-05-29', to: '2026-10-07', days: 132 });
     await settle(deps);
 
-    expect(await day('2026-05-31')).toBeUndefined(); // nothing before the first transaction
-    expect(await day('2026-06-01')).toMatchObject({ balance: 5000_00, source: 'import' }); // bought, not yet paid
-    expect(await day('2026-06-02')).toMatchObject({ balance: 2500_00, source: 'import', priceSource: 'close' });
+    expect(await day('2026-05-28')).toBeUndefined(); // nothing before the first transaction
+    // Bought before the money arrived: the shares, less the $2,500 owed until it does.
+    expect(await day('2026-05-29')).toMatchObject({ balance: 0, source: 'import' });
+    const [cash] = await deps.db.select().from(schema.securities).where(eq(schema.securities.ticker, 'CUR:USD'));
+    const owed = await deps.db.select().from(schema.holdingDaily).where(and(eq(schema.holdingDaily.securityId, cash.id), eq(schema.holdingDaily.date, '2026-05-31')));
+    expect(owed[0]).toMatchObject({ quantity: -2500, value: -2500_00 });
+    // The money arrives: counted once, not alongside the shares it paid for.
+    expect(await day('2026-06-01')).toMatchObject({ balance: 2500_00, source: 'import', priceSource: 'close' });
+    expect(await day('2026-06-02')).toMatchObject({ balance: 2500_00 });
     expect(await day('2026-07-15')).toMatchObject({ balance: 2550_00 });
     expect(await vti('2026-08-31')).toMatchObject({ quantity: 25, source: 'import' });
     expect(await vti('2026-09-01')).toMatchObject({ quantity: 20 });
@@ -85,12 +91,31 @@ describe('holdings history import', () => {
     expect(mismatched.status).toBe(409);
     expect(mismatched.body.error).toMatch(/on 2026-10-08, VTI is 19 in the file but 20 synced/);
 
-    const mispriced = await send(download(positions, [HISTORY[0], { ...HISTORY[1], price: 150 }, ...HISTORY.slice(2)]));
+    const mispriced = await send(download(positions, [{ ...HISTORY[0], price: 150 }, ...HISTORY.slice(1)]));
     expect(mispriced.status).toBe(409);
-    expect(mispriced.body.error).toMatch(/on 2026-06-01, VTI traded at 150 but closed at 100/);
+    expect(mispriced.body.error).toMatch(/on 2026-05-29, VTI traded at 150 but closed at 100/);
 
     await settle(deps);
     expect(await rows()).toBe(0);
+  });
+
+  it('a second import of the same days replaces the first, holdings it no longer has included', async () => {
+    const { deps, send } = await linked();
+    const positions = [{ ticker: 'VTI', shares: 20 }, { ticker: null, shares: 50 }];
+    const bnd: Txn[] = [
+      { date: '2026-06-10', type: 'Buy', ticker: 'BND', shares: 10, price: 70, amount: -700 },
+      { date: '2026-06-20', type: 'Sell', ticker: 'BND', shares: -10, price: 70, amount: 700 },
+    ];
+    await send(download(positions, [...HISTORY, ...bnd]));
+    await settle(deps);
+    const bndRows = async () => {
+      const [security] = await deps.db.select().from(schema.securities).where(eq(schema.securities.ticker, 'BND'));
+      return (await deps.db.select().from(schema.holdingDaily).where(eq(schema.holdingDaily.securityId, security.id))).length;
+    };
+    expect(await bndRows()).toBe(10);
+    await send(download(positions, HISTORY));
+    await settle(deps);
+    expect(await bndRows()).toBe(0);
   });
 
   it('keeps imported days when history is rebuilt from the institution’s transactions later', async () => {

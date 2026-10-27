@@ -129,8 +129,6 @@ export const importHoldingsHistorySchema = z.object({
     .array(
       z.object({
         date: isoDate,
-        /** When the cash moved (a purchase can settle days after it's traded). */
-        settled: isoDate,
         type: z.string().trim().min(1).max(40),
         ticker: z.string().trim().min(1).max(20).nullable(),
         shares: z.number().finite(),

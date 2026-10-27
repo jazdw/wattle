@@ -138,8 +138,8 @@ export function vanguardBalances(rows: string[][]): string[][] {
 export interface DownloadedAccount {
   /** Positions now; a null ticker is cash. */
   positions: { ticker: string | null; shares: number }[];
-  /** `amount` in cents, as the download has it: positive when cash comes in. Shares move on `date` (the trade date), cash on `settled`. */
-  transactions: { date: string; settled: string; type: string; ticker: string | null; shares: number; price: number; amount: number }[];
+  /** `amount` in cents, as the download has it: positive when cash comes in. `date` is the trade date. */
+  transactions: { date: string; type: string; ticker: string | null; shares: number; price: number; amount: number }[];
 }
 
 /**
@@ -160,13 +160,12 @@ export function vanguardHoldings(rows: string[][]): Map<string, DownloadedAccoun
     if (row[0]) account(row[0]).positions.push({ ticker: ticker(row[2]), shares: parseAmount(row[3] ?? '') ?? 0 });
   }
   const header = rows[transactionsAt];
-  const [dateAt, settledAt, typeAt, symbolAt, sharesAt, priceAt, amountAt] = ['Trade Date', 'Settlement Date', 'Transaction Type', 'Symbol', 'Shares', 'Share Price', 'Net Amount'].map((name) => find(header, name));
+  const [dateAt, typeAt, symbolAt, sharesAt, priceAt, amountAt] = ['Trade Date', 'Transaction Type', 'Symbol', 'Shares', 'Share Price', 'Net Amount'].map((name) => find(header, name));
   for (const row of rows.slice(transactionsAt + 1)) {
     const date = parseDate(row[dateAt] ?? '', 'YYYY-MM-DD');
     if (!row[0] || !date || !row[typeAt]) continue;
     account(row[0]).transactions.push({
       date,
-      settled: parseDate(row[settledAt] ?? '', 'YYYY-MM-DD') ?? date,
       type: row[typeAt],
       ticker: ticker(row[symbolAt]),
       shares: parseAmount(row[sharesAt] ?? '') ?? 0,
