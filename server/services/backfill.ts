@@ -97,9 +97,9 @@ const CLOSES_PER_TICKER = 520;
 /** Price jobs stay well under Workers Free's 50 outside requests per invocation. */
 const MAX_TICKERS_PER_JOB = 40;
 /** Closes looked up before a block's first day, to carry a price over holidays and gaps. */
-const PRICE_LOOKBACK_DAYS = 21;
+export const PRICE_LOOKBACK_DAYS = 21;
 /** A busy connection (a sync running) is tried again after this. */
-const BUSY_RETRY_SECONDS = 30;
+export const BUSY_RETRY_SECONDS = 30;
 /** After a fill of missed days fails, the next waits this long. */
 const MISSED_RETRY_MS = 6 * 3600 * 1000;
 /** A requested asset report is first looked for after this (Plaid takes from seconds to minutes). */
@@ -233,12 +233,12 @@ export async function queueDueHistory(deps: Deps, tenant: Tenant, connectionId: 
 }
 
 /** Days per block for an account holding about `positions` securities. */
-function daysPerBlock(deps: Deps, positions: number): number {
+export function daysPerBlock(deps: Deps, positions: number): number {
   return Math.min(731, Math.max(7, Math.floor(deps.config.jobChunkRows / Math.max(1, positions))));
 }
 
 /** [from, to] windows covering start..end, newest first, `size` days each. */
-function windows(start: IsoDate, end: IsoDate, size: number): [IsoDate, IsoDate][] {
+export function windows(start: IsoDate, end: IsoDate, size: number): [IsoDate, IsoDate][] {
   const result: [IsoDate, IsoDate][] = [];
   for (let to = end; to >= start; to = addDays(to, -size)) {
     const from = addDays(to, -(size - 1));
@@ -494,7 +494,16 @@ export async function historyBlock({ deps, tenant, job, renew }: JobContext): Pr
     },
     splitFactor,
   });
-  const holdingRows = days.flatMap((day) =>
+  // Days you imported or entered keep their holdings: the rebuild adds none to them.
+  const yours = new Set(
+    (
+      await tenant.db
+        .select({ date: accountDaily.date })
+        .from(accountDaily)
+        .where(tenant.scope(accountDaily, eq(accountDaily.accountId, account.id), inArray(accountDaily.source, ['import', 'manual']), gte(accountDaily.date, block.from), lte(accountDaily.date, block.to)))
+    ).map((row) => row.date),
+  );
+  const holdingRows = days.filter((day) => !yours.has(day.date)).flatMap((day) =>
     day.positions.map((position) => ({
       householdId: tenant.householdId,
       accountId: account.id,
@@ -509,7 +518,7 @@ export async function historyBlock({ deps, tenant, job, renew }: JobContext): Pr
       unmatched: day.unmatched,
     })),
   );
-  const accountRows = days.map((day) => ({
+  const accountRows = days.filter((day) => !yours.has(day.date)).map((day) => ({
     householdId: tenant.householdId,
     accountId: account.id,
     date: day.date,

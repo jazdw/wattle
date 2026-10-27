@@ -7,7 +7,7 @@ import { CATEGORIES, CATEGORY_LABELS } from '../../shared/taxonomy';
 import type { AccountSummary } from '../../shared/types';
 import { api } from '../api';
 import { useAuth } from '../hooks/useAuth';
-import { accountColumn, extractBalances, parseCsv, PRESETS, type BalanceMapping, type DateFormat } from '../lib/csv';
+import { accountColumn, extractBalances, parseCsv, PRESETS, vanguardHoldings, type BalanceMapping, type DateFormat, type DownloadedAccount } from '../lib/csv';
 import { accountKind, longDate, money } from '../lib/format';
 import { Button } from './ui/button';
 import { Dialog, DialogContent } from './ui/dialog';
@@ -450,6 +450,8 @@ export function ImportDialog({ accounts, open, onOpenChange }: { accounts: Accou
   const [table, setTable] = useState<string[][] | null>(null);
   const [mapping, setMapping] = useState<BalanceMapping | null>(null);
   const [presetLabel, setPresetLabel] = useState<string | null>(null);
+  // A download with positions and transactions per account (Vanguard's), for accounts with priced holdings.
+  const [downloads, setDownloads] = useState<Map<string, DownloadedAccount> | null>(null);
 
   async function loadFile(file: File) {
     const parsed = parseCsv(await file.text());
@@ -457,6 +459,7 @@ export function ImportDialog({ accounts, open, onOpenChange }: { accounts: Accou
     const rows = preset?.transform ? preset.transform(parsed) : parsed;
     setTable(rows);
     setPresetLabel(preset?.label ?? null);
+    setDownloads(preset?.id === 'vanguard' ? vanguardHoldings(parsed) : null);
     const next = preset?.mapping(rows[0]) ?? {
       dateColumn: 0,
       balanceColumn: Math.max(0, (rows[0]?.length ?? 1) - 1),
@@ -479,12 +482,26 @@ export function ImportDialog({ accounts, open, onOpenChange }: { accounts: Accou
 
   const preview = table && mapping ? extractBalances(table, mapping) : null;
   const account = accounts.find((candidate) => candidate.id === accountId);
+  // The chosen account's holdings in the download, when it has no balance column (its holdings are priced).
+  const download =
+    account?.mask && downloads && accountColumn(table?.[0] ?? [], account.mask) < 0
+      ? [...downloads].find(([number]) => number.endsWith(account.mask!.slice(-4)))?.[1]
+      : undefined;
+  const tradedFrom = download?.transactions.map((txn) => txn.date).sort()[0];
 
   const commit = useMutation({
     mutationFn: () =>
       api<{ imported: number }>('/api/imports/balances', {
         method: 'POST',
         body: JSON.stringify({ accountId, rows: preview!.rows }),
+      }),
+    onSuccess: () => invalidate(),
+  });
+  const commitHoldings = useMutation({
+    mutationFn: () =>
+      api<{ days: number; from: string; to: string }>('/api/imports/holdings-history', {
+        method: 'POST',
+        body: JSON.stringify({ accountId, positions: download!.positions, transactions: download!.transactions }),
       }),
     onSuccess: () => invalidate(),
   });
@@ -495,7 +512,9 @@ export function ImportDialog({ accounts, open, onOpenChange }: { accounts: Accou
     setTable(null);
     setMapping(null);
     setPresetLabel(null);
+    setDownloads(null);
     commit.reset();
+    commitHoldings.reset();
     onOpenChange(false);
   }
 
@@ -531,7 +550,19 @@ export function ImportDialog({ accounts, open, onOpenChange }: { accounts: Accou
           </Field>
         </div>
 
-        {table && mapping && (
+        {table && mapping && download && (
+          <>
+            {presetLabel && <Alert>Recognised a {presetLabel} export.</Alert>}
+            <div className="rounded-md border p-3 text-sm">
+              <p className="font-medium">Holdings history</p>
+              <p className="text-muted-foreground">
+                Each day's holdings, worked out from {download.positions.length} {download.positions.length === 1 ? 'position' : 'positions'} today and {download.transactions.length} transactions
+                {tradedFrom && ` since ${longDate(tradedFrom)}`}, valued at each day's close. It's checked against the days already synced before anything is written.
+              </p>
+            </div>
+          </>
+        )}
+        {table && mapping && !download && (
           <>
             {presetLabel && <Alert>Recognised a {presetLabel} export.</Alert>}
             <div className="grid gap-3 sm:grid-cols-3">
@@ -579,13 +610,25 @@ export function ImportDialog({ accounts, open, onOpenChange }: { accounts: Accou
         )}
         {commit.error && <Alert variant="error">{commit.error.message}</Alert>}
         {commit.data && <Alert>Imported {commit.data.imported} days.</Alert>}
+        {commitHoldings.error && <Alert variant="error">{commitHoldings.error.message}</Alert>}
+        {commitHoldings.data && (
+          <Alert>
+            Importing {commitHoldings.data.days} days of holdings ({longDate(commitHoldings.data.from)} – {longDate(commitHoldings.data.to)}). They appear as they're written, in a minute or so.
+          </Alert>
+        )}
         <div className="flex justify-end gap-2">
           <Button variant="outline" onClick={close}>
             Close
           </Button>
-          <Button onClick={() => commit.mutate()} disabled={!accountId || !preview?.rows.length || commit.isPending}>
-            Import
-          </Button>
+          {download ? (
+            <Button onClick={() => commitHoldings.mutate()} disabled={commitHoldings.isPending || Boolean(commitHoldings.data)}>
+              Import
+            </Button>
+          ) : (
+            <Button onClick={() => commit.mutate()} disabled={!accountId || !preview?.rows.length || commit.isPending}>
+              Import
+            </Button>
+          )}
         </div>
       </DialogContent>
     </Dialog>

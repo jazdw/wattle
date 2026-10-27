@@ -135,6 +135,48 @@ export function vanguardBalances(rows: string[][]): string[][] {
   return [['Date', ...accounts.map((account) => `Account ending ${account.slice(-4)}`)], ...table.reverse()];
 }
 
+export interface DownloadedAccount {
+  /** Positions now; a null ticker is cash. */
+  positions: { ticker: string | null; shares: number }[];
+  /** `amount` in cents, as the download has it: positive when cash comes in. Shares move on `date` (the trade date), cash on `settled`. */
+  transactions: { date: string; settled: string; type: string; ticker: string | null; shares: number; price: number; amount: number }[];
+}
+
+/**
+ * A Vanguard download's positions and transactions per account (by account
+ * number), for importing holdings history (the server walks it back).
+ */
+export function vanguardHoldings(rows: string[][]): Map<string, DownloadedAccount> {
+  const accounts = new Map<string, DownloadedAccount>();
+  const transactionsAt = rows.findIndex((row) => row[0] === 'Account Number' && row[1] === 'Trade Date');
+  if (transactionsAt < 0) return accounts;
+  const account = (number: string) => {
+    const entry = accounts.get(number) ?? { positions: [], transactions: [] };
+    accounts.set(number, entry);
+    return entry;
+  };
+  const ticker = (cell: string | undefined) => (cell && cell !== 'null' ? cell.toUpperCase() : null);
+  for (const row of rows.slice(1, transactionsAt)) {
+    if (row[0]) account(row[0]).positions.push({ ticker: ticker(row[2]), shares: parseAmount(row[3] ?? '') ?? 0 });
+  }
+  const header = rows[transactionsAt];
+  const [dateAt, settledAt, typeAt, symbolAt, sharesAt, priceAt, amountAt] = ['Trade Date', 'Settlement Date', 'Transaction Type', 'Symbol', 'Shares', 'Share Price', 'Net Amount'].map((name) => find(header, name));
+  for (const row of rows.slice(transactionsAt + 1)) {
+    const date = parseDate(row[dateAt] ?? '', 'YYYY-MM-DD');
+    if (!row[0] || !date || !row[typeAt]) continue;
+    account(row[0]).transactions.push({
+      date,
+      settled: parseDate(row[settledAt] ?? '', 'YYYY-MM-DD') ?? date,
+      type: row[typeAt],
+      ticker: ticker(row[symbolAt]),
+      shares: parseAmount(row[sharesAt] ?? '') ?? 0,
+      price: parseAmount(row[priceAt] ?? '') ?? 0,
+      amount: toMinor(parseAmount(row[amountAt] ?? '') ?? 0),
+    });
+  }
+  return accounts;
+}
+
 /** The balance column for an account by its last digits (a column named "Account ending 1234"), else -1. */
 export function accountColumn(header: string[], mask: string | null | undefined): number {
   return mask ? header.findIndex((cell) => cell === `Account ending ${mask.slice(-4)}`) : -1;

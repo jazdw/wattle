@@ -203,6 +203,40 @@ Account Number,Trade Date,Settlement Date,Transaction Type,Transaction Descripti
     expect(within(again).getByLabelText('Balance column')).toHaveDisplayValue('Account ending 1234');
   });
 
+  it("imports an investment account's holdings history from a download when it has priced holdings", async () => {
+    // The brokerage (made-up mask 4321) holds a priced fund: no balance column, its holdings instead.
+    server.use(http.get('*/api/accounts', () => HttpResponse.json({ accounts: ACCOUNTS.map((account) => (account.id === 'brk' ? { ...account, mask: '4321' } : account)) })));
+    server.use(http.post('*/api/imports/holdings-history', () => HttpResponse.json({ days: 120, from: '2026-06-01', to: '2026-09-28' })));
+    const file = `Account Number,Investment Name,Symbol,Shares,Share Price,Total Value,
+55554321,EXAMPLE STOCK FUND,XYZ,10.00,100,1000.00,
+55554321,EXAMPLE MONEY MARKET FUND,XYZMM,50.00,1,50.00,
+
+Account Number,Trade Date,Settlement Date,Transaction Type,Transaction Description,Investment Name,Symbol,Shares,Share Price,Principal Amount,Commissions and Fees,Net Amount,Accrued Interest,Account Type,
+55554321,2026-06-01,2026-06-02,Buy,Buy,EXAMPLE STOCK FUND,XYZ,10.00000,100.0,-1000.00,0.0,-1000.00,0.0,CASH,
+55554321,2026-06-01,2026-06-01,Funds Received,Funds received,,,0.00000,0.0,1050.00,0.0,1050.00,0.0,CASH,
+`;
+    const { user } = await openAccounts();
+    await user.click(screen.getByRole('button', { name: /Import CSV/ }));
+    const dialog = await screen.findByRole('dialog', { name: 'Import balance history' });
+    await user.selectOptions(within(dialog).getByLabelText('Account'), 'brk');
+    fireEvent.change(within(dialog).getByLabelText('CSV file'), { target: { files: [new File([file], 'download.csv', { type: 'text/csv' })] } });
+    expect(await within(dialog).findByText('Holdings history')).toBeInTheDocument();
+    expect(within(dialog).queryByLabelText('Balance column')).not.toBeInTheDocument();
+    await user.click(within(dialog).getByRole('button', { name: 'Import' }));
+    await expect.poll(() => sent('POST /api/imports/holdings-history')[0]?.body).toEqual({
+      accountId: 'brk',
+      positions: [
+        { ticker: 'XYZ', shares: 10 },
+        { ticker: 'XYZMM', shares: 50 },
+      ],
+      transactions: [
+        { date: '2026-06-01', settled: '2026-06-02', type: 'Buy', ticker: 'XYZ', shares: 10, price: 100, amount: -1000_00 },
+        { date: '2026-06-01', settled: '2026-06-01', type: 'Funds Received', ticker: null, shares: 0, price: 0, amount: 1050_00 },
+      ],
+    });
+    expect(await within(dialog).findByText(/Importing 120 days of holdings/)).toBeInTheDocument();
+  });
+
   it('lets you map columns for other files', async () => {
     const { user } = await openAccounts();
     await user.click(screen.getByRole('button', { name: /Import CSV/ }));

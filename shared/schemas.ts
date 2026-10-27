@@ -121,6 +121,27 @@ export const importHoldingsSchema = z.object({
     .max(20000),
 });
 
+/** An investment account's download: positions now and its transactions (amounts in cents, positive when cash comes in). */
+export const importHoldingsHistorySchema = z.object({
+  accountId: z.string(),
+  positions: z.array(z.object({ ticker: z.string().trim().min(1).max(20).nullable(), shares: z.number().finite() })).max(1000),
+  transactions: z
+    .array(
+      z.object({
+        date: isoDate,
+        /** When the cash moved (a purchase can settle days after it's traded). */
+        settled: isoDate,
+        type: z.string().trim().min(1).max(40),
+        ticker: z.string().trim().min(1).max(20).nullable(),
+        shares: z.number().finite(),
+        price: z.number().finite(),
+        amount: z.number().int(),
+      }),
+    )
+    .min(1)
+    .max(20000),
+});
+
 /** Where a page of the household's activity ends (GET /api/activity?after=…). */
 export const activityCursorSchema = z.object({
   startedAt: z.number().int(),
