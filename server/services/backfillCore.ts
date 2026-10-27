@@ -58,6 +58,12 @@ export interface BackfillInput {
   emitFrom?: IsoDate;
   /** Return only days up to here (default: end). */
   emitTo?: IsoDate;
+  /**
+   * Cash may go below zero (a fee charged before money arrives) without
+   * counting as a gap: for an institution's own complete records, not
+   * Plaid's, where it usually means transactions are missing.
+   */
+  allowNegativeCash?: boolean;
 }
 
 export interface BackfillPosition {
@@ -114,6 +120,7 @@ export function reconstructHistory(input: BackfillInput): BackfillDay[] {
       for (const [securityId, quantity] of quantities) {
         if (isEmpty(securityId, quantity)) continue;
         if (securityId === cashId) {
+          // Below zero only when allowed (allowNegativeCash): an amount owed.
           total += quantity;
           positions.push({ securityId, quantity: fromMinor(quantity), price: 1, value: quantity, priceSource: 'close' });
           continue;
@@ -146,7 +153,7 @@ export function reconstructHistory(input: BackfillInput): BackfillDay[] {
       }
     }
     for (const [securityId, quantity] of quantities) {
-      if (securityId === cashId ? quantity < 0 : quantity < -EPSILON) {
+      if (securityId === cashId ? quantity < 0 && !input.allowNegativeCash : quantity < -EPSILON) {
         quantities.set(securityId, 0);
         broken = true;
       }

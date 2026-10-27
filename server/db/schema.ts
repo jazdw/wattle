@@ -687,6 +687,7 @@ export const JOB_TYPES = [
   'report_collect',
   'report_account',
   'report_finish',
+  'import_block',
 ] as const;
 export const JOB_STATES = ['waiting', 'queued', 'running', 'done', 'failed'] as const;
 

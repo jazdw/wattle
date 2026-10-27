@@ -155,7 +155,8 @@ export type JobType =
   | 'history_finish'
   | 'report_collect'
   | 'report_account'
-  | 'report_finish';
+  | 'report_finish'
+  | 'import_block';
 
 /** One entry in the household's activity: a login's run, a snapshot, or the nightly job. */
 export type ActivityEntry =

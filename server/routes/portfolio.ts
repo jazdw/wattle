@@ -1,12 +1,12 @@
 /** Portfolio views: summary, history, securities, targets, quotes, imports, settings. */
 import { and, eq, inArray, lte, sql } from 'drizzle-orm';
 import { Hono } from 'hono';
-import { suggestClassification } from '../../shared/classify';
 import { marketDate, newYorkClock } from '../../shared/dates';
 import {
   activityCursorSchema,
   householdPatchSchema,
   importBalancesSchema,
+  importHoldingsHistorySchema,
   importHoldingsSchema,
   securityPatchSchema,
   targetSchema,
@@ -14,7 +14,6 @@ import {
 import type { HistoryGroup, QuotesResponse, SecurityRow, TargetResponse } from '../../shared/types';
 import { normalizeWeights, type Category } from '../../shared/taxonomy';
 import { requireAuth } from '../auth/routes';
-import type { BatchItem } from 'drizzle-orm/batch';
 import { chunkRows, inChunks, runAtomic } from '../db/batch';
 import { accounts, holdingDaily, holdings, households, pricesDaily, securities, targets } from '../db/schema';
 import type { Tenant } from '../db/tenant';
@@ -29,8 +28,8 @@ import { activeTarget, loadPortfolio } from '../services/portfolio';
 import { stableId } from '../services/ids';
 import { Lease, targetsLease } from '../services/lease';
 import { writeBalances } from '../services/balances';
+import { importHoldingsHistory, securitiesForTickers } from '../services/holdingsImport';
 import { QUALITY_SET, replaceWhere } from '../services/quality';
-import { describeTickers } from '../services/pricing';
 import { snapshotHousehold } from '../services/snapshots';
 import { activeConnections, MANUAL_SYNC_INTERVAL_MS, syncConnection } from '../services/sync';
 import { describeError } from '../lib/errors';
@@ -334,41 +333,12 @@ portfolioRoutes.post('/imports/holdings', async (c) => {
   const tenant = c.get('tenant');
   const body = await readBody(c, importHoldingsSchema);
   const account = await importTarget(tenant, body.accountId);
-
-  const securityRows = await tenant.db
-    .select({ id: securities.id, ticker: securities.ticker })
-    .from(securities)
-    .where(tenant.scope(securities));
-  const byTicker = new Map(securityRows.map((row) => [row.ticker?.toUpperCase(), row.id]));
-  const missing = [...new Set(body.rows.map((row) => row.ticker.toUpperCase()))].filter((ticker) => !byTicker.has(ticker));
-  // What each new ticker is (stock, ETF, mutual fund) and its name, once per ticker.
-  const descriptions = await describeTickers(deps, missing);
-  const statements: BatchItem<'sqlite'>[] = [];
-  for (const ticker of missing) {
-    const description = descriptions.get(ticker);
-    const suggestion = suggestClassification({ ticker, name: description?.name ?? null, type: description?.type ?? null, currency: account.currency });
-    // Same derived id as manual holdings use, so concurrent saves share one row.
-    const id = await stableId(`security:manual:${tenant.householdId}:${ticker}`);
-    statements.push(
-      tenant.db
-        .insert(securities)
-        .values({
-          id,
-          householdId: tenant.householdId,
-          ticker,
-          name: description?.name ?? ticker,
-          type: description?.type ?? null,
-          currency: account.currency,
-          isPublic: true,
-          classification: suggestion.classification,
-          classificationSource: suggestion.source,
-          needsReview: suggestion.needsReview,
-          createdAt: deps.now().getTime(),
-        })
-        .onConflictDoNothing(),
-    );
-    byTicker.set(ticker, id);
-  }
+  const { byTicker, statements, created } = await securitiesForTickers(
+    deps,
+    tenant,
+    account.currency,
+    body.rows.map((row) => row.ticker),
+  );
 
   const holdingRows = body.rows.map((row) => ({
     householdId: tenant.householdId,
@@ -397,7 +367,17 @@ portfolioRoutes.post('/imports/holdings', async (c) => {
         }),
     ),
   ]);
-  return c.json({ imported: holdingRows.length, newSecurities: missing.length });
+  return c.json({ imported: holdingRows.length, newSecurities: created });
+});
+
+/** An investment account's holdings history from a download of its positions and transactions (checked, then written as jobs). */
+portfolioRoutes.post('/imports/holdings-history', async (c) => {
+  const deps = c.env.deps;
+  const tenant = c.get('tenant');
+  const body = await readBody(c, importHoldingsHistorySchema);
+  const account = await importTarget(tenant, body.accountId);
+  if (account.type !== 'investment') throw new HttpError(409, 'Holdings history goes in an investment account.');
+  return c.json(await importHoldingsHistory(deps, tenant, account, body));
 });
 
 /* ------------------------------------------------------------------ */

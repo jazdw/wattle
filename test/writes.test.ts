@@ -18,8 +18,13 @@ const REVIEWED: Record<string, Record<string, string>> = {
   },
   'server/services/backfill.ts': {
     connections: 'connection lease (or marking a load due + note when busy)',
-    accountDaily: 'connection lease; insert-or-ignore backfill rows, rebuild deletes only backfill rows',
+    accountDaily: 'connection lease; rebuilt rows replace only rebuilt and carried ones (replaceWhere), never on days imported or entered; a rebuild deletes only rebuilt and carried rows',
     holdingDaily: 'connection lease; as accountDaily',
+  },
+  'server/services/holdingsImport.ts': {
+    securities: 'new tickers: derived ids, insert-or-ignore (shared with manual holdings), atomic, before any job is queued',
+    accountDaily: "import jobs: the connection's lease (or the manual account's), one atomic batch per window; imported rows replace anything less trusted (replaceWhere), safe to repeat",
+    holdingDaily: 'import jobs: as accountDaily; rebuilt and carried positions in the window are deleted in the same batch',
   },
   'server/services/assetReports.ts': {
     connections: 'connection lease, atomic with the balances and log row',
@@ -46,7 +51,7 @@ const REVIEWED: Record<string, Record<string, string>> = {
     households: 'settings: single update',
   },
   'server/services/balances.ts': {
-    accountDaily: 'recorded balances and CSV imports: one atomic batch; imports never overwrite unless asked; manual accounts under the account lease',
+    accountDaily: 'recorded balances and CSV imports: one atomic batch; they replace anything less or equally trusted (replaceWhere); manual accounts under the account lease',
     accounts: "manual account's current balance from its newest entry: account lease, atomic with dropping stale copies",
   },
   'server/services/snapshots.ts': {
