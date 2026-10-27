@@ -10,8 +10,8 @@
  *
  * Before anything is written the file is checked: every transaction type
  * must be understood, the walk must reach the share counts actually synced
- * on the days since the account was linked, and each trade's price must be
- * close to that day's close. A file that fails writes nothing. Days from the
+ * on the days since the account was linked, and each buy or sell's price
+ * must be close to that day's close. A file that fails writes nothing. Days from the
  * account's first synced one on are left to the snapshots (the check showed
  * they agree). The writing runs as jobs, one window of days each (a load can
  * be thousands of rows).
@@ -60,7 +60,12 @@ const KNOWN_TYPES = new Set([
 /** Moves between the account's cash and its settlement fund: both cash, so cash doesn't change. */
 const SWEEPS = new Set(['sweep in', 'sweep out']);
 const CASH_FUND_TRADES = new Set(['buy', 'sell', 'reinvestment', 'exchange']);
-const TRADES = new Set(['buy', 'sell', 'reinvestment']);
+/**
+ * Trades whose price is checked against the day's close. Not reinvestments:
+ * their price is the dividend over a share count rounded to a few decimals,
+ * filled when the dividend is paid, so it can sit well off that day's close.
+ */
+const TRADES = new Set(['buy', 'sell']);
 /** How far a trade's price may be from the day's close before the file is doubted. */
 const PRICE_TOLERANCE = 0.05;
 /** Problems listed at most, so a badly mismatched file doesn't make a wall of text. */
