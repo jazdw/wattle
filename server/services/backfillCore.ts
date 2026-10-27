@@ -7,7 +7,9 @@
  * security; when the account holds cash as a security (Plaid's CUR:USD or a
  * cash-type sweep), cash is rebuilt from transaction amounts too (Plaid
  * amounts are positive when cash leaves the account), in integer cents so the
- * sums are exact.
+ * sums are exact. A transaction on the cash security itself moves cash by
+ * its units, or by its amount when it has none (Plaid files deposits,
+ * withdrawals and cash dividends under the cash security with no units).
  *
  * A share split (`splitFactor`, on the first day at the new price) is undone
  * the same way: walking back past it divides that security's shares by the
@@ -136,7 +138,9 @@ export function reconstructHistory(input: BackfillInput): BackfillDay[] {
     // Undo this day's transactions to get the previous day's closing state.
     for (const txn of byDate.get(date) ?? []) {
       if (txn.securityId === cashId && cashId) {
-        quantities.set(cashId, quantities.get(cashId)! - toMinor(txn.quantity));
+        // Units of the cash fund bought or sold, or (no units: a deposit,
+        // withdrawal or dividend Plaid files under it) its amount.
+        quantities.set(cashId, quantities.get(cashId)! - (txn.quantity !== 0 ? toMinor(txn.quantity) : -txn.amount));
       } else if (txn.securityId) {
         quantities.set(txn.securityId, (quantities.get(txn.securityId) ?? 0) - txn.quantity);
       }
