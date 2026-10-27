@@ -138,3 +138,23 @@ describe('cash in the walk back', () => {
     expect(days.some((day) => day.unmatched)).toBe(false);
   });
 });
+
+describe('transactions on the cash security', () => {
+  it('move cash by their amount when they have no units (a deposit filed under the cash fund)', () => {
+    // $500 cash today; $300 of it was paid in on the 5th.
+    const days = reconstructHistory({
+      start: '2026-01-04',
+      end: '2026-01-06',
+      holdings: [
+        { securityId: 'A', quantity: 1 },
+        { securityId: 'cash', quantity: 500 },
+      ],
+      transactions: [{ date: '2026-01-05', securityId: 'cash', quantity: 0, amount: -300_00 }],
+      cashSecurityId: 'cash',
+      price: flat(10),
+    });
+    const cashOn = (date: string) => days.find((day) => day.date === date)!.positions.find((position) => position.securityId === 'cash')?.value;
+    expect(cashOn('2026-01-05')).toBe(500_00);
+    expect(cashOn('2026-01-04')).toBe(200_00);
+  });
+});
