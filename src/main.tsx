@@ -5,6 +5,9 @@ import { BrowserRouter } from 'react-router-dom';
 import { registerSW } from 'virtual:pwa-register';
 import App from './App.tsx';
 import { AuthProvider } from './auth.tsx';
+import { ErrorScreen } from './components/ErrorScreen';
+import { UpdateBanner } from './components/UpdateBanner';
+import { newVersionWaiting } from './lib/appUpdate';
 import './index.css';
 
 const queryClient = new QueryClient({
@@ -32,8 +35,33 @@ if (new URLSearchParams(window.location.search).has('reset')) {
     window.location.replace(url.toString());
   });
 } else if ('serviceWorker' in navigator) {
-  if (import.meta.env.PROD) registerSW({ immediate: true });
+  if (import.meta.env.PROD) registerServiceWorker();
   else void clearServiceWorkerCaches();
+}
+
+/** How often an open tab asks whether a new version has been deployed. */
+const UPDATE_CHECK_MS = 60 * 60 * 1000;
+
+/**
+ * The service worker serves the app's files from its cache. A deploy's new
+ * version installs alongside and waits: open tabs keep the version they
+ * loaded (its files are still cached) until the banner's Reload switches to
+ * the new one (src/components/UpdateBanner.tsx). Without that, it waits until
+ * every tab is closed.
+ */
+function registerServiceWorker() {
+  const update = registerSW({
+    immediate: true,
+    onNeedRefresh: () => newVersionWaiting(() => update(true)),
+    onRegisteredSW: (_url, registration) => {
+      if (!registration) return;
+      // The browser only checks at a navigation and about once a day: also check
+      // when the tab comes back into view, and hourly while it stays open.
+      const check = () => void registration.update().catch(() => {});
+      document.addEventListener('visibilitychange', () => document.visibilityState === 'visible' && check());
+      setInterval(check, UPDATE_CHECK_MS);
+    },
+  });
 }
 
 // A page restored from the back-forward cache shows whatever it held when
@@ -46,11 +74,14 @@ window.addEventListener('pageshow', (event) => {
 createRoot(document.getElementById('root')!).render(
   <StrictMode>
     <QueryClientProvider client={queryClient}>
-      <BrowserRouter>
-        <AuthProvider>
-          <App />
-        </AuthProvider>
-      </BrowserRouter>
+      <ErrorScreen>
+        <BrowserRouter>
+          <AuthProvider>
+            <App />
+          </AuthProvider>
+        </BrowserRouter>
+        <UpdateBanner />
+      </ErrorScreen>
     </QueryClientProvider>
   </StrictMode>,
 );

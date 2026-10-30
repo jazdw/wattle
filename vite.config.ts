@@ -34,8 +34,10 @@ export default defineConfig(({ mode }) => {
       }),
       // Installable app shell only. Financial data is NEVER cached by the
       // service worker: API responses are always fetched from the network.
+      // A new version waits until the app's banner asks it to take over
+      // (registerServiceWorker in src/main.tsx).
       VitePWA({
-        registerType: 'autoUpdate',
+        registerType: 'prompt',
         injectRegister: false, // registered in src/main.tsx
         manifest: false, // public/manifest.webmanifest is used as-is
         workbox: {
@@ -48,6 +50,12 @@ export default defineConfig(({ mode }) => {
         },
       }),
     ],
+    build: {
+      // One bundle (src/App.tsx imports every page): an open tab never needs
+      // a file that a later deploy has removed. It's larger than Vite's 500 KB
+      // warning, and the service worker caches it.
+      chunkSizeWarningLimit: 1200,
+    },
     server: {
       host: devHost,
       // Vite's host check: only relevant when binding beyond localhost.
