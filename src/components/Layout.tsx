@@ -1,6 +1,6 @@
 import { ArrowLeftRight, ChartPie, Grid3x3, Landmark, LayoutDashboard, LineChart, List, LogOut, Menu, Settings, X } from 'lucide-react';
 import { Dialog as DialogPrimitive } from 'radix-ui';
-import { Suspense, useRef, useState, type TouchEvent } from 'react';
+import { useRef, useState, type TouchEvent } from 'react';
 import { NavLink, Outlet } from 'react-router-dom';
 import { useConnections } from '../hooks/queries';
 import { StatusBanner } from './StatusBanner';
@@ -200,9 +200,7 @@ export function Layout() {
       </aside>
       <main className="mx-auto w-full max-w-6xl px-4 py-5 sm:px-6 sm:py-8">
         <StatusBanner />
-        <Suspense fallback={<div className="h-96 animate-pulse rounded-lg bg-muted" />}>
-          <Outlet />
-        </Suspense>
+        <Outlet />
       </main>
     </div>
   );

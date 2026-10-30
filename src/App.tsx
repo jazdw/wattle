@@ -1,22 +1,18 @@
-import { lazy, Suspense } from 'react';
 import { Navigate, Route, Routes, useLocation } from 'react-router-dom';
 import { HistoryWatcher } from './components/HistoryWatcher';
 import { Layout } from './components/Layout';
-import { Skeleton } from './components/ui/misc';
 import { useAuth } from './hooks/useAuth';
 import { Login } from './pages/Login';
-
-// Pages (and Recharts) load on demand to keep the first load small.
-const NetWorth = lazy(() => import('./pages/NetWorth').then((module) => ({ default: module.NetWorth })));
-const Growth = lazy(() => import('./pages/Growth').then((module) => ({ default: module.Growth })));
-const Allocation = lazy(() => import('./pages/Allocation').then((module) => ({ default: module.Allocation })));
-const Holdings = lazy(() => import('./pages/Holdings').then((module) => ({ default: module.Holdings })));
-const Transactions = lazy(() => import('./pages/Transactions').then((module) => ({ default: module.Transactions })));
-const Style = lazy(() => import('./pages/Style').then((module) => ({ default: module.Style })));
-const Accounts = lazy(() => import('./pages/Accounts').then((module) => ({ default: module.Accounts })));
-const Settings = lazy(() => import('./pages/Settings').then((module) => ({ default: module.Settings })));
-const Activity = lazy(() => import('./pages/Activity').then((module) => ({ default: module.Activity })));
-const PlaidOAuth = lazy(() => import('./pages/PlaidOAuth').then((module) => ({ default: module.PlaidOAuth })));
+import { NetWorth } from './pages/NetWorth';
+import { Growth } from './pages/Growth';
+import { Allocation } from './pages/Allocation';
+import { Holdings } from './pages/Holdings';
+import { Transactions } from './pages/Transactions';
+import { Style } from './pages/Style';
+import { Accounts } from './pages/Accounts';
+import { Settings } from './pages/Settings';
+import { Activity } from './pages/Activity';
+import { PlaidOAuth } from './pages/PlaidOAuth';
 
 function RequireAuth({ children }: { children: React.ReactNode }) {
   const { me, loading } = useAuth();
@@ -34,9 +30,7 @@ export default function App() {
         element={
           <RequireAuth>
             <HistoryWatcher />
-            <Suspense fallback={<Skeleton className="m-8 h-96" />}>
-              <Layout />
-            </Suspense>
+            <Layout />
           </RequireAuth>
         }
       >
