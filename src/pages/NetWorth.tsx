@@ -99,7 +99,7 @@ export function NetWorth() {
           to get started.
         </EmptyState>
       ) : (
-        <div className="grid gap-4">
+        <div className="grid grid-cols-1 gap-4">
           <Card>
             <CardContent className="pt-4 sm:pt-5">
               <div className="mb-3 flex flex-wrap items-start justify-between gap-3">
@@ -148,7 +148,7 @@ export function NetWorth() {
             </CardContent>
           </Card>
 
-          <div className="grid gap-4 md:grid-cols-2">
+          <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
             {groups.map((group) => (
               <Card key={group.type}>
                 <CardHeader className="flex-row items-center justify-between">
@@ -160,9 +160,9 @@ export function NetWorth() {
                     {group.accounts.map((account) => (
                       <li key={account.id} className="flex items-center justify-between gap-3 py-2 text-sm">
                         <div className="min-w-0">
-                          <p className="truncate font-medium">
-                            {account.name}
-                            {account.mask && <span className="text-muted-foreground"> ··{account.mask}</span>}
+                          <p className="flex gap-1.5 font-medium">
+                            <span className="truncate">{account.name}</span>
+                            {account.mask && <span className="shrink-0 text-muted-foreground">··{account.mask}</span>}
                           </p>
                           <p className="flex items-center gap-1.5 text-xs text-muted-foreground">
                             {account.institutionName ?? (account.source === 'manual' ? 'Manual' : '')}
