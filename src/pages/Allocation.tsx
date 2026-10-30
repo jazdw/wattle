@@ -69,7 +69,7 @@ export function Allocation() {
       {total === 0 ? (
         <EmptyState title="Nothing to allocate yet">Link or add accounts first.</EmptyState>
       ) : (
-        <div className="grid gap-4">
+        <div className="grid grid-cols-1 gap-4">
           <Card>
             <CardContent className="grid gap-6 pt-5 md:grid-cols-2">
               <div className="flex flex-col items-center gap-3">

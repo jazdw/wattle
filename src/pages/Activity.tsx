@@ -129,7 +129,7 @@ export function Activity() {
           {activity.hasNextPage ? 'Nothing in this page; load more to look further back.' : null}
         </EmptyState>
       ) : (
-        <div className="grid gap-5">
+        <div className="grid grid-cols-1 gap-5">
           {days.map(({ label, entries: dayEntries }) => (
             <section key={label}>
               <h2 className="mb-2 text-sm font-medium text-muted-foreground">{label}</h2>

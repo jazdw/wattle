@@ -150,7 +150,7 @@ export function Accounts() {
         </div>
       )}
 
-      <div className="grid gap-4">
+      <div className="grid grid-cols-1 gap-4">
         {connections.isPending || accounts.isPending ? (
           <Skeleton className="h-40 w-full" />
         ) : (
@@ -352,10 +352,10 @@ function AccountList({
       {accounts.map((account) => (
         <li key={account.id} className={`flex items-center justify-between gap-3 py-2 text-sm ${account.isHidden ? 'opacity-60' : ''}`}>
           <div className="min-w-0">
-            <p className="flex items-center gap-1.5 truncate font-medium">
-              {account.isHidden && <EyeOff className="size-3.5" aria-label="Hidden" />}
-              {account.name}
-              {account.mask && <span className="font-normal text-muted-foreground">··{account.mask}</span>}
+            <p className="flex items-center gap-1.5 font-medium">
+              {account.isHidden && <EyeOff className="size-3.5 shrink-0" aria-label="Hidden" />}
+              <span className="truncate">{account.name}</span>
+              {account.mask && <span className="shrink-0 font-normal text-muted-foreground">··{account.mask}</span>}
             </p>
             <p className="flex flex-wrap items-center gap-1.5 text-xs text-muted-foreground">
               {accountKind(account.type, account.subtype)}
