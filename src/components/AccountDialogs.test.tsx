@@ -19,6 +19,9 @@ describe('manual accounts', () => {
     const { user } = await openAccounts();
     await user.click(screen.getByRole('button', { name: /Manual account/ }));
     const dialog = await screen.findByRole('dialog', { name: 'Add a manual account' });
+    // In the currency shown (the household's, USD) until another is picked.
+    expect(within(dialog).getByLabelText('Currency')).toHaveValue('USD');
+    await user.selectOptions(within(dialog).getByLabelText('Currency'), 'AUD');
     await user.type(within(dialog).getByLabelText('Name'), 'Example Super (Sam)');
     await user.type(within(dialog).getByLabelText('Institution'), 'Example Super Fund');
     await user.selectOptions(within(dialog).getByLabelText('Type'), 'investment');

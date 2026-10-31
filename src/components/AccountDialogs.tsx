@@ -48,13 +48,15 @@ const TYPE_OPTIONS = [
 /* ------------------------------------------------------------------ */
 
 export function NewAccountDialog({ open, onOpenChange }: { open: boolean; onOpenChange: (open: boolean) => void }) {
-  const { me } = useAuth();
+  const { me, currency: shown } = useAuth();
   const invalidate = useInvalidate();
+  // The currency follows the one shown (the sidebar switch) until you pick one here.
+  const [currencyPicked, setCurrencyPicked] = useState(false);
   const [form, setForm] = useState(() => ({
     name: '',
     institutionName: '',
     type: 'depository',
-    currency: 'AUD' as Currency,
+    currency: shown,
     category: '',
     ownerUserId: me?.user.id ?? null,
     balance: '',
@@ -82,6 +84,8 @@ export function NewAccountDialog({ open, onOpenChange }: { open: boolean; onOpen
     },
   });
 
+  if (open && !currencyPicked && form.currency !== shown) setForm({ ...form, currency: shown });
+
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent title="Add a manual account" description="For accounts Plaid can't reach: Australian banks, super, property, 401(k) plans…">
@@ -102,7 +106,13 @@ export function NewAccountDialog({ open, onOpenChange }: { open: boolean; onOpen
             </NativeSelect>
           </Field>
           <Field label="Currency">
-            <NativeSelect value={form.currency} onChange={(event) => setForm({ ...form, currency: event.target.value as Currency })}>
+            <NativeSelect
+              value={form.currency}
+              onChange={(event) => {
+                setCurrencyPicked(true);
+                setForm({ ...form, currency: event.target.value as Currency });
+              }}
+            >
               {CURRENCIES.map((currency) => (
                 <option key={currency}>{currency}</option>
               ))}
