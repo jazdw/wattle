@@ -2,13 +2,13 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { Plus, Trash2 } from 'lucide-react';
 import { useState } from 'react';
 import { dateRange, marketDate } from '../../shared/dates';
-import { CURRENCIES, fromMinor, type Currency } from '../../shared/money';
+import { CURRENCIES, type Currency } from '../../shared/money';
 import { CATEGORIES, CATEGORY_LABELS } from '../../shared/taxonomy';
-import type { AccountSummary } from '../../shared/types';
+import type { AccountSummary, ImportResponse, TickerSuggestion } from '../../shared/types';
 import { api } from '../api';
 import { useAuth } from '../hooks/useAuth';
-import { accountColumn, extractBalances, parseCsv, PRESETS, vanguardHoldings, type BalanceMapping, type DateFormat, type DownloadedAccount } from '../lib/csv';
-import { isOfx, mergeOfx, ofxHoldings, statementsFor, type OfxHoldings } from '../lib/ofx';
+import { extractBalances, type BalanceMapping, type DateFormat } from '../lib/csv';
+import { fileValue, last4, readFiles, type FileAccount, type ReadFiles } from '../lib/imports';
 import { accountKind, longDate, money } from '../lib/format';
 import { Button } from './ui/button';
 import { Dialog, DialogContent } from './ui/dialog';
@@ -452,140 +452,147 @@ export function HoldingsDialog({ account, onClose }: { account: AccountSummary |
 }
 
 /* ------------------------------------------------------------------ */
-/* CSV import                                                          */
+/* Import                                                              */
 /* ------------------------------------------------------------------ */
+
+/** Where an account in the files goes: one of yours, a new manual account, or nowhere. */
+type Choice = { to: 'account'; accountId: string } | { to: 'new'; name: string; type: string; currency: Currency; ownerUserId: string | null } | { to: 'skip' } | { to: 'choose' };
+
+const DEFAULT_MAPPING: BalanceMapping = { dateColumn: 0, balanceColumn: 1, dateFormat: 'YYYY-MM-DD', hasHeader: true };
+const isCurrency = (value: string | undefined): value is Currency => CURRENCIES.includes(value as Currency);
+/** A market ticker as typed (VTI, BRK.B). */
+const TICKER = /^[A-Z][A-Z0-9.-]{0,9}$/;
+/** How the import names an account in the files: its last digits, or the file for one without a number. */
+const labelOf = (account: FileAccount) => (account.number ? `··${last4(account.number)}` : 'The file');
+/** Holdings go only in investment accounts; balances in any. */
+const fits = (target: AccountSummary, account: FileAccount) => account.file.kind === 'balances' || target.type === 'investment';
 
 export function ImportDialog({ accounts, open, onOpenChange }: { accounts: AccountSummary[]; open: boolean; onOpenChange: (open: boolean) => void }) {
   const invalidate = useInvalidate();
-  const [accountId, setAccountId] = useState('');
-  const [table, setTable] = useState<string[][] | null>(null);
-  const [mapping, setMapping] = useState<BalanceMapping | null>(null);
-  const [presetLabel, setPresetLabel] = useState<string | null>(null);
-  // A download with positions and transactions per account (Vanguard's), for accounts with priced holdings.
-  const [downloads, setDownloads] = useState<Map<string, DownloadedAccount> | null>(null);
-  // Investment statements (OFX/QFX, one or more files, each with one or more accounts), for a manual investment account.
-  const [downloaded, setDownloaded] = useState<OfxHoldings[] | null>(null);
+  const { me, currency: shown } = useAuth();
+  const [read, setRead] = useState<ReadFiles | null>(null);
+  const [mapping, setMapping] = useState<BalanceMapping>(DEFAULT_MAPPING);
+  const [choices, setChoices] = useState<Choice[]>([]);
   const [fileError, setFileError] = useState<string | null>(null);
+  // Tickers typed for securities the files name without one (by the file's id for it).
+  const [tickers, setTickers] = useState<Record<string, string>>({});
+  const visible = accounts.filter((candidate) => !candidate.isHidden);
+
+  /** The account you have with the same last digits, when it can take the file. */
+  const matchOf = (account: FileAccount) => (account.number ? visible.find((candidate) => candidate.mask && last4(candidate.mask) === last4(account.number) && fits(candidate, account)) : undefined);
 
   async function loadFiles(files: File[]) {
     setFileError(null);
-    const contents = await Promise.all(files.map((file) => file.text()));
-    if (!contents.every(isOfx)) {
-      setDownloaded(null);
-      if (files.length > 1) setFileError('Choose one CSV file, or one or more Quicken (QFX/OFX) files.');
-      else void loadFile(contents[0]);
-      return;
-    }
-    setTable(null);
-    setMapping(null);
+    setRead(null);
+    commit.reset();
     try {
-      const parsed = contents.map(ofxHoldings);
-      if (parsed.some((found) => found.length === 0)) throw new Error('A file has no investment statement in it (only investment accounts are understood).');
-      setDownloaded(parsed.flat());
+      const result = readFiles(await Promise.all(files.map((file) => file.text())));
+      setRead(result);
+      if (result.kind === 'table') {
+        setMapping(result.guess ?? { ...DEFAULT_MAPPING, balanceColumn: Math.max(0, (result.rows[0]?.length ?? 1) - 1) });
+        setChoices([{ to: 'choose' }]);
+      } else {
+        setChoices(result.accounts.map((account) => {
+          const match = matchOf(account);
+          return match ? { to: 'account', accountId: match.id } : { to: 'choose' };
+        }));
+      }
     } catch (error) {
-      setDownloaded(null);
       setFileError(error instanceof Error ? error.message : String(error));
     }
   }
 
-  async function loadFile(content: string) {
-    const parsed = parseCsv(content);
-    const preset = parsed.length > 0 ? PRESETS.find((candidate) => candidate.detect(parsed[0])) : undefined;
-    const rows = preset?.transform ? preset.transform(parsed) : parsed;
-    setTable(rows);
-    setPresetLabel(preset?.label ?? null);
-    setDownloads(preset?.id === 'vanguard' ? vanguardHoldings(parsed) : null);
-    const next = preset?.mapping(rows[0]) ?? {
-      dateColumn: 0,
-      balanceColumn: Math.max(0, (rows[0]?.length ?? 1) - 1),
-      dateFormat: 'YYYY-MM-DD',
-      hasHeader: true,
-    };
-    setMapping(withAccountColumn(next, rows[0] ?? [], accountId));
+  // The accounts in the files; a CSV of balances is one, from its chosen columns.
+  const preview = read?.kind === 'table' ? extractBalances(read.rows, mapping) : null;
+  const fileAccounts: FileAccount[] =
+    read?.kind === 'accounts' ? read.accounts : preview ? [{ number: null, institution: null, unknownTypes: [], file: { kind: 'balances', rows: preview.rows } }] : [];
+
+  function defaultNew(account: FileAccount): Choice {
+    const currency = account.file.kind === 'holdings' && isCurrency(account.file.currency) ? account.file.currency : shown;
+    const name = account.number ? `${account.institution ?? 'Imported'} ··${last4(account.number)}` : 'Imported account';
+    // Yours, as a manual account you add is (change it later with Edit account).
+    return { to: 'new', name, type: account.file.kind === 'holdings' ? 'investment' : 'depository', currency, ownerUserId: me?.user.id ?? null };
+  }
+  function choose(index: number, choice: Choice) {
+    setChoices(choices.map((current, at) => (at === index ? choice : current)));
   }
 
-  /** A file with a balance column per account: the chosen account's, by its last digits. */
-  function withAccountColumn(current: BalanceMapping, header: string[], id: string): BalanceMapping {
-    const column = accountColumn(header, accounts.find((candidate) => candidate.id === id)?.mask);
-    return column >= 0 ? { ...current, balanceColumn: column } : current;
-  }
-
-  function chooseAccount(id: string) {
-    setAccountId(id);
-    if (table && mapping) setMapping(withAccountColumn(mapping, table[0] ?? [], id));
-  }
-
-  const preview = table && mapping ? extractBalances(table, mapping) : null;
-  const account = accounts.find((candidate) => candidate.id === accountId);
-  // The chosen account's holdings in the download, when it has no balance column (its holdings are priced).
-  const download =
-    account?.mask && downloads && accountColumn(table?.[0] ?? [], account.mask) < 0
-      ? [...downloads].find(([number]) => number.endsWith(account.mask!.slice(-4)))?.[1]
-      : undefined;
-  const tradedFrom = download?.transactions.map((txn) => txn.date).sort()[0];
+  // What stops each account going in (errors), and what's worth knowing (warnings).
+  const chosenIds = choices.flatMap((choice) => (choice.to === 'account' ? [choice.accountId] : []));
+  const checks = fileAccounts.map((account, index) => {
+    const choice = choices[index] ?? { to: 'choose' };
+    const errors: string[] = [];
+    const warnings: string[] = [];
+    if (choice.to === 'skip') return { errors, warnings };
+    if (account.unknownTypes.length > 0) errors.push(`Wattle doesn't understand these transaction types yet: ${account.unknownTypes.join(', ')}. Skip this account.`);
+    if (account.file.kind === 'balances' && account.file.rows.length === 0) errors.push('There are no balances to import.');
+    const currency = account.file.kind === 'holdings' ? account.file.currency : undefined;
+    if (choice.to === 'account') {
+      const target = visible.find((candidate) => candidate.id === choice.accountId);
+      if (target && currency && currency !== target.currency) errors.push(`The file is in ${currency} but ${target.name} is in ${target.currency}.`);
+      if (chosenIds.filter((id) => id === choice.accountId).length > 1) errors.push(`${target?.name ?? 'That account'} is chosen for another account too.`);
+    }
+    if (choice.to === 'new') {
+      if (!choice.name.trim()) errors.push('Give the new account a name.');
+      if (currency && currency !== choice.currency) errors.push(`The file is in ${currency}.`);
+      const linked = account.number ? visible.find((candidate) => candidate.source === 'plaid' && candidate.mask && last4(candidate.mask) === last4(account.number)) : undefined;
+      if (linked) warnings.push(`${linked.name} is linked with the same last digits: a new account would count this money twice.`);
+    }
+    return { errors, warnings };
+  });
+  // Securities the files name without a ticker: give one to price it at each day's close (a suggestion filled in when found).
+  const untickered = [...new Map(fileAccounts.flatMap((account) => (account.file.kind === 'holdings' ? account.file.securities.filter((security) => !security.ticker) : [])).map((security) => [security.id, security])).values()];
+  const suggestions = useQuery({
+    queryKey: ['import-tickers', untickered.map((security) => security.id)],
+    queryFn: () => api<{ suggestions: TickerSuggestion[] }>('/api/imports/tickers', { method: 'POST', body: JSON.stringify({ securities: untickered.map(({ id, name }) => ({ id, name })) }) }),
+    enabled: untickered.length > 0,
+    staleTime: Infinity,
+  });
+  const suggested = (id: string) => suggestions.data?.suggestions.find((suggestion) => suggestion.id === id);
+  const tickerFor = (id: string) => (tickers[id] ?? suggested(id)?.ticker ?? '').trim().toUpperCase();
+  const badTickers = untickered.filter((security) => tickerFor(security.id) && !TICKER.test(tickerFor(security.id)));
+  const ready =
+    fileAccounts.length > 0 && choices.every((choice) => choice.to !== 'choose') && checks.every((check) => check.errors.length === 0) && choices.some((choice) => choice.to !== 'skip') && badTickers.length === 0;
 
   const commit = useMutation({
     mutationFn: () =>
-      api<{ imported: number }>('/api/imports/balances', {
-        method: 'POST',
-        body: JSON.stringify({ accountId, rows: preview!.rows }),
-      }),
-    onSuccess: () => invalidate(),
-  });
-  // The chosen account's statements, merged (a download can hold several accounts).
-  let statements: OfxHoldings | null = null;
-  let statementsError: string | null = null;
-  if (downloaded) {
-    try {
-      statements = mergeOfx(statementsFor(downloaded, account?.mask));
-    } catch (error) {
-      statementsError = error instanceof Error ? error.message : String(error);
-    }
-  }
-
-  const commitStatements = useMutation({
-    mutationFn: () =>
-      api<{ days: number; from: string; to: string }>('/api/imports/fund-history', {
+      api<ImportResponse>('/api/imports', {
         method: 'POST',
         body: JSON.stringify({
-          accountId,
-          asOf: statements!.asOf,
-          currency: statements!.currency,
-          funds: statements!.funds,
-          positions: statements!.positions,
-          transactions: statements!.transactions.map(({ id: _id, ...txn }) => txn),
+          accounts: fileAccounts.flatMap((account, index) => {
+            const choice = choices[index];
+            if (!choice || choice.to === 'skip' || choice.to === 'choose') return [];
+            const target =
+              choice.to === 'account'
+                ? { accountId: choice.accountId }
+                : { new: { name: choice.name.trim(), type: choice.type, currency: choice.currency, institutionName: account.institution, mask: last4(account.number), ownerUserId: choice.ownerUserId } };
+            const file = account.file.kind === 'holdings' ? { ...account.file, securities: account.file.securities.map((security) => (security.ticker ? security : { ...security, ticker: tickerFor(security.id) || null })) } : account.file;
+            return [{ label: labelOf(account), target, file }];
+          }),
         }),
       }),
-    onSuccess: () => invalidate(),
-  });
-  const commitHoldings = useMutation({
-    mutationFn: () =>
-      api<{ days: number; from: string; to: string }>('/api/imports/holdings-history', {
-        method: 'POST',
-        body: JSON.stringify({ accountId, positions: download!.positions, transactions: download!.transactions }),
-      }),
-    onSuccess: () => invalidate(),
+    // Accepted: the dialog closes; each account shows its progress on the Accounts page while it's written.
+    onSuccess: () => {
+      invalidate();
+      close();
+    },
   });
 
   // Closing starts the next import afresh.
   function close() {
-    setAccountId('');
-    setTable(null);
-    setMapping(null);
-    setPresetLabel(null);
-    setDownloads(null);
-    setDownloaded(null);
+    setRead(null);
+    setChoices([]);
+    setTickers({});
+    setMapping(DEFAULT_MAPPING);
     setFileError(null);
     commit.reset();
-    commitHoldings.reset();
-    commitStatements.reset();
     onOpenChange(false);
   }
 
-  const header = table?.[0] ?? [];
+  const header = read?.kind === 'table' ? (read.rows[0] ?? []) : [];
   const columnOptions = header.map((cell, index) => (
     <option key={index} value={index}>
-      {mapping?.hasHeader ? cell || `Column ${index + 1}` : `Column ${index + 1} (${cell})`}
+      {mapping.hasHeader ? cell || `Column ${index + 1}` : `Column ${index + 1} (${cell})`}
     </option>
   ));
 
@@ -594,43 +601,16 @@ export function ImportDialog({ accounts, open, onOpenChange }: { accounts: Accou
       <DialogContent
         className="max-w-2xl"
         title="Import history"
-        description="Upload a CSV with a date and a balance per row — e.g. a Example Bank transaction export (its running balance becomes daily history) — or an investment account's Quicken (QFX/OFX) downloads."
+        description="Upload Quicken (QFX/OFX) files from investment accounts, one or more at a time, or a CSV with a date and a balance on each row."
       >
-        <div className="grid gap-3 sm:grid-cols-2">
-          <Field label="Account">
-            <NativeSelect value={accountId} onChange={(event) => chooseAccount(event.target.value)}>
-              <option value="">Choose…</option>
-              {accounts
-                .filter((candidate) => !candidate.isHidden)
-                .map((candidate) => (
-                  <option key={candidate.id} value={candidate.id}>
-                    {candidate.name}
-                  </option>
-                ))}
-            </NativeSelect>
-          </Field>
-          <Field label="File">
-            <Input type="file" multiple accept=".csv,text/csv,.qfx,.ofx" onChange={(event) => event.target.files?.length && void loadFiles([...event.target.files])} />
-          </Field>
-        </div>
-        {(fileError ?? statementsError) && <Alert variant="error">{fileError ?? statementsError}</Alert>}
-        {statements && <StatementsPreview statements={statements} account={account} />}
+        <Field label="Files">
+          <Input type="file" multiple accept=".csv,text/csv,.qfx,.ofx" onChange={(event) => event.target.files?.length && void loadFiles([...event.target.files])} />
+        </Field>
+        {fileError && <Alert variant="error">{fileError}</Alert>}
 
-        {table && mapping && download && (
+        {read?.kind === 'table' && (
           <>
-            {presetLabel && <Alert>Recognised a {presetLabel} export.</Alert>}
-            <div className="rounded-md border p-3 text-sm">
-              <p className="font-medium">Holdings history</p>
-              <p className="text-muted-foreground">
-                Each day's holdings, worked out from {download.positions.length} {download.positions.length === 1 ? 'position' : 'positions'} today and {download.transactions.length} transactions
-                {tradedFrom && ` since ${longDate(tradedFrom)}`}, valued at each day's close. It's checked against the days already synced before anything is written.
-              </p>
-            </div>
-          </>
-        )}
-        {table && mapping && !download && (
-          <>
-            {presetLabel && <Alert>Recognised a {presetLabel} export.</Alert>}
+            {read.guess ? <Alert>Found its date and balance columns: check them below.</Alert> : <Alert>Choose the columns with the date and the balance.</Alert>}
             <div className="grid gap-3 sm:grid-cols-3">
               <Field label="Date column">
                 <NativeSelect value={mapping.dateColumn} onChange={(event) => setMapping({ ...mapping, dateColumn: Number(event.target.value) })}>
@@ -653,103 +633,176 @@ export function ImportDialog({ accounts, open, onOpenChange }: { accounts: Accou
             <label className="flex items-center gap-2 text-sm">
               <Switch checked={mapping.hasHeader} onCheckedChange={(hasHeader) => setMapping({ ...mapping, hasHeader })} /> First row is a header
             </label>
-            {preview && (
-              <div className="rounded-md border p-3 text-sm">
-                <p className="mb-1 font-medium">
-                  {preview.rows.length} {preview.rows.length === 1 ? 'balance' : 'balances'}
-                  {/* The import carries each balance forward to the next, so it writes every day in between. */}
-                  {preview.rows.length > 1 && `, filling ${dateRange(preview.rows[0].date, preview.rows.at(-1)!.date).length} days`}
-                  {preview.rows.length > 0 && ` · ${longDate(preview.rows[0].date)} – ${longDate(preview.rows.at(-1)!.date)}`}
-                  {preview.skipped > 0 && <span className="text-muted-foreground"> · {preview.skipped} rows skipped</span>}
-                </p>
-                <ul className="max-h-36 overflow-y-auto text-xs text-muted-foreground">
-                  {preview.rows.slice(-8).map((row) => (
-                    <li key={row.date} className="flex justify-between">
-                      <span>{longDate(row.date)}</span>
-                      <span>{account ? money(Math.round(row.balance * 100), account.currency) : fromMinor(Math.round(row.balance * 100))}</span>
-                    </li>
-                  ))}
-                </ul>
-              </div>
-            )}
           </>
         )}
+
+        {fileAccounts.map((account, index) => (
+          <ImportRow
+            key={account.number ?? `file:${index}`}
+            account={account}
+            choice={choices[index] ?? { to: 'choose' }}
+            accounts={visible.filter((candidate) => fits(candidate, account))}
+            onChoose={(choice) => choose(index, choice.to === 'new' && choices[index]?.to !== 'new' ? defaultNew(account) : choice)}
+            check={checks[index]}
+            skipped={preview?.skipped ?? 0}
+            shown={shown}
+          />
+        ))}
+
+        {untickered.length > 0 && (
+          <div className="grid gap-2 rounded-md border p-3 text-sm">
+            <p className="font-medium">Securities without a ticker</p>
+            <p className="text-muted-foreground">
+              Give a security its market ticker to value it at each day's close. Leave it blank for a fund with no market price (a plan's own funds): it's valued from the file's prices, on a straight line between them.
+            </p>
+            {untickered.map((security) => {
+              const suggestion = suggested(security.id);
+              const value = tickers[security.id] ?? suggestion?.ticker ?? '';
+              return (
+                <div key={security.id} className="grid items-center gap-2 sm:grid-cols-[1fr_8rem]">
+                  <div className="min-w-0">
+                    <p className="truncate">{security.name}</p>
+                    <p className="text-xs text-muted-foreground">
+                      {security.id}
+                      {suggestion && value.trim().toUpperCase() === suggestion.ticker && (suggestion.from === 'yours' ? ' · the same name as one of your securities' : ' · found by its name: check it')}
+                    </p>
+                  </div>
+                  <Input aria-label={`Ticker for ${security.name}`} value={value} placeholder={suggestions.isLoading ? 'Looking…' : 'None'} onChange={(event) => setTickers({ ...tickers, [security.id]: event.target.value })} />
+                </div>
+              );
+            })}
+            {badTickers.length > 0 && <Alert variant="error">That isn't a ticker: {badTickers.map((security) => tickerFor(security.id)).join(', ')}.</Alert>}
+          </div>
+        )}
         {commit.error && <Alert variant="error">{commit.error.message}</Alert>}
-        {commit.data && <Alert>Imported {commit.data.imported} days.</Alert>}
-        {commitStatements.error && <Alert variant="error">{commitStatements.error.message}</Alert>}
-        {commitStatements.data && (
-          <Alert>
-            Importing {commitStatements.data.days} days of holdings ({longDate(commitStatements.data.from)} – {longDate(commitStatements.data.to)}). They appear as they're written, in a minute or so.
-          </Alert>
-        )}
-        {commitHoldings.error && <Alert variant="error">{commitHoldings.error.message}</Alert>}
-        {commitHoldings.data && (
-          <Alert>
-            Importing {commitHoldings.data.days} days of holdings ({longDate(commitHoldings.data.from)} – {longDate(commitHoldings.data.to)}). They appear as they're written, in a minute or so.
-          </Alert>
-        )}
         <div className="flex justify-end gap-2">
           <Button variant="outline" onClick={close}>
             Close
           </Button>
-          {downloaded ? (
-            <Button
-              onClick={() => commitStatements.mutate()}
-              disabled={!statements || !statementsFit(statements, account) || commitStatements.isPending || Boolean(commitStatements.data)}
-            >
-              Import
-            </Button>
-          ) : download ? (
-            <Button onClick={() => commitHoldings.mutate()} disabled={commitHoldings.isPending || Boolean(commitHoldings.data)}>
-              Import
-            </Button>
-          ) : (
-            <Button onClick={() => commit.mutate()} disabled={!accountId || !preview?.rows.length || commit.isPending}>
-              Import
-            </Button>
-          )}
+          <Button onClick={() => commit.mutate()} disabled={!ready || commit.isPending}>
+            {commit.isPending ? 'Importing…' : 'Import'}
+          </Button>
         </div>
       </DialogContent>
     </Dialog>
   );
 }
 
-/** Statements can go in a manual investment account, once every transaction type in them is understood. */
-function statementsFit(statements: OfxHoldings, account: AccountSummary | undefined) {
-  return Boolean(account && account.source === 'manual' && account.type === 'investment' && statements.unknownTypes.length === 0 && statements.transactions.length > 0);
-}
-
-function StatementsPreview({ statements, account }: { statements: OfxHoldings; account: AccountSummary | undefined }) {
-  const name = (id: string) => statements.funds.find((fund) => fund.id === id)?.name ?? id;
-  // The account's currency (a statement's is checked against it when imported).
-  const currency = account?.currency ?? (CURRENCIES.includes(statements.currency as Currency) ? (statements.currency as Currency) : 'USD');
-  const total = statements.positions.reduce((sum, row) => sum + Math.round(row.shares * row.price * 100), 0);
-  const from = statements.transactions[0]?.date;
+/** One account in the files: what it holds, and where it goes. */
+function ImportRow({
+  account,
+  choice,
+  accounts,
+  onChoose,
+  check,
+  skipped,
+  shown,
+}: {
+  account: FileAccount;
+  choice: Choice;
+  accounts: AccountSummary[];
+  onChoose: (choice: Choice) => void;
+  check: { errors: string[]; warnings: string[] };
+  skipped: number;
+  shown: Currency;
+}) {
+  const file = account.file;
+  const value = choice.to === 'account' ? choice.accountId : choice.to;
+  const target = choice.to === 'account' ? accounts.find((candidate) => candidate.id === choice.accountId) : undefined;
+  const currency = target?.currency ?? (choice.to === 'new' ? choice.currency : file.kind === 'holdings' && isCurrency(file.currency) ? file.currency : shown);
+  const label = labelOf(account);
   return (
-    <>
-      <Alert>Recognised {statements.transactions.length} investment transactions{from && ` from ${longDate(from)}`}, with positions as of {longDate(statements.asOf)}.</Alert>
-      {statements.unknownTypes.length > 0 && <Alert variant="error">These files have transaction types Wattle doesn't understand yet: {statements.unknownTypes.join(', ')}.</Alert>}
-      {account && (account.source !== 'manual' || account.type !== 'investment') && <Alert variant="error">Statements import into a manual investment account.</Alert>}
-      <div className="rounded-md border p-3 text-sm">
-        <p className="font-medium">Holdings history</p>
-        <p className="text-muted-foreground">
-          Each day's shares are worked out from today's positions and the transactions, priced from the statements' own prices (on a straight line between them). These become the account's holdings.
+    <div className="grid gap-2 rounded-md border p-3 text-sm">
+      <div className="flex flex-wrap items-baseline justify-between gap-x-3">
+        <p className="font-medium">
+          {account.number ? `Account ${label}` : 'Balances'}
+          {account.institution && <span className="text-muted-foreground"> · {account.institution}</span>}
         </p>
-        <ul className="mt-2 text-xs">
-          {statements.positions.map((row) => (
-            <li key={row.fund} className="flex justify-between gap-3">
-              <span className="truncate">{name(row.fund)}</span>
-              <span className="shrink-0 text-muted-foreground">
-                {row.shares} × {row.price} = {money(Math.round(row.shares * row.price * 100), currency)}
-              </span>
+        <p className="text-muted-foreground">{summary(file, currency, skipped)}</p>
+      </div>
+      {file.kind === 'balances' && file.rows.length > 0 && (
+        <ul className="max-h-36 overflow-y-auto text-xs text-muted-foreground">
+          {file.rows.slice(-8).map((row) => (
+            <li key={row.date} className="flex justify-between">
+              <span>{longDate(row.date)}</span>
+              <span>{money(Math.round(row.balance * 100), currency)}</span>
             </li>
           ))}
-          <li className="flex justify-between gap-3 font-medium">
-            <span>Total</span>
-            <span>{money(total, currency)}</span>
-          </li>
         </ul>
+      )}
+      <div className="grid gap-2 sm:grid-cols-2">
+        <Field label={`Import ${label} into`}>
+          <NativeSelect
+            value={value}
+            onChange={(event) => {
+              const next = event.target.value;
+              onChoose(next === 'skip' || next === 'choose' ? { to: next } : next === 'new' ? { to: 'new', name: '', type: 'investment', currency, ownerUserId: null } : { to: 'account', accountId: next });
+            }}
+          >
+            <option value="choose">Choose…</option>
+            {accounts.map((candidate) => (
+              <option key={candidate.id} value={candidate.id}>
+                {candidate.name}
+              </option>
+            ))}
+            <option value="new">New account</option>
+            <option value="skip">Skip</option>
+          </NativeSelect>
+        </Field>
+        {choice.to === 'new' && (
+          <Field label="New account's name">
+            <Input value={choice.name} onChange={(event) => onChoose({ ...choice, name: event.target.value })} />
+          </Field>
+        )}
       </div>
-    </>
+      {choice.to === 'new' && (
+        <div className="grid gap-2 sm:grid-cols-2">
+          {file.kind === 'balances' && (
+            <Field label="Type">
+              <NativeSelect value={choice.type} onChange={(event) => onChoose({ ...choice, type: event.target.value })}>
+                {TYPE_OPTIONS.map((option) => (
+                  <option key={option.value} value={option.value}>
+                    {option.label}
+                  </option>
+                ))}
+              </NativeSelect>
+            </Field>
+          )}
+          <Field label="Currency">
+            <NativeSelect value={choice.currency} onChange={(event) => onChoose({ ...choice, currency: event.target.value as Currency })}>
+              {CURRENCIES.map((option) => (
+                <option key={option}>{option}</option>
+              ))}
+            </NativeSelect>
+          </Field>
+        </div>
+      )}
+      {check.errors.map((error) => (
+        <Alert key={error} variant="error">
+          {error}
+        </Alert>
+      ))}
+      {check.warnings.map((warning) => (
+        <Alert key={warning} variant="warning">
+          {warning}
+        </Alert>
+      ))}
+    </div>
   );
+}
+
+/** What an account in the files holds, in a line. */
+function summary(file: FileAccount['file'], currency: Currency, skipped: number): string {
+  if (file.kind === 'balances') {
+    const { rows } = file;
+    if (rows.length === 0) return `No balances${skipped > 0 ? ` (${skipped} rows skipped)` : ''}`;
+    // The import carries each balance forward to the next, so it writes every day in between.
+    const days = rows.length > 1 ? `, filling ${dateRange(rows[0].date, rows.at(-1)!.date).length} days` : '';
+    return `${rows.length} ${rows.length === 1 ? 'balance' : 'balances'}${days} · ${longDate(rows[0].date)} – ${longDate(rows.at(-1)!.date)}${skipped > 0 ? ` · ${skipped} rows skipped` : ''}`;
+  }
+  const from = file.transactions[0]?.date;
+  const to = file.transactions.at(-1)?.date;
+  const positions = `${file.positions.length} ${file.positions.length === 1 ? 'holding' : 'holdings'}`;
+  const transactions = `${file.transactions.length} ${file.transactions.length === 1 ? 'transaction' : 'transactions'}`;
+  return `${positions}, ${transactions}${from && to ? ` · ${longDate(from)} – ${longDate(to)}` : ''} · ${money(fileValue(file), currency)} on ${longDate(file.asOf)}`;
 }

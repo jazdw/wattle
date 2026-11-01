@@ -1,8 +1,9 @@
-import { fireEvent, screen, within } from '@testing-library/react';
+import { fireEvent, screen, waitFor, within } from '@testing-library/react';
 import { http, HttpResponse } from 'msw';
 import { describe, expect, it } from 'vitest';
 import { Accounts } from '../pages/Accounts';
 import { ACCOUNTS } from '../test/fixtures';
+import { buy, sgml, sgmlAccounts } from '../test/ofx';
 import { renderPage } from '../test/render';
 import { sent, server } from '../test/server';
 
@@ -136,121 +137,137 @@ describe('manual accounts', () => {
   });
 });
 
-describe('CSV import', () => {
-  const examplebank = `Bank Account,Date,Description,Debit Amount,Credit Amount,Balance,Category,Reference
-000000123456,03/10/2026,COFFEE,4.50,,1995.50,OTHER,
-000000123456,03/10/2026,SALARY,,1000.00,2000.00,INCOME,
-000000123456,01/10/2026,RENT,600.00,,1000.00,OTHER,
+describe('Import', () => {
+  // Made up: a bank's transaction export, newest first, with a running balance.
+  const bank = `Account,Date,Description,Debit,Credit,Balance,Category
+000000123456,03/10/2026,COFFEE,4.50,,1995.50,OTHER
+000000123456,03/10/2026,SALARY,,1000.00,2000.00,INCOME
+000000123456,01/10/2026,RENT,600.00,,1000.00,OTHER
+000000123456,28/09/2026,GROCERIES,50.00,,1600.00,OTHER
 `;
+  const upload = (dialog: HTMLElement, ...contents: string[]) =>
+    fireEvent.change(within(dialog).getByLabelText('Files'), { target: { files: contents.map((content, index) => new File([content], `file${index}`, { type: 'text/plain' })) } });
+  async function openImport() {
+    const opened = await openAccounts();
+    await opened.user.click(screen.getByRole('button', { name: 'Import' }));
+    return { ...opened, dialog: await screen.findByRole('dialog', { name: 'Import history' }) };
+  }
+  const accepted = { accounts: [] };
 
-  it('recognises a Example Bank export, previews and imports daily balances', async () => {
-    server.use(http.post('*/api/imports/balances', () => HttpResponse.json({ imported: 3 })));
-    const { user } = await openAccounts();
-    await user.click(screen.getByRole('button', { name: 'Import' }));
-    const dialog = await screen.findByRole('dialog', { name: 'Import history' });
-    await user.selectOptions(within(dialog).getByLabelText('Account'), 'wbc');
-    const file = new File([examplebank], 'examplebank.csv', { type: 'text/csv' });
-    fireEvent.change(within(dialog).getByLabelText('File'), { target: { files: [file] } });
+  it('finds the date and balance columns of a CSV, previews and imports daily balances, then closes', async () => {
+    server.use(http.post('*/api/imports', () => HttpResponse.json(accepted)));
+    const { user, dialog } = await openImport();
+    upload(dialog, bank);
 
-    expect(await within(dialog).findByText(/Recognised a bank transactions export/)).toBeInTheDocument();
-    expect(within(dialog).getByText(/2 balances, filling 3 days/)).toBeInTheDocument(); // the 2nd carries the 1st
+    expect(await within(dialog).findByText(/Found its date and balance columns/)).toBeInTheDocument();
+    // The 28th says the day comes first. The import carries each balance to the next, so 3 balances fill 6 days.
+    expect(within(dialog).getByText(/3 balances, filling 6 days/)).toBeInTheDocument();
+    expect(within(dialog).getByRole('button', { name: 'Import' })).toBeDisabled(); // no account chosen
+    await user.selectOptions(within(dialog).getByLabelText('Import The file into'), 'wbc');
     await user.click(within(dialog).getByRole('button', { name: 'Import' }));
 
-    await expect.poll(() => sent('POST /api/imports/balances')[0]?.body).toEqual({
-      accountId: 'wbc',
-      rows: [
-        { date: '2026-10-01', balance: 1000 },
-        { date: '2026-10-03', balance: 1995.5 },
+    await expect.poll(() => sent('POST /api/imports')[0]?.body).toEqual({
+      accounts: [
+        {
+          label: 'The file',
+          target: { accountId: 'wbc' },
+          file: {
+            kind: 'balances',
+            rows: [
+              { date: '2026-09-28', balance: 1600 },
+              { date: '2026-10-01', balance: 1000 },
+              { date: '2026-10-03', balance: 1995.5 },
+            ],
+          },
+        },
       ],
     });
-    expect(await within(dialog).findByText('Imported 3 days.')).toBeInTheDocument();
-
-    // Closing clears it for the next import.
-    await user.click(within(dialog).getByText('Close', { selector: 'button' })); // the footer button, not the ×
+    // Accepted: the dialog closes; reopened, it starts afresh.
+    await waitFor(() => expect(screen.queryByRole('dialog', { name: 'Import history' })).not.toBeInTheDocument());
     await user.click(screen.getByRole('button', { name: 'Import' }));
     const reopened = await screen.findByRole('dialog', { name: 'Import history' });
-    expect(within(reopened).getByLabelText('Account')).toHaveValue('');
-    expect(within(reopened).queryByText(/Recognised/)).not.toBeInTheDocument();
-    expect(within(reopened).queryByText(/Imported/)).not.toBeInTheDocument();
+    expect(within(reopened).queryByText(/Found its/)).not.toBeInTheDocument();
   });
 
-  // Made up: two cash accounts in one download, a column each.
-  const vanguard = `Account Number,Investment Name,Symbol,Shares,Share Price,Total Value,
-66665678,EXAMPLE MONEY MARKET FUND,XYZMM,500.00,1,500.00,
-55551234,EXAMPLE MONEY MARKET FUND,XYZMM,2000.00,1,2000.00,
-
-Account Number,Trade Date,Settlement Date,Transaction Type,Transaction Description,Investment Name,Symbol,Shares,Share Price,Principal Amount,Commissions and Fees,Net Amount,Accrued Interest,Account Type,
-66665678,2026-09-01,2026-09-01,Deposit,Electronic Funds Transfer,CASH,,0.00000,1.0,500.00,0.0,500.00,0.0,CASH,
-55551234,2026-09-02,2026-09-02,Deposit,Electronic Funds Transfer,CASH,,0.00000,1.0,2000.00,0.0,2000.00,0.0,CASH,
-`;
-
-  it("picks the balance column of the chosen account by its last digits, whichever is chosen first", async () => {
-    const { user } = await openAccounts();
-    await user.click(screen.getByRole('button', { name: 'Import' }));
-    const dialog = await screen.findByRole('dialog', { name: 'Import history' });
-    const load = () => fireEvent.change(within(dialog).getByLabelText('File'), { target: { files: [new File([vanguard], 'download.csv', { type: 'text/csv' })] } });
-
-    load();
-    expect(await within(dialog).findByText(/Recognised a Vanguard download/)).toBeInTheDocument();
-    expect(within(dialog).getByLabelText('Balance column')).toHaveDisplayValue('Account ending 5678'); // the first
-    await user.selectOptions(within(dialog).getByLabelText('Account'), 'chk'); // mask 1234
-    expect(within(dialog).getByLabelText('Balance column')).toHaveDisplayValue('Account ending 1234');
-
-    // Account first, then the file.
-    await user.click(within(dialog).getByText('Close', { selector: 'button' }));
-    await user.click(screen.getByRole('button', { name: 'Import' }));
-    const again = await screen.findByRole('dialog', { name: 'Import history' });
-    await user.selectOptions(within(again).getByLabelText('Account'), 'chk');
-    fireEvent.change(within(again).getByLabelText('File'), { target: { files: [new File([vanguard], 'download.csv', { type: 'text/csv' })] } });
-    await within(again).findByText(/Recognised a Vanguard download/);
-    expect(within(again).getByLabelText('Balance column')).toHaveDisplayValue('Account ending 1234');
-  });
-
-  it("imports an investment account's holdings history from a download when it has priced holdings", async () => {
-    // The brokerage (made-up mask 4321) holds a priced fund: no balance column, its holdings instead.
+  it('imports every account in a download: matched by last digits, new, or skipped', async () => {
     server.use(http.get('*/api/accounts', () => HttpResponse.json({ accounts: ACCOUNTS.map((account) => (account.id === 'brk' ? { ...account, mask: '4321' } : account)) })));
-    server.use(http.post('*/api/imports/holdings-history', () => HttpResponse.json({ days: 120, from: '2026-06-01', to: '2026-09-28' })));
-    const file = `Account Number,Investment Name,Symbol,Shares,Share Price,Total Value,
-55554321,EXAMPLE STOCK FUND,XYZ,10.00,100,1000.00,
-55554321,EXAMPLE MONEY MARKET FUND,XYZMM,50.00,1,50.00,
+    server.use(http.post('*/api/imports/tickers', () => HttpResponse.json({ suggestions: [] })));
+    server.use(http.post('*/api/imports', () => HttpResponse.json(accepted)));
+    const { user, dialog } = await openImport();
+    // A brokerage you've linked (mask 4321), an account you haven't, and one sharing a linked checking account's last digits.
+    upload(dialog, sgmlAccounts(['55554321', '66665678', '77771234']));
 
-Account Number,Trade Date,Settlement Date,Transaction Type,Transaction Description,Investment Name,Symbol,Shares,Share Price,Principal Amount,Commissions and Fees,Net Amount,Accrued Interest,Account Type,
-55554321,2026-06-01,2026-06-02,Buy,Buy,EXAMPLE STOCK FUND,XYZ,10.00000,100.0,-1000.00,0.0,-1000.00,0.0,CASH,
-55554321,2026-06-01,2026-06-01,Funds Received,Funds received,,,0.00000,0.0,1050.00,0.0,1050.00,0.0,CASH,
-`;
-    const { user } = await openAccounts();
-    await user.click(screen.getByRole('button', { name: 'Import' }));
-    const dialog = await screen.findByRole('dialog', { name: 'Import history' });
-    await user.selectOptions(within(dialog).getByLabelText('Account'), 'brk');
-    fireEvent.change(within(dialog).getByLabelText('File'), { target: { files: [new File([file], 'download.csv', { type: 'text/csv' })] } });
-    expect(await within(dialog).findByText('Holdings history')).toBeInTheDocument();
-    expect(within(dialog).queryByLabelText('Balance column')).not.toBeInTheDocument();
+    // The brokerage is matched by its last digits; the others wait for a choice.
+    expect(await within(dialog).findByLabelText('Import ··4321 into')).toHaveValue('brk');
+    expect(within(dialog).getAllByText(/1 holding, 1 transaction/)).toHaveLength(3);
+    expect(within(dialog).getByLabelText('Import ··5678 into')).toHaveValue('choose');
+    expect(within(dialog).getByRole('button', { name: 'Import' })).toBeDisabled();
+
+    await user.selectOptions(within(dialog).getByLabelText('Import ··5678 into'), 'new');
+    expect(within(dialog).getByLabelText("New account's name")).toHaveValue('Example Plan ··5678');
+    // ··1234 is the linked checking account's last digits: a new account would count it twice.
+    await user.selectOptions(within(dialog).getByLabelText('Import ··1234 into'), 'new');
+    expect(within(dialog).getByText(/is linked with the same last digits/)).toBeInTheDocument();
+    await user.selectOptions(within(dialog).getByLabelText('Import ··1234 into'), 'skip');
     await user.click(within(dialog).getByRole('button', { name: 'Import' }));
-    await expect.poll(() => sent('POST /api/imports/holdings-history')[0]?.body).toEqual({
-      accountId: 'brk',
-      positions: [
-        { ticker: 'XYZ', shares: 10 },
-        { ticker: 'XYZMM', shares: 50 },
-      ],
-      transactions: [
-        { date: '2026-06-01', type: 'Buy', ticker: 'XYZ', shares: 10, price: 100, amount: -1000_00 },
-        { date: '2026-06-01', type: 'Funds Received', ticker: null, shares: 0, price: 0, amount: 1050_00 },
+
+    await expect.poll(() => sent('POST /api/imports')[0]?.body).toMatchObject({
+      accounts: [
+        { label: '··4321', target: { accountId: 'brk' }, file: { kind: 'holdings', positions: [{ security: '000000002', shares: 260, price: 13 }] } },
+        { label: '··5678', target: { new: { name: 'Example Plan ··5678', type: 'investment', currency: 'USD', institutionName: 'Example Plan', mask: '5678', ownerUserId: 'u-me' } } },
       ],
     });
-    expect(await within(dialog).findByText(/Importing 120 days of holdings/)).toBeInTheDocument();
+    await waitFor(() => expect(screen.queryByRole('dialog', { name: 'Import history' })).not.toBeInTheDocument());
+  });
+
+  it("won't import an account with transaction types it doesn't understand, until it's skipped", async () => {
+    server.use(http.post('*/api/imports/tickers', () => HttpResponse.json({ suggestions: [] })));
+    const expense = `<INVEXPENSE><INVTRAN><FITID>E1</FITID><DTTRADE>20260901</DTTRADE></INVTRAN><SECID><UNIQUEID>000000002</UNIQUEID><UNIQUEIDTYPE>CUSIP</UNIQUEIDTYPE></SECID><TOTAL>5.00</TOTAL><SUBACCTSEC>CASH</SUBACCTSEC><SUBACCTFUND>CASH</SUBACCTFUND></INVEXPENSE>`;
+    const { user, dialog } = await openImport();
+    upload(dialog, sgmlAccounts(['55551111', '66665678'], { '55551111': expense }));
+    await user.selectOptions(await within(dialog).findByLabelText('Import ··1111 into'), 'new');
+    expect(within(dialog).getByText(/doesn't understand these transaction types yet: INVEXPENSE/)).toBeInTheDocument();
+    await user.selectOptions(within(dialog).getByLabelText('Import ··5678 into'), 'new');
+    expect(within(dialog).getByRole('button', { name: 'Import' })).toBeDisabled();
+    await user.selectOptions(within(dialog).getByLabelText('Import ··1111 into'), 'skip');
+    expect(within(dialog).getByRole('button', { name: 'Import' })).toBeEnabled();
+  });
+
+  it('suggests a ticker for a security the file names without one, and sends what you choose', async () => {
+    server.use(http.post('*/api/imports/tickers', () => HttpResponse.json({ suggestions: [{ id: '000000002', ticker: 'XYZ', from: 'search' }] })));
+    server.use(http.post('*/api/imports', () => HttpResponse.json(accepted)));
+    const { user, dialog } = await openImport();
+    upload(dialog, sgml(buy('B1', '20260803', '10', '12.5', '125.00')));
+    const ticker = await within(dialog).findByLabelText('Ticker for Example S&P Index Fund M');
+    await expect.poll(() => (ticker as HTMLInputElement).value).toBe('XYZ');
+    expect(within(dialog).getByText(/found by its name: check it/)).toBeInTheDocument();
+
+    await user.clear(ticker);
+    await user.type(ticker, 'not a ticker');
+    await user.selectOptions(within(dialog).getByLabelText('Import ··5678 into'), 'new');
+    expect(within(dialog).getByText(/That isn't a ticker/)).toBeInTheDocument();
+    expect(within(dialog).getByRole('button', { name: 'Import' })).toBeDisabled();
+    await user.clear(ticker);
+    await user.type(ticker, 'abc');
+    await user.click(within(dialog).getByRole('button', { name: 'Import' }));
+    await expect.poll(() => (sent('POST /api/imports')[0]?.body as { accounts: { file: { securities: unknown[] } }[] })?.accounts[0].file.securities).toEqual([
+      { id: '000000002', ticker: 'ABC', name: 'Example S&P Index Fund M' },
+    ]);
   });
 
   it('lets you map columns for other files', async () => {
-    const { user } = await openAccounts();
-    await user.click(screen.getByRole('button', { name: 'Import' }));
-    const dialog = await screen.findByRole('dialog');
-    const file = new File(['when,note,amount\n01/02/2026,x,100\n01/03/2026,y,105\n'], 'bank.csv', { type: 'text/csv' });
-    fireEvent.change(within(dialog).getByLabelText('File'), { target: { files: [file] } });
-    await within(dialog).findByLabelText('Date column');
+    const { user, dialog } = await openImport();
+    upload(dialog, 'when,note,amount\n01/02/2026,x,100\n01/03/2026,y,105\n');
+    expect(await within(dialog).findByText(/Choose the columns with the date and the balance/)).toBeInTheDocument();
     await user.selectOptions(within(dialog).getByLabelText('Date format'), 'MM/DD/YYYY');
     expect(within(dialog).getByText(/2 balances, filling 2 days/)).toBeInTheDocument();
-    expect(within(dialog).getByRole('button', { name: 'Import' })).toBeDisabled(); // no account chosen
     await user.selectOptions(within(dialog).getByLabelText('Balance column'), '1');
-    expect(within(dialog).getByText(/0 balances/)).toBeInTheDocument();
+    expect(within(dialog).getByText(/No balances/)).toBeInTheDocument();
+  });
+
+  it("shows an import's progress on its account while it's written", async () => {
+    server.use(http.get('*/api/accounts', () => HttpResponse.json({ accounts: ACCOUNTS.map((account) => (account.id === 'brk' ? { ...account, importProgress: { done: 3, total: 12 } } : account)) })));
+    await openAccounts();
+    expect(within(rowFor('Vanguard Brokerage')).getByText('Importing history… 3 of 12')).toBeInTheDocument();
   });
 });

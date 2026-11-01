@@ -366,6 +366,11 @@ function AccountList({
                   No longer reported — not counted
                 </Badge>
               )}
+              {account.importProgress && (
+                <Badge variant="outline">
+                  Importing history… {account.importProgress.done} of {account.importProgress.total}
+                </Badge>
+              )}
               {account.holdingCount > 0 && <span>{account.holdingCount} holdings</span>}
               {account.possibleDuplicateOf && (
                 <Badge variant="warning" title="Looks like an account from another login. Edit it to see which, and hide this copy if it's the same account.">

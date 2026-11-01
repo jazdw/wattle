@@ -1,5 +1,6 @@
 import { Navigate, Route, Routes, useLocation } from 'react-router-dom';
 import { HistoryWatcher } from './components/HistoryWatcher';
+import { ImportWatcher } from './components/ImportWatcher';
 import { Layout } from './components/Layout';
 import { useAuth } from './hooks/useAuth';
 import { Login } from './pages/Login';
@@ -30,6 +31,7 @@ export default function App() {
         element={
           <RequireAuth>
             <HistoryWatcher />
+            <ImportWatcher />
             <Layout />
           </RequireAuth>
         }

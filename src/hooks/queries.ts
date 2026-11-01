@@ -1,4 +1,4 @@
-import { keepPreviousData, queryOptions, useQuery } from '@tanstack/react-query';
+import { keepPreviousData, queryOptions, useQuery, type UseQueryOptions } from '@tanstack/react-query';
 import type {
   AccountsResponse,
   ConnectionsResponse,
@@ -36,11 +36,12 @@ export function useHistory(range: Range, group: HistoryGroup, accountId?: string
   });
 }
 
-export function useAccounts() {
+export function useAccounts(options: Pick<UseQueryOptions<AccountsResponse, Error, AccountsResponse, string[]>, 'refetchInterval'> = {}) {
   const { currency } = useAuth();
   return useQuery({
     queryKey: ['accounts', currency],
     queryFn: () => api<AccountsResponse>(`/api/accounts?currency=${currency}`),
+    ...options,
   });
 }
 
