@@ -15,7 +15,7 @@
     try {
       if (sessionStorage.getItem('wt-reloaded-for') === src) return false;
       sessionStorage.setItem('wt-reloaded-for', src);
-    } catch (error) {
+    } catch {
       return false; // No storage to remember it in: don't risk reloading forever.
     }
     location.reload();
