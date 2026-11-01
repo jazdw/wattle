@@ -134,7 +134,7 @@ export function Growth() {
               {rows.map((row) => (
                 <tr
                   key={row.key}
-                  className={!account && group === 'account' && row.key !== '__other' ? 'cursor-pointer hover:bg-muted/50' : undefined}
+                  className={!account && group === 'account' && !row.key.startsWith('__other') ? 'cursor-pointer hover:bg-muted/50' : undefined}
                   onClick={() => {
                     if (!account && group === 'account' && selectable.some((candidate) => candidate.id === row.key)) setAccountId(row.key);
                   }}

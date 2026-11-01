@@ -137,7 +137,7 @@ export function TimeSeriesChart({
               strokeWidth={2}
               fill={single ? 'url(#fill-single)' : item.color}
               fillOpacity={single ? 1 : 0.85}
-              connectNulls
+              connectNulls={!item.gaps}
               isAnimationActive={false}
               activeDot={{ r: 4, strokeWidth: 2, stroke: 'var(--color-card)' }}
               dot={false}
