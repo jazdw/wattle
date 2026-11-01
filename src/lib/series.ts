@@ -31,7 +31,8 @@ function sum(history: HistoryResponse, series: HistoryResponse['series']): (numb
  * be drawn in parts, see stackAreas).
  */
 export function foldSeries(history: HistoryResponse, colorFor?: (key: string, index: number) => string): ChartSeries[] {
-  const sorted = [...history.series].sort((a, b) => (b.values.at(-1) ?? 0) - (a.values.at(-1) ?? 0));
+  // Largest first by size, owed or not: a large loan keeps its own series (below zero) rather than folding.
+  const sorted = [...history.series].sort((a, b) => Math.abs(b.values.at(-1) ?? 0) - Math.abs(a.values.at(-1) ?? 0));
   const keep = sorted.length > MAX_SERIES + 1 ? sorted.slice(0, MAX_SERIES) : sorted;
   const rest = sorted.slice(keep.length);
   const result: ChartSeries[] = keep.map((series, index) => ({
