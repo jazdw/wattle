@@ -60,13 +60,21 @@ describe('foldSeries', () => {
     expect(other.values).toEqual([0 + 1 + 2, 10 + 20]);
   });
 
+  it('keeps a large loan as its own series: largest first by size, owed or not', () => {
+    const base = history(10);
+    const loan = { key: 'loan', label: 'Mortgage', values: [-200_000_00, -199_000_00], quality: [null, null] };
+    const series = foldSeries({ ...base, series: [...base.series, loan] });
+    expect(series[0]).toMatchObject({ key: 'loan', color: 'var(--series-1)' });
+    expect(series.find((item) => item.key === '__other_debts')).toBeUndefined();
+  });
+
   it('folds debts apart from accounts with money in them, so neither fold crosses zero', () => {
     const base = history(8);
     const owing = (key: string, values: (number | null)[]) => ({ key, label: key, values, quality: [null, null] });
-    // A card owing $5 then paid off (still a debt), a loan, and a small cash account.
-    const series = foldSeries({ ...base, series: [...base.series, owing('card', [-5, 0]), owing('loan', [-50, -40]), owing('cash', [3, 4])] });
+    // A card owing $5 then paid off (still a debt), a small loan, and a small cash account.
+    const series = foldSeries({ ...base, series: [...base.series, owing('card', [-5, 0]), owing('loan', [-50, -4]), owing('cash', [3, 4])] });
     expect(series.map((item) => item.label).slice(-2)).toEqual(['Other (2)', 'Other debts (2)']);
-    expect(series.at(-1)!.values).toEqual([-55, -40]);
+    expect(series.at(-1)!.values).toEqual([-55, -4]);
     expect(series.at(-2)!.values).toEqual([3, 4]); // the cash account and A0 (no value on the 8th)
   });
 });
