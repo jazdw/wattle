@@ -140,6 +140,30 @@ export const importHoldingsHistorySchema = z.object({
     .max(20000),
 });
 
+/** A manual account's holdings history from investment statements (OFX/QFX), read in the browser (src/lib/ofx.ts). */
+export const importFundHistorySchema = z.object({
+  accountId: z.string(),
+  /** The day the positions are as of. */
+  asOf: isoDate,
+  currency: z.string().length(3),
+  funds: z.array(z.object({ id: z.string().trim().min(1).max(20), name: z.string().trim().min(1).max(200) })).max(1000),
+  positions: z.array(z.object({ fund: z.string().min(1).max(20), shares: z.number().finite(), price: z.number().finite().nonnegative() })).max(1000),
+  transactions: z
+    .array(
+      z.object({
+        date: isoDate,
+        type: z.string().trim().min(1).max(20),
+        fund: z.string().min(1).max(20),
+        shares: z.number().finite(),
+        price: z.number().finite().nonnegative(),
+        amount: z.number().int().nonnegative(),
+        charges: z.number().int().nonnegative(),
+      }),
+    )
+    .min(1)
+    .max(20000),
+});
+
 /** Where a page of the household's activity ends (GET /api/activity?after=…). */
 export const activityCursorSchema = z.object({
   startedAt: z.number().int(),

@@ -22,9 +22,11 @@ const REVIEWED: Record<string, Record<string, string>> = {
     holdingDaily: 'connection lease; as accountDaily',
   },
   'server/services/holdingsImport.ts': {
-    securities: 'new tickers: derived ids, insert-or-ignore (shared with manual holdings), atomic, before any job is queued',
+    securities: "new tickers: derived ids, insert-or-ignore (shared with manual holdings), atomic, before any job is queued; statements' funds: derived ids, only the name and last price updated (a classification you set is kept), with the holdings",
     accountDaily: "import jobs: the connection's lease (or the manual account's), one atomic batch per window; imported rows replace anything less trusted (replaceWhere), safe to repeat",
-    holdingDaily: 'import jobs: as accountDaily; rebuilt and carried positions in the window are deleted in the same batch',
+    holdingDaily: "import jobs: as accountDaily; rebuilt and carried positions in the window are deleted in the same batch (a manual account's snapshot ones too)",
+    holdings: "statements import: a manual account's holdings replaced under its lease, atomic with the version bump (like the manual holdings editor)",
+    accounts: 'statements import: the holdings version bump, under the account lease, atomic with the holdings',
   },
   'server/services/assetReports.ts': {
     connections: 'connection lease, atomic with the balances and log row',

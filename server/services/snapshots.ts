@@ -296,7 +296,7 @@ async function provisionalRows(tenant: Tenant, from: IsoDate, before: IsoDate) {
 /** The least final price source among an account's holdings that day (shared/quality.ts leastFinal, in SQL). */
 function leastFinalSql(accountId: string, date: IsoDate) {
   const priced = (source: string) => sql`sum(${holdingDaily.priceSource} = ${source}) > 0`;
-  return sql`(select case when ${priced('provisional')} then 'provisional' when ${priced('institution')} then 'institution' when count(${holdingDaily.priceSource}) > 0 then 'close' end from ${holdingDaily} where ${holdingDaily.accountId} = ${accountId} and ${holdingDaily.date} = ${date})`;
+  return sql`(select case when ${priced('provisional')} then 'provisional' when ${priced('interpolated')} then 'interpolated' when ${priced('institution')} then 'institution' when count(${holdingDaily.priceSource}) > 0 then 'close' end from ${holdingDaily} where ${holdingDaily.accountId} = ${accountId} and ${holdingDaily.date} = ${date})`;
 }
 
 /**

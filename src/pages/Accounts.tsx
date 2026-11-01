@@ -121,7 +121,7 @@ export function Accounts() {
               <Plus /> Manual account
             </Button>
             <Button variant="outline" onClick={() => setImporting(true)}>
-              <Upload /> Import CSV
+              <Upload /> Import
             </Button>
             <Button variant="outline" asChild>
               <Link to="/activity">

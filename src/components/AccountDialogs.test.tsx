@@ -146,11 +146,11 @@ describe('CSV import', () => {
   it('recognises a Example Bank export, previews and imports daily balances', async () => {
     server.use(http.post('*/api/imports/balances', () => HttpResponse.json({ imported: 3 })));
     const { user } = await openAccounts();
-    await user.click(screen.getByRole('button', { name: /Import CSV/ }));
-    const dialog = await screen.findByRole('dialog', { name: 'Import balance history' });
+    await user.click(screen.getByRole('button', { name: 'Import' }));
+    const dialog = await screen.findByRole('dialog', { name: 'Import history' });
     await user.selectOptions(within(dialog).getByLabelText('Account'), 'wbc');
     const file = new File([examplebank], 'examplebank.csv', { type: 'text/csv' });
-    fireEvent.change(within(dialog).getByLabelText('CSV file'), { target: { files: [file] } });
+    fireEvent.change(within(dialog).getByLabelText('File'), { target: { files: [file] } });
 
     expect(await within(dialog).findByText(/Recognised a bank transactions export/)).toBeInTheDocument();
     expect(within(dialog).getByText(/2 balances, filling 3 days/)).toBeInTheDocument(); // the 2nd carries the 1st
@@ -167,8 +167,8 @@ describe('CSV import', () => {
 
     // Closing clears it for the next import.
     await user.click(within(dialog).getByText('Close', { selector: 'button' })); // the footer button, not the ×
-    await user.click(screen.getByRole('button', { name: /Import CSV/ }));
-    const reopened = await screen.findByRole('dialog', { name: 'Import balance history' });
+    await user.click(screen.getByRole('button', { name: 'Import' }));
+    const reopened = await screen.findByRole('dialog', { name: 'Import history' });
     expect(within(reopened).getByLabelText('Account')).toHaveValue('');
     expect(within(reopened).queryByText(/Recognised/)).not.toBeInTheDocument();
     expect(within(reopened).queryByText(/Imported/)).not.toBeInTheDocument();
@@ -186,9 +186,9 @@ Account Number,Trade Date,Settlement Date,Transaction Type,Transaction Descripti
 
   it("picks the balance column of the chosen account by its last digits, whichever is chosen first", async () => {
     const { user } = await openAccounts();
-    await user.click(screen.getByRole('button', { name: /Import CSV/ }));
-    const dialog = await screen.findByRole('dialog', { name: 'Import balance history' });
-    const load = () => fireEvent.change(within(dialog).getByLabelText('CSV file'), { target: { files: [new File([vanguard], 'download.csv', { type: 'text/csv' })] } });
+    await user.click(screen.getByRole('button', { name: 'Import' }));
+    const dialog = await screen.findByRole('dialog', { name: 'Import history' });
+    const load = () => fireEvent.change(within(dialog).getByLabelText('File'), { target: { files: [new File([vanguard], 'download.csv', { type: 'text/csv' })] } });
 
     load();
     expect(await within(dialog).findByText(/Recognised a Vanguard download/)).toBeInTheDocument();
@@ -198,10 +198,10 @@ Account Number,Trade Date,Settlement Date,Transaction Type,Transaction Descripti
 
     // Account first, then the file.
     await user.click(within(dialog).getByText('Close', { selector: 'button' }));
-    await user.click(screen.getByRole('button', { name: /Import CSV/ }));
-    const again = await screen.findByRole('dialog', { name: 'Import balance history' });
+    await user.click(screen.getByRole('button', { name: 'Import' }));
+    const again = await screen.findByRole('dialog', { name: 'Import history' });
     await user.selectOptions(within(again).getByLabelText('Account'), 'chk');
-    fireEvent.change(within(again).getByLabelText('CSV file'), { target: { files: [new File([vanguard], 'download.csv', { type: 'text/csv' })] } });
+    fireEvent.change(within(again).getByLabelText('File'), { target: { files: [new File([vanguard], 'download.csv', { type: 'text/csv' })] } });
     await within(again).findByText(/Recognised a Vanguard download/);
     expect(within(again).getByLabelText('Balance column')).toHaveDisplayValue('Account ending 1234');
   });
@@ -219,10 +219,10 @@ Account Number,Trade Date,Settlement Date,Transaction Type,Transaction Descripti
 55554321,2026-06-01,2026-06-01,Funds Received,Funds received,,,0.00000,0.0,1050.00,0.0,1050.00,0.0,CASH,
 `;
     const { user } = await openAccounts();
-    await user.click(screen.getByRole('button', { name: /Import CSV/ }));
-    const dialog = await screen.findByRole('dialog', { name: 'Import balance history' });
+    await user.click(screen.getByRole('button', { name: 'Import' }));
+    const dialog = await screen.findByRole('dialog', { name: 'Import history' });
     await user.selectOptions(within(dialog).getByLabelText('Account'), 'brk');
-    fireEvent.change(within(dialog).getByLabelText('CSV file'), { target: { files: [new File([file], 'download.csv', { type: 'text/csv' })] } });
+    fireEvent.change(within(dialog).getByLabelText('File'), { target: { files: [new File([file], 'download.csv', { type: 'text/csv' })] } });
     expect(await within(dialog).findByText('Holdings history')).toBeInTheDocument();
     expect(within(dialog).queryByLabelText('Balance column')).not.toBeInTheDocument();
     await user.click(within(dialog).getByRole('button', { name: 'Import' }));
@@ -242,10 +242,10 @@ Account Number,Trade Date,Settlement Date,Transaction Type,Transaction Descripti
 
   it('lets you map columns for other files', async () => {
     const { user } = await openAccounts();
-    await user.click(screen.getByRole('button', { name: /Import CSV/ }));
+    await user.click(screen.getByRole('button', { name: 'Import' }));
     const dialog = await screen.findByRole('dialog');
     const file = new File(['when,note,amount\n01/02/2026,x,100\n01/03/2026,y,105\n'], 'bank.csv', { type: 'text/csv' });
-    fireEvent.change(within(dialog).getByLabelText('CSV file'), { target: { files: [file] } });
+    fireEvent.change(within(dialog).getByLabelText('File'), { target: { files: [file] } });
     await within(dialog).findByLabelText('Date column');
     await user.selectOptions(within(dialog).getByLabelText('Date format'), 'MM/DD/YYYY');
     expect(within(dialog).getByText(/2 balances, filling 2 days/)).toBeInTheDocument();
