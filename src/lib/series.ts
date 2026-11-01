@@ -35,3 +35,19 @@ export function foldSeries(history: HistoryResponse, colorFor?: (key: string, in
   return result;
 }
 
+/**
+ * The areas to draw. Stacked, a series that crosses zero (a fold of small
+ * accounts mixing cards and cash, an overdrawn account) is drawn as its parts
+ * above and below zero: stacked by sign, a single area would jump between the
+ * top and the bottom of the stack each time it changed sign.
+ */
+export function stackAreas(series: ChartSeries[], stacked: boolean): ChartSeries[] {
+  return series.flatMap((item) => {
+    const crosses = stacked && item.values.some((value) => value !== null && value > 0) && item.values.some((value) => value !== null && value < 0);
+    if (!crosses) return [item];
+    return [
+      { ...item, values: item.values.map((value) => (value === null ? null : Math.max(value, 0))) },
+      { ...item, key: `${item.key}:below`, values: item.values.map((value) => (value === null ? null : Math.min(value, 0))) },
+    ];
+  });
+}

@@ -80,6 +80,13 @@ describe('ofxAccounts', () => {
     ]);
   });
 
+  it("doesn't take a plan's placeholders for tickers", () => {
+    for (const placeholder of ['NON0Z', 'NONE9', 'NONEX', 'CASH', 'loan', 'N/A']) {
+      const [account] = ofxAccounts(sgml(buy('B1', '20260803', '10', '12.5', '125.00')).replace('<TICKER>Unknown</TICKER>', `<TICKER>${placeholder}</TICKER>`));
+      expect(account.file.kind === 'holdings' && account.file.securities[0].ticker, placeholder).toBeNull();
+    }
+  });
+
   it('lists transaction types it doesn’t understand, and ignores bank statements', () => {
     const expense = `<INVEXPENSE><INVTRAN><FITID>E1</FITID><DTTRADE>20260901</DTTRADE></INVTRAN><SECID><UNIQUEID>000000002</UNIQUEID><UNIQUEIDTYPE>CUSIP</UNIQUEIDTYPE></SECID><TOTAL>5.00</TOTAL><SUBACCTSEC>CASH</SUBACCTSEC><SUBACCTFUND>CASH</SUBACCTFUND></INVEXPENSE>`;
     expect(ofxAccounts(sgml(expense))[0].unknownTypes).toEqual(['INVEXPENSE']);

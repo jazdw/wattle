@@ -116,7 +116,14 @@ export function fundPrice(points: [IsoDate, number][], date: IsoDate): PriceResu
  * The household's security for each ticker, adding those it doesn't have yet
  * (described by the market data provider, classified by a best guess).
  */
-export async function securitiesForTickers(deps: Deps, tenant: Tenant, currency: string, tickers: string[]): Promise<{ byTicker: Map<string, string>; statements: BatchItem<'sqlite'>[]; created: number }> {
+export async function securitiesForTickers(
+  deps: Deps,
+  tenant: Tenant,
+  currency: string,
+  tickers: string[],
+  /** The file's names by ticker, for tickers the provider can't describe. */
+  names: Map<string, string> = new Map(),
+): Promise<{ byTicker: Map<string, string>; statements: BatchItem<'sqlite'>[]; created: number }> {
   const securityRows = await tenant.db.select({ id: securities.id, ticker: securities.ticker }).from(securities).where(tenant.scope(securities));
   const byTicker = new Map(securityRows.flatMap((row) => (row.ticker ? [[row.ticker.toUpperCase(), row.id] as const] : [])));
   const missing = [...new Set(tickers.map((ticker) => ticker.toUpperCase()))].filter((ticker) => !byTicker.has(ticker));
@@ -125,7 +132,8 @@ export async function securitiesForTickers(deps: Deps, tenant: Tenant, currency:
   const statements: BatchItem<'sqlite'>[] = [];
   for (const ticker of missing) {
     const description = descriptions.get(ticker);
-    const suggestion = suggestClassification({ ticker, name: description?.name ?? null, type: description?.type ?? null, currency });
+    const name = description?.name ?? names.get(ticker) ?? null;
+    const suggestion = suggestClassification({ ticker, name, type: description?.type ?? null, currency });
     // Same derived id as manual holdings use, so concurrent saves share one row.
     const id = await stableId(`security:manual:${tenant.householdId}:${ticker}`);
     statements.push(
@@ -135,7 +143,7 @@ export async function securitiesForTickers(deps: Deps, tenant: Tenant, currency:
           id,
           householdId: tenant.householdId,
           ticker,
-          name: description?.name ?? ticker,
+          name: name ?? ticker,
           type: description?.type ?? null,
           currency,
           isPublic: true,
@@ -260,8 +268,9 @@ export async function importAccounts(deps: Deps, tenant: Tenant, request: Import
       if (security.ticker && !cashTickers.has(security.ticker.toUpperCase())) (tickersByCurrency.get(account.currency) ?? tickersByCurrency.set(account.currency, []).get(account.currency)!).push(security.ticker);
     }
   }
+  const fileNames = new Map(holdingEntries.flatMap(({ entry }) => entry.file.securities.flatMap((security) => (security.ticker ? [[security.ticker.toUpperCase(), security.name] as const] : []))));
   for (const [currency, tickers] of tickersByCurrency) {
-    const found = await securitiesForTickers(deps, tenant, currency, tickers);
+    const found = await securitiesForTickers(deps, tenant, currency, tickers, fileNames);
     shared.push(...found.statements);
     for (const [ticker, id] of found.byTicker) byTicker.set(ticker, id);
   }
