@@ -1,26 +1,35 @@
 import { and, eq } from 'drizzle-orm';
 import { describe, expect, it } from 'vitest';
 import * as schema from '../server/db/schema';
+import type { ImportKind } from '../shared/schemas';
 import { account, closes, fakePlaid, fakePrices, holding, security } from './fakes';
 import { client, createHousehold, createTestDeps, settle, TODAY } from './helpers';
 
-type Txn = { date: string; type: string; ticker: string | null; shares?: number; price?: number; amount?: number };
+type Txn = { date: string; kind: ImportKind; ticker: string | null; shares?: number; price?: number; amount?: number };
 
-/** A made-up download: positions now and transactions (amounts in dollars here, sent in cents). */
-function download(positions: { ticker: string | null; shares: number }[], transactions: Txn[]) {
+/** A made-up download as the readers send it: positions now (a null ticker is cash) and transactions, amounts in dollars here, sent in cents. */
+export function download(positions: { ticker: string | null; shares: number }[], transactions: Txn[]) {
+  const tickers = [...new Set([...positions, ...transactions].flatMap((row) => (row.ticker ? [row.ticker] : [])))];
   return {
-    positions,
-    transactions: transactions.map((txn) => ({ shares: 0, price: 0, ...txn, amount: Math.round((txn.amount ?? 0) * 100) })),
+    kind: 'holdings' as const,
+    asOf: TODAY,
+    securities: tickers.map((ticker) => ({ id: ticker, ticker, name: ticker })),
+    positions: positions.flatMap((row) => (row.ticker ? [{ security: row.ticker, shares: row.shares }] : [])),
+    cash: Math.round(positions.filter((row) => !row.ticker).reduce((sum, row) => sum + row.shares, 0) * 100),
+    transactions: transactions.map(({ ticker, ...txn }) => {
+      const amount = Math.round((txn.amount ?? 0) * 100);
+      return { shares: 0, price: 0, label: txn.kind, ...txn, security: ticker, amount, value: Math.abs(amount), charges: 0 };
+    }),
   };
 }
 
 /** Buy 25 VTI the day before the $2,500 paying for it arrives, a $50 dividend, sell 5, withdraw the $500. */
 const HISTORY: Txn[] = [
-  { date: '2026-05-29', type: 'Buy', ticker: 'VTI', shares: 25, price: 100, amount: -2500 },
-  { date: '2026-06-01', type: 'Funds Received', ticker: null, amount: 2500 },
-  { date: '2026-07-15', type: 'Dividend', ticker: 'VTI', amount: 50 },
-  { date: '2026-09-01', type: 'Sell', ticker: 'VTI', shares: -5, price: 100, amount: 500 },
-  { date: '2026-09-02', type: 'Withdrawal', ticker: null, amount: -500 },
+  { date: '2026-05-29', kind: 'buy', ticker: 'VTI', shares: 25, price: 100, amount: -2500 },
+  { date: '2026-06-01', kind: 'deposit', ticker: null, amount: 2500 },
+  { date: '2026-07-15', kind: 'income', ticker: 'VTI', amount: 50 },
+  { date: '2026-09-01', kind: 'sell', ticker: 'VTI', shares: -5, price: 100, amount: 500 },
+  { date: '2026-09-02', kind: 'withdrawal', ticker: null, amount: -500 },
 ];
 
 /** A brokerage linked today holding `shares` VTI at $100 and $50 cash. */
@@ -36,7 +45,7 @@ async function linked(shares = 20) {
   await api('/api/plaid/exchange', { method: 'POST', json: { publicToken: 'p', kind: 'investments' } });
   await settle(deps);
   const [brk] = await deps.db.select().from(schema.accounts);
-  const send = (file: ReturnType<typeof download>) => api('/api/imports/holdings-history', { method: 'POST', json: { accountId: brk.id, ...file } });
+  const send = (file: ReturnType<typeof download>) => api('/api/imports', { method: 'POST', json: { accounts: [{ label: '··1234', target: { accountId: brk.id }, file }] } });
   const day = async (date: string) => (await deps.db.select().from(schema.accountDaily).where(and(eq(schema.accountDaily.accountId, brk.id), eq(schema.accountDaily.date, date))))[0];
   const vti = async (date: string) => {
     const [row] = await deps.db.select().from(schema.holdingDaily).innerJoin(schema.securities, eq(schema.securities.id, schema.holdingDaily.securityId)).where(and(eq(schema.holdingDaily.accountId, brk.id), eq(schema.holdingDaily.date, date), eq(schema.securities.ticker, 'VTI')));
@@ -50,7 +59,7 @@ describe('holdings history import', () => {
     const { deps, send, day, vti } = await linked();
     const response = await send(download([{ ticker: 'VTI', shares: 20 }, { ticker: null, shares: 50 }], HISTORY));
     expect(response.status).toBe(200);
-    expect(response.body).toMatchObject({ from: '2026-05-29', to: '2026-10-07', days: 132 });
+    expect(response.body.accounts).toMatchObject([{ label: '··1234', created: false, from: '2026-05-29', to: '2026-10-07', days: 132 }]);
     await settle(deps);
 
     expect(await day('2026-05-28')).toBeUndefined(); // nothing before the first transaction
@@ -71,7 +80,7 @@ describe('holdings history import', () => {
 
   it('counts a split from the transaction that records it', async () => {
     const { deps, send, vti } = await linked(40);
-    const split: Txn = { date: '2026-08-10', type: 'Stock split', ticker: 'VTI', shares: 20 };
+    const split: Txn = { date: '2026-08-10', kind: 'transfer', ticker: 'VTI', shares: 20 };
     expect((await send(download([{ ticker: 'VTI', shares: 40 }, { ticker: null, shares: 50 }], [...HISTORY.slice(0, 3), split, { ...HISTORY[3], shares: -5 }, HISTORY[4]]))).status).toBe(200);
     await settle(deps);
     expect(await vti('2026-08-09')).toMatchObject({ quantity: 25 });
@@ -83,9 +92,13 @@ describe('holdings history import', () => {
     const rows = async () => (await deps.db.select().from(schema.accountDaily)).filter((row) => row.source === 'import').length;
     const positions = [{ ticker: 'VTI', shares: 20 }, { ticker: null, shares: 50 }];
 
-    const unknown = await send(download(positions, [...HISTORY, { date: '2026-09-03', type: 'Transfer of assets', ticker: 'VTI', shares: 1 }]));
-    expect(unknown.status).toBe(409);
-    expect(unknown.body.error).toMatch(/doesn't understand yet: transfer of assets/);
+    // A kind the readers never send.
+    const unknown = await send(download(positions, [...HISTORY, { date: '2026-09-03', kind: 'transfer of assets' as ImportKind, ticker: 'VTI', shares: 1 }]));
+    expect(unknown.status).toBe(400);
+
+    const short = await send(download([{ ticker: 'VTI', shares: 2 }, { ticker: null, shares: 50 }], HISTORY));
+    expect(short.status).toBe(409);
+    expect(short.body.error).toMatch(/Nothing was imported: ··1234: before 2026-05-29, VTI would have -18\.0000 shares/);
 
     const mismatched = await send(download([{ ticker: 'VTI', shares: 19 }, { ticker: null, shares: 50 }], HISTORY));
     expect(mismatched.status).toBe(409);
@@ -102,8 +115,8 @@ describe('holdings history import', () => {
   it("doesn't check a dividend reinvestment's price: it's the dividend over a rounded share count", async () => {
     const { deps, send } = await linked(20.1);
     const reinvested: Txn[] = [
-      { date: '2026-07-15', type: 'Dividend', ticker: 'VTI', amount: 10 },
-      { date: '2026-07-15', type: 'Reinvestment', ticker: 'VTI', shares: 0.1, price: 108.4, amount: -10 },
+      { date: '2026-07-15', kind: 'income', ticker: 'VTI', amount: 10 },
+      { date: '2026-07-15', kind: 'reinvest', ticker: 'VTI', shares: 0.1, price: 108.4, amount: -10 },
     ];
     expect((await send(download([{ ticker: 'VTI', shares: 20.1 }, { ticker: null, shares: 50 }], [...HISTORY, ...reinvested]))).status).toBe(200);
     await settle(deps);
@@ -114,8 +127,8 @@ describe('holdings history import', () => {
     const { deps, send } = await linked();
     const positions = [{ ticker: 'VTI', shares: 20 }, { ticker: null, shares: 50 }];
     const bnd: Txn[] = [
-      { date: '2026-06-10', type: 'Buy', ticker: 'BND', shares: 10, price: 70, amount: -700 },
-      { date: '2026-06-20', type: 'Sell', ticker: 'BND', shares: -10, price: 70, amount: 700 },
+      { date: '2026-06-10', kind: 'buy', ticker: 'BND', shares: 10, price: 70, amount: -700 },
+      { date: '2026-06-20', kind: 'sell', ticker: 'BND', shares: -10, price: 70, amount: 700 },
     ];
     await send(download(positions, [...HISTORY, ...bnd]));
     await settle(deps);

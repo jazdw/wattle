@@ -34,6 +34,7 @@ import type { Deps, SecurityDescription } from '../ports';
 import { connectionActivity, SyncRun } from '../services/activity';
 import { historyProgress, historyUnderway, queueHistory } from '../services/backfill';
 import { signedBalance, writeBalances } from '../services/balances';
+import { importProgress } from '../services/holdingsImport';
 import { toCurrency } from '../services/portfolio';
 import { closeLookup, describeTickers, ensureRecentCloses, fxLookup } from '../services/pricing';
 import { snapshotHousehold } from '../services/snapshots';
@@ -257,6 +258,7 @@ accountRoutes.get('/', async (c) => {
     .groupBy(holdings.accountId);
   const countBy = new Map(holdingCounts.map((row) => [row.accountId, row.count]));
   const duplicates = possibleDuplicates(rows);
+  const importing = await importProgress(tenant);
 
   const response: AccountsResponse = {
     accounts: rows.map(
@@ -283,6 +285,7 @@ accountRoutes.get('/', async (c) => {
             : convertMinor(row.balance, toCurrency(row.currency), currency, rates),
         holdingCount: countBy.get(row.id) ?? 0,
         possibleDuplicateOf: duplicates.get(row.id) ?? null,
+        importProgress: importing.get(row.id) ?? null,
       }),
     ),
   };

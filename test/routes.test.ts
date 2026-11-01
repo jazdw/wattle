@@ -261,7 +261,7 @@ describe('imports', () => {
       { date: '2026-10-01', balance: 999 },
       { date: '2026-09-30', balance: 90 },
     ];
-    expect((await api('/api/imports/balances', { method: 'POST', json: { accountId: id, rows } })).body.imported).toBe(2);
+    expect((await api('/api/imports', { method: 'POST', json: { accounts: [{ label: 'File', target: { accountId: id }, file: { kind: 'balances', rows } }] } })).body.accounts[0].days).toBe(2);
     const day = async (date: string) =>
       (await deps.db.select().from(schema.accountDaily).where(eq(schema.accountDaily.accountId, id))).find((row) => row.date === date);
     expect(await day('2026-10-01')).toMatchObject({ balance: 999_00, source: 'import' }); // after the entry: replaces it
@@ -280,34 +280,21 @@ describe('imports', () => {
       { date: '2026-09-01', balance: 50 },
       { date: '2026-10-01', balance: 120.5 },
     ];
-    await api('/api/imports/balances', { method: 'POST', json: { accountId: id, rows } });
+    await api('/api/imports', { method: 'POST', json: { accounts: [{ label: 'File', target: { accountId: id }, file: { kind: 'balances', rows } }] } });
     expect(await current()).toBe(120_50);
 
     // An older file doesn't replace it; a later recorded balance does.
-    await api('/api/imports/balances', { method: 'POST', json: { accountId: id, rows: [{ date: '2026-08-01', balance: 1 }] } });
+    await api('/api/imports', { method: 'POST', json: { accounts: [{ label: 'File', target: { accountId: id }, file: { kind: 'balances', rows: [{ date: '2026-08-01', balance: 1 }] } }] } });
     expect(await current()).toBe(120_50);
     await api(`/api/accounts/${id}/balances`, { method: 'POST', json: { date: '2026-09-15', balance: 7 } });
     expect(await current()).toBe(120_50); // older than the imported 1 Oct
-  });
-
-  it('imports holdings history and creates unknown securities', async () => {
-    const { deps, api, create } = await household();
-    const id = await create({ name: 'IRA', type: 'investment' });
-    const response = await api('/api/imports/holdings', {
-      method: 'POST',
-      json: { accountId: id, rows: [{ date: '2026-09-01', ticker: 'vxus', quantity: 10, price: 60 }, { date: '2026-09-01', ticker: 'NEWFUND', quantity: 5 }] },
-    });
-    expect(response.body).toEqual({ imported: 2, newSecurities: 2 });
-    const rows = await deps.db.select().from(schema.holdingDaily);
-    expect(rows.find((row) => row.price === 60)?.value).toBe(600_00);
-    expect(rows.find((row) => row.price === null)?.priceSource).toBeNull();
   });
 
   it('refuses hidden accounts', async () => {
     const { api, create } = await household();
     const id = await create({ name: 'Old', type: 'depository' });
     await api(`/api/accounts/${id}`, { method: 'PATCH', json: { isHidden: true } });
-    expect((await api('/api/imports/balances', { method: 'POST', json: { accountId: id, rows: [{ date: TODAY, balance: 1 }] } })).status).toBe(409);
+    expect((await api('/api/imports', { method: 'POST', json: { accounts: [{ label: 'File', target: { accountId: id }, file: { kind: 'balances', rows: [{ date: TODAY, balance: 1 }] } }] } })).status).toBe(409);
   });
 });
 

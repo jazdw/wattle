@@ -39,7 +39,7 @@ import { holdWhile, Lease, snapshotLease } from './lease';
 import { datedCloseLookup, ensureRecentCloses, type DatedCloseLookup } from './pricing';
 import { priceOn } from './valuation';
 import { QUALITY_SET, replaceWhere } from './quality';
-import { leastFinal, type PriceSource } from '../../shared/quality';
+import { leastFinal, type DailySource, type PriceSource } from '../../shared/quality';
 
 /** How far back a snapshot looks for provisional prices to correct. */
 export const REPRICE_DAYS = 7;
@@ -262,7 +262,20 @@ function dayClose(row: DatedPrices, date: IsoDate, dated: DatedCloseLookup): { p
 }
 
 /** Public holdings' rows in [from, before) not yet at a close for their day (provisional, or the institution's price), with their dated prices from Plaid. */
-async function provisionalRows(tenant: Tenant, from: IsoDate, before: IsoDate) {
+function provisionalRows(tenant: Tenant, from: IsoDate, before: IsoDate) {
+  return unpricedRows(tenant, { priceSources: ['provisional', 'institution'], sources: ['snapshot', 'rebuilt', 'carried'], from, before });
+}
+
+/**
+ * Imported days of market funds priced from the file, because their closes
+ * couldn't be fetched when it was imported (estimates, or the file's price on
+ * a trade's day): an account's, or the household's, optionally in [from, before).
+ */
+export function importedEstimates(tenant: Tenant, options: { accountId?: string; from?: IsoDate; before?: IsoDate } = {}) {
+  return unpricedRows(tenant, { priceSources: ['interpolated', 'institution'], sources: ['import'], ...options });
+}
+
+async function unpricedRows(tenant: Tenant, options: { priceSources: PriceSource[]; sources: DailySource[]; accountId?: string; from?: IsoDate; before?: IsoDate }) {
   const rows = await tenant.db
     .select({
       accountId: holdingDaily.accountId,
@@ -283,10 +296,11 @@ async function provisionalRows(tenant: Tenant, from: IsoDate, before: IsoDate) {
     .where(
       tenant.scope(
         holdingDaily,
-        inArray(holdingDaily.priceSource, ['provisional', 'institution']),
-        inArray(holdingDaily.source, ['snapshot', 'rebuilt', 'carried']),
-        gte(holdingDaily.date, from),
-        lt(holdingDaily.date, before),
+        inArray(holdingDaily.priceSource, options.priceSources),
+        inArray(holdingDaily.source, options.sources),
+        options.accountId ? eq(holdingDaily.accountId, options.accountId) : undefined,
+        options.from ? gte(holdingDaily.date, options.from) : undefined,
+        options.before ? lt(holdingDaily.date, options.before) : undefined,
         eq(securities.isPublic, true),
       ),
     );
@@ -300,11 +314,11 @@ function leastFinalSql(accountId: string, date: IsoDate) {
 }
 
 /**
- * Statements repricing provisional rows that now have a close dated for
- * their day, and moving their accounts' synced balances for those days by
- * the difference.
+ * Statements repricing rows that now have a close dated for their day,
+ * and moving their accounts' balances for those days by the difference
+ * (synced balances, or `sources`' for imported days).
  */
-function repriced(tenant: Tenant, rows: Awaited<ReturnType<typeof provisionalRows>>, dated: DatedCloseLookup): BatchItem<'sqlite'>[] {
+export function repriced(tenant: Tenant, rows: Awaited<ReturnType<typeof unpricedRows>>, dated: DatedCloseLookup, sources: DailySource[] = ['snapshot', 'rebuilt', 'carried']): BatchItem<'sqlite'>[] {
   const statements: BatchItem<'sqlite'>[] = [];
   const deltas = new Map<string, { accountId: string; date: IsoDate; delta: number }>();
   for (const row of rows) {
@@ -333,7 +347,7 @@ function repriced(tenant: Tenant, rows: Awaited<ReturnType<typeof provisionalRow
             accountDaily,
             eq(accountDaily.accountId, accountId),
             eq(accountDaily.date, date),
-            inArray(accountDaily.source, ['snapshot', 'rebuilt', 'carried']),
+            inArray(accountDaily.source, sources),
           ),
         ),
     );

@@ -101,68 +101,80 @@ export const householdPatchSchema = z.object({
   displayCurrency: z.enum(CURRENCIES).optional(),
 });
 
-export const importBalancesSchema = z.object({
-  accountId: z.string(),
-  rows: z.array(z.object({ date: isoDate, balance: z.number().finite() })).min(1).max(5000),
-});
+/** What a transaction does, as every reader maps its file's own types (src/lib/imports.ts). */
+export const IMPORT_KINDS = ['buy', 'sell', 'reinvest', 'income', 'deposit', 'withdrawal', 'fee', 'transfer', 'sweep'] as const;
+export type ImportKind = (typeof IMPORT_KINDS)[number];
 
-export const importHoldingsSchema = z.object({
-  accountId: z.string(),
-  rows: z
-    .array(
-      z.object({
-        date: isoDate,
-        ticker: z.string().trim().min(1).max(20),
-        quantity: z.number().finite(),
-        price: z.number().finite().optional(),
-      }),
-    )
-    .min(1)
-    .max(20000),
-});
+const securityRef = z.string().trim().min(1).max(40);
 
-/** An investment account's download: positions now and its transactions (amounts in cents, positive when cash comes in). */
-export const importHoldingsHistorySchema = z.object({
-  accountId: z.string(),
-  positions: z.array(z.object({ ticker: z.string().trim().min(1).max(20).nullable(), shares: z.number().finite() })).max(1000),
-  transactions: z
-    .array(
-      z.object({
-        date: isoDate,
-        type: z.string().trim().min(1).max(40),
-        ticker: z.string().trim().min(1).max(20).nullable(),
-        shares: z.number().finite(),
-        price: z.number().finite(),
-        amount: z.number().int(),
-      }),
-    )
-    .min(1)
-    .max(20000),
-});
-
-/** A manual account's holdings history from investment statements (OFX/QFX), read in the browser (src/lib/ofx.ts). */
-export const importFundHistorySchema = z.object({
-  accountId: z.string(),
+/** An investment account's download: its positions and cash now, and its transactions. */
+export const importedHoldingsSchema = z.object({
+  kind: z.literal('holdings'),
+  /** The file's currency, when it says. */
+  currency: z.string().length(3).optional(),
   /** The day the positions are as of. */
   asOf: isoDate,
-  currency: z.string().length(3),
-  funds: z.array(z.object({ id: z.string().trim().min(1).max(20), name: z.string().trim().min(1).max(200) })).max(1000),
-  positions: z.array(z.object({ fund: z.string().min(1).max(20), shares: z.number().finite(), price: z.number().finite().nonnegative() })).max(1000),
+  /** `id` is the file's id for the security (a CUSIP, or its ticker); `ticker` is null for funds with no market ticker. */
+  securities: z.array(z.object({ id: securityRef, ticker: z.string().trim().min(1).max(20).nullable(), name: z.string().trim().min(1).max(200) })).max(1000),
+  positions: z.array(z.object({ security: securityRef, shares: z.number().finite(), price: z.number().finite().nonnegative().optional() })).max(1000),
+  /** Cash held now, in cents. */
+  cash: z.number().int(),
   transactions: z
     .array(
       z.object({
         date: isoDate,
-        type: z.string().trim().min(1).max(20),
-        fund: z.string().min(1).max(20),
+        kind: z.enum(IMPORT_KINDS),
+        /** The file's own name for the type, for messages. */
+        label: z.string().trim().min(1).max(60),
+        /** Null for cash. */
+        security: securityRef.nullable(),
+        /** Signed: shares in positive. */
         shares: z.number().finite(),
         price: z.number().finite().nonnegative(),
-        amount: z.number().int().nonnegative(),
+        /** Cents the account's cash changed by, as the institution reports it (positive in). */
+        amount: z.number().int(),
+        /** The trade's total in cents, without sign (shares × price, plus or minus the charges). */
+        value: z.number().int().nonnegative(),
+        /** Commission, fees, load, taxes withheld, in cents. */
         charges: z.number().int().nonnegative(),
       }),
     )
     .min(1)
     .max(20000),
 });
+
+/** Dated balances (major units; liabilities as positive amounts owed). */
+export const importedBalancesSchema = z.object({
+  kind: z.literal('balances'),
+  rows: z.array(z.object({ date: isoDate, balance: z.number().finite() })).min(1).max(5000),
+});
+
+/** One import: each account in the files, into an account you have or a new one. */
+export const importSchema = z.object({
+  accounts: z
+    .array(
+      z.object({
+        /** How the file names the account (··1234), for messages. */
+        label: z.string().trim().min(1).max(100),
+        target: z.union([
+          z.object({ accountId: z.string() }),
+          z.object({ new: manualAccountSchema.pick({ name: true, type: true, currency: true, institutionName: true, ownerUserId: true }).extend({ mask: z.string().trim().max(4).nullable().optional() }) }),
+        ]),
+        file: z.discriminatedUnion('kind', [importedHoldingsSchema, importedBalancesSchema]),
+      }),
+    )
+    .min(1)
+    .max(20),
+});
+export type ImportRequest = z.infer<typeof importSchema>;
+
+/** Securities a file names without a ticker, to suggest one for. */
+export const tickerSuggestionsSchema = z.object({
+  securities: z.array(z.object({ id: securityRef, name: z.string().trim().min(1).max(200) })).max(200),
+});
+export type ImportedHoldings = z.infer<typeof importedHoldingsSchema>;
+export type ImportedBalances = z.infer<typeof importedBalancesSchema>;
+export type ImportedFile = ImportedHoldings | ImportedBalances;
 
 /** Where a page of the household's activity ends (GET /api/activity?after=…). */
 export const activityCursorSchema = z.object({

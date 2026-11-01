@@ -1,83 +1,72 @@
 /**
- * An investment account's holdings history from an institution's download:
- * its positions now, then its transactions (a Vanguard download has 18
- * months). Each day's share counts come from walking back from today's
- * positions through the transactions (./backfillCore), priced at the day's
- * close. Shares and cash both move on the trade date, so a purchase never
- * counts the money twice while it settles; bought before the money arrived,
- * cash goes below zero until it does (an amount owed). They're written as imported: trusted over anything from the
- * institution's own feed (shared/quality.ts).
+ * Every import: one or more files, each with one or more accounts, read in
+ * the browser into one shape (src/lib/imports.ts) and sent together. Each
+ * goes into an account you have, linked or manual, or a new manual one.
  *
- * Before anything is written the file is checked: every transaction type
- * must be understood, the walk must reach the share counts actually synced
- * on the days since the account was linked, and each buy or sell's price
- * must be close to that day's close. A file that fails writes nothing. Days from the
- * account's first synced one on are left to the snapshots (the check showed
- * they agree). The writing runs as jobs, one window of days each (a load can
- * be thousands of rows).
+ * - Balances (a bank export) are written as they are (./balances).
+ * - Holdings (a brokerage or plan download: positions and cash now, then
+ *   transactions) give each day's share counts and cash by walking back
+ *   from the positions (./backfillCore). Shares and cash both move on the
+ *   trade date, so a purchase never counts the money twice while it
+ *   settles; bought before the money arrived, cash goes below zero until it
+ *   does (an amount owed). Funds with a market ticker are priced at each
+ *   day's close; funds without one (a plan's collective trusts), or whose
+ *   closes can't be fetched just now, from the file's own prices, on a
+ *   straight line between them (fundPrice), marked as estimates.
+ *
+ * Every account is checked before anything is written, and one that fails
+ * stops the whole import: no fund may go below zero shares, a fund priced
+ * from the file must have totals that are its shares × price, a buy or sell
+ * of a market fund must be near that day's close, and in a linked account
+ * the walk must reach the share counts synced since the link. Days from a
+ * linked account's first synced one on are left to the snapshots (the check
+ * showed they agree); a manual account's file is written through today and
+ * its positions become the account's holdings. Imported days are trusted
+ * over anything from the institution (shared/quality.ts). The days are
+ * written as jobs, one window each (a load can be thousands of rows).
  */
-import { eq, gte, inArray, lte, min, sql } from 'drizzle-orm';
+import { and, eq, gte, inArray, lte, min, sql } from 'drizzle-orm';
+import type { BatchItem } from 'drizzle-orm/batch';
 import { suggestClassification } from '../../shared/classify';
 import { addDays, dateRange, marketDate, type IsoDate } from '../../shared/dates';
 import { leastFinal } from '../../shared/quality';
-import type { BatchItem } from 'drizzle-orm/batch';
+import type { ImportedHoldings, ImportKind, ImportRequest } from '../../shared/schemas';
+import type { ImportedAccount, ImportResponse, TickerSuggestion } from '../../shared/types';
 import { chunkRows, inChunks, runAtomic } from '../db/batch';
-import { accountDaily, accounts, holdingDaily, holdings, securities } from '../db/schema';
+import { accountDaily, accounts, holdingDaily, holdings, householdMembers, jobs, securities } from '../db/schema';
 import type { Tenant } from '../db/tenant';
-import { HttpError } from '../lib/http';
+import { describeError } from '../lib/errors';
+import { HttpError, notFound } from '../lib/http';
 import type { Deps } from '../ports';
 import { reconstructHistory, type BackfillHolding, type BackfillTransaction, type PriceResult } from './backfillCore';
 import { BUSY_RETRY_SECONDS, daysPerBlock, PRICE_LOOKBACK_DAYS, windows } from './backfill';
+import { writeBalances } from './balances';
 import { stableId } from './ids';
 import { enqueue, RetryLater, type JobContext } from './jobRunner';
 import { accountLease, connectionLease, Lease } from './lease';
-import { closeLookup, describeTickers, ensureCloses } from './pricing';
+import { closeLookup, datedCloseLookup, describeTickers, ensureCloses } from './pricing';
 import { QUALITY_SET, replaceWhere } from './quality';
-import { snapshotHousehold } from './snapshots';
+import { importedEstimates, repriced, snapshotHousehold } from './snapshots';
 import { isCashSecurity, priceOn } from './valuation';
 
-/** Transaction types understood (lower case); any other rejects the file. */
-const KNOWN_TYPES = new Set([
-  'buy',
-  'sell',
-  'reinvestment',
-  'exchange',
-  'stock split',
-  'dividend',
-  'interest',
-  'deposit',
-  'withdrawal',
-  'funds received',
-  'fee',
-  'sweep in',
-  'sweep out',
-  'contribution',
-  'conversion (incoming)',
-  'conversion (outgoing)',
-  'capital gain (lt)',
-  'capital gain (st)',
-  'distribution',
-]);
-/** Moves between the account's cash and its settlement fund: both cash, so cash doesn't change. */
-const SWEEPS = new Set(['sweep in', 'sweep out']);
-const CASH_FUND_TRADES = new Set(['buy', 'sell', 'reinvestment', 'exchange']);
+/** Transactions that move shares (of a fund, or between cash and a money market fund). */
+const SHARE_KINDS = new Set<ImportKind>(['buy', 'sell', 'reinvest', 'transfer']);
+/** Transactions that only move cash: an account with none of these, and no cash, holds no cash at all. */
+const CASH_KINDS = new Set<ImportKind>(['income', 'deposit', 'withdrawal', 'fee', 'sweep']);
+/** Trades whose totals are checked: shares × price, give or take rounding and charges. */
+const PRICED_KINDS = new Set<ImportKind>(['buy', 'sell', 'reinvest']);
 /**
  * Trades whose price is checked against the day's close. Not reinvestments:
  * their price is the dividend over a share count rounded to a few decimals,
  * filled when the dividend is paid, so it can sit well off that day's close.
  */
-const TRADES = new Set(['buy', 'sell']);
+const TRADES = new Set<ImportKind>(['buy', 'sell']);
 /** How far a trade's price may be from the day's close before the file is doubted. */
 const PRICE_TOLERANCE = 0.05;
+/** Share counts in files are rounded (to 3 or 4 decimals): how far below zero a walk back may go. */
+const SHARES_EPSILON = 0.001;
 /** Problems listed at most, so a badly mismatched file doesn't make a wall of text. */
 const MAX_PROBLEMS = 5;
-
-export interface ImportedHoldings {
-  /** Today's positions; a null ticker is cash. */
-  positions: { ticker: string | null; shares: number }[];
-  /** `amount`: cents the account's cash changed by, as the institution reports it (positive in), on the trade date `date`. */
-  transactions: { date: IsoDate; type: string; ticker: string | null; shares: number; price: number; amount: number }[];
-}
 
 interface BlockPayload {
   accountId: string;
@@ -95,20 +84,15 @@ interface BlockPayload {
 }
 
 /**
- * Share counts in statements are rounded (to 3 decimals, or 4): a total may
- * be off shares × price by half that rounding's worth of shares, plus a cent.
+ * Share counts in files are rounded (to 3 decimals, or 4): a total may be
+ * off shares × price by half that rounding's worth of shares, plus a cent.
  * A reinvested dividend's shares are rounded from the dividend, so it's off
  * by a few cents.
  */
 const SHARE_ROUNDING = 0.0005;
 
-export interface FundHistory {
-  asOf: IsoDate;
-  currency: string;
-  funds: { id: string; name: string }[];
-  positions: { fund: string; shares: number; price: number }[];
-  transactions: { date: IsoDate; type: string; fund: string; shares: number; price: number; amount: number; charges: number }[];
-}
+type Account = typeof accounts.$inferSelect;
+
 
 /**
  * A fund's price on a day from the institution's prices on others (sorted by
@@ -167,36 +151,279 @@ export async function securitiesForTickers(deps: Deps, tenant: Tenant, currency:
   return { byTicker, statements, created: missing.length };
 }
 
-/**
- * Check a download against what Wattle knows and queue the jobs writing it.
- * Throws a 409 listing what's wrong (nothing written) when it doesn't check out.
- */
-export async function importHoldingsHistory(
-  deps: Deps,
-  tenant: Tenant,
-  account: typeof accounts.$inferSelect,
-  file: ImportedHoldings,
-): Promise<{ days: number; from: IsoDate; to: IsoDate; newSecurities: number }> {
-  const unknown = [...new Set(file.transactions.map((txn) => txn.type.toLowerCase()))].filter((type) => !KNOWN_TYPES.has(type));
-  if (unknown.length > 0) throw new HttpError(409, `The file has transaction types Wattle doesn't understand yet: ${unknown.join(', ')}. Nothing was imported.`);
+/** An account to import into: yours, and not hidden. */
+async function importTarget(tenant: Tenant, accountId: string): Promise<Account> {
+  const [account] = await tenant.db.select().from(accounts).where(tenant.scope(accounts, eq(accounts.id, accountId)));
+  if (!account) notFound('Account not found.');
+  if (account.isHidden) throw new HttpError(409, 'Un-hide the account before importing into it.');
+  return account;
+}
 
-  // The account's cash: its cash security (a money market settlement fund, or Plaid's CUR:USD).
+async function isMember(tenant: Tenant, userId: string): Promise<boolean> {
+  const [row] = await tenant.db
+    .select({ userId: householdMembers.userId })
+    .from(householdMembers)
+    .where(and(eq(householdMembers.householdId, tenant.householdId), eq(householdMembers.userId, userId)));
+  return Boolean(row);
+}
+
+/** What phase 1 decided for one account: written in phase 2, once every account has checked out. */
+interface Plan {
+  label: string;
+  account: Account;
+  created: boolean;
+  /** Written together: the new account, its securities' prices, the holdings it now has. */
+  statements: BatchItem<'sqlite'>[];
+  /** An existing manual account whose holdings are replaced: under its lease. */
+  replacesHoldings: boolean;
+  blocks: BlockPayload[];
+  balances?: { date: string; balance: number }[];
+  /** Market funds priced from the file, without closes. */
+  estimated?: string[];
+  days: number;
+  from: IsoDate;
+  to: IsoDate;
+}
+
+/**
+ * Check every account in an import, then write them all. Throws a 409
+ * listing what's wrong, by account, when any doesn't check out (nothing
+ * written).
+ */
+export async function importAccounts(deps: Deps, tenant: Tenant, request: ImportRequest): Promise<ImportResponse> {
+  const today = marketDate(deps.now());
+  const now = deps.now().getTime();
+  const problems: string[] = [];
+  const problem = (label: string, text: string) => problems.push(`${label}: ${text}`);
+
+  // The accounts: yours, or new manual ones (inserted with the rest in phase 2).
+  const targets: { entry: ImportRequest['accounts'][number]; account: Account; created: boolean }[] = [];
+  const seen = new Set<string>();
+  for (const entry of request.accounts) {
+    let account: Account;
+    let created = false;
+    if ('accountId' in entry.target) {
+      account = await importTarget(tenant, entry.target.accountId);
+      if (seen.has(account.id)) problem(entry.label, `${account.name} is chosen for another account in the files too`);
+      seen.add(account.id);
+    } else {
+      const fresh = entry.target.new;
+      created = true;
+      if (fresh.ownerUserId && !(await isMember(tenant, fresh.ownerUserId))) throw new HttpError(400, 'Owner must be a household member.');
+      account = {
+        id: crypto.randomUUID(),
+        householdId: tenant.householdId,
+        source: 'manual',
+        connectionId: null,
+        externalId: null,
+        name: fresh.name,
+        plaidName: null,
+        officialName: null,
+        institutionName: fresh.institutionName ?? null,
+        mask: fresh.mask ?? null,
+        type: fresh.type,
+        subtype: null,
+        currency: fresh.currency,
+        ownerUserId: fresh.ownerUserId ?? null,
+        isHidden: false,
+        category: null,
+        balance: null,
+        balanceAsOf: null,
+        missingSince: null,
+        sort: 0,
+        holdingsVersion: entry.file.kind === 'holdings' ? 1 : 0,
+        createdAt: now,
+      };
+    }
+    if (entry.file.kind === 'holdings') {
+      if (account.type !== 'investment') problem(entry.label, `holdings go in an investment account, and ${account.name} isn't one`);
+      if (entry.file.currency && entry.file.currency !== account.currency) problem(entry.label, `the file is in ${entry.file.currency} but ${account.name} is in ${account.currency}`);
+    }
+    targets.push({ entry, account, created });
+  }
+  stop(problems);
+
+  // Securities: the household's, by ticker (adding market ones it doesn't have), or private ones for funds with no ticker.
+  const holdingEntries = targets.filter((target): target is typeof target & { entry: { file: ImportedHoldings } } => target.entry.file.kind === 'holdings');
   const securityRows = await tenant.db
     .select({ id: securities.id, ticker: securities.ticker, type: securities.type, isPublic: securities.isPublic })
     .from(securities)
     .where(tenant.scope(securities));
   const cashTickers = new Set(securityRows.filter((row) => row.ticker && isCashSecurity(row)).map((row) => row.ticker!.toUpperCase()));
-  const isCash = (ticker: string | null) => ticker === null || cashTickers.has(ticker.toUpperCase());
-  const held = await tenant.db
-    .select({ securityId: holdings.securityId, type: securities.type, ticker: securities.ticker })
-    .from(holdings)
-    .innerJoin(securities, eq(securities.id, holdings.securityId))
-    .where(tenant.scope(holdings, eq(holdings.accountId, account.id)));
-  const statements: BatchItem<'sqlite'>[] = [];
-  let cashSecurityId = held.find((row) => isCashSecurity(row))?.securityId;
+  const cashIds = new Set(securityRows.filter((row) => isCashSecurity(row)).map((row) => row.id));
+  const privateIds = new Set(securityRows.filter((row) => !row.isPublic).map((row) => row.id));
+  const shared: BatchItem<'sqlite'>[] = [];
+  const byTicker = new Map<string, string>();
+  const tickersByCurrency = new Map<string, string[]>();
+  for (const { entry, account } of holdingEntries) {
+    for (const security of entry.file.securities) {
+      if (security.ticker && !cashTickers.has(security.ticker.toUpperCase())) (tickersByCurrency.get(account.currency) ?? tickersByCurrency.set(account.currency, []).get(account.currency)!).push(security.ticker);
+    }
+  }
+  for (const [currency, tickers] of tickersByCurrency) {
+    const found = await securitiesForTickers(deps, tenant, currency, tickers);
+    shared.push(...found.statements);
+    for (const [ticker, id] of found.byTicker) byTicker.set(ticker, id);
+  }
+  for (const row of securityRows) if (row.ticker && !byTicker.has(row.ticker.toUpperCase())) byTicker.set(row.ticker.toUpperCase(), row.id);
+  // Market prices for the market funds in the files, fetched once.
+  const fileTickers = new Set(holdingEntries.flatMap(({ entry }) => entry.file.securities.flatMap((security) => (security.ticker ? [security.ticker.toUpperCase()] : []))));
+  const marketTickers = [...fileTickers].filter((ticker) => byTicker.has(ticker) && !cashTickers.has(ticker) && !privateIds.has(byTicker.get(ticker)!));
+  const earliest = holdingEntries.flatMap(({ entry }) => entry.file.transactions.map((txn) => txn.date)).sort()[0];
+  let closes: (ticker: string, date: IsoDate) => number | null = () => null;
+  let unfetched = new Set<string>();
+  if (earliest && marketTickers.length > 0) {
+    // Those it couldn't fetch (the provider down or rate-limited) are priced from the file instead, as estimates.
+    unfetched = new Set((await ensureCloses(deps, marketTickers, earliest, today)).failed);
+    closes = await closeLookup(deps, marketTickers, addDays(earliest, -PRICE_LOOKBACK_DAYS), today);
+  }
+  // Priced at each day's close: fetched, and known to the market data provider (else from the file, like a fund with no ticker).
+  const hasCloses = new Set(marketTickers.filter((ticker) => !unfetched.has(ticker) && closes(ticker, today) !== null));
+
+  const plans: Plan[] = [];
+  for (const target of targets) {
+    const { entry, account, created } = target;
+    const base = { label: entry.label, account, created, statements: [] as BatchItem<'sqlite'>[], replacesHoldings: false, blocks: [] as BlockPayload[] };
+    if (created) base.statements.push(tenant.db.insert(accounts).values(account));
+    if (entry.file.kind === 'balances') {
+      const dates = entry.file.rows.map((row) => row.date).sort();
+      plans.push({ ...base, balances: entry.file.rows, days: dateRange(dates[0], dates.at(-1)!).length, from: dates[0], to: dates.at(-1)! });
+      continue;
+    }
+    const plan = await planHoldings(deps, tenant, { ...base, file: entry.file, today, now, cashIds, byTicker, hasCloses, closes, problem: (text) => problem(entry.label, text) });
+    if (plan) plans.push(plan);
+  }
+  stop(problems);
+
+  // Checked: write each account, then queue its days.
+  if (shared.length > 0) await runAtomic(tenant.db, shared);
+  const results: ImportedAccount[] = [];
+  let snapshot = false;
+  for (const plan of plans) {
+    if (plan.statements.length > 0) {
+      const lease = plan.replacesHoldings ? await Lease.acquireOrBusy(deps, tenant, accountLease(plan.account.id), 'Someone else is changing this account. Try again in a moment.') : null;
+      try {
+        if (plan.replacesHoldings) {
+          const [current] = await tenant.db.select({ holdingsVersion: accounts.holdingsVersion }).from(accounts).where(tenant.scope(accounts, eq(accounts.id, plan.account.id)));
+          plan.statements.push(tenant.db.update(accounts).set({ holdingsVersion: (current?.holdingsVersion ?? 0) + 1 }).where(tenant.scope(accounts, eq(accounts.id, plan.account.id))));
+        }
+        await lease?.renew();
+        await runAtomic(tenant.db, plan.statements);
+      } finally {
+        await lease?.forceRelease();
+      }
+    }
+    if (plan.balances) {
+      plan.days = await writeBalances(deps, tenant, plan.account, plan.balances, 'import');
+    } else {
+      const runId = crypto.randomUUID();
+      await enqueue(
+        deps,
+        tenant,
+        plan.blocks.map((block) => ({ id: `import:${runId}:block:${block.from}`, type: 'import_block' as const, payload: { ...block }, groupId: `import:${runId}`, connectionId: plan.account.connectionId })),
+      );
+      snapshot ||= plan.account.source === 'manual';
+    }
+    results.push({ label: plan.label, accountId: plan.account.id, created: plan.created, days: plan.days, from: plan.from, to: plan.to, estimated: plan.estimated ?? [] });
+  }
+  // A manual account's holdings changed: today's value follows them.
+  if (snapshot) await snapshotHousehold(deps, tenant, today);
+  return { accounts: results };
+}
+
+function stop(problems: string[]) {
+  if (problems.length === 0) return;
+  const listed = problems.slice(0, MAX_PROBLEMS).join('; ');
+  throw new HttpError(409, `Nothing was imported: ${listed}${problems.length > MAX_PROBLEMS ? ` (and ${problems.length - MAX_PROBLEMS} more)` : ''}.`);
+}
+
+interface HoldingsContext {
+  label: string;
+  account: Account;
+  created: boolean;
+  statements: BatchItem<'sqlite'>[];
+  replacesHoldings: boolean;
+  blocks: BlockPayload[];
+  file: ImportedHoldings;
+  today: IsoDate;
+  now: number;
+  cashIds: Set<string>;
+  byTicker: Map<string, string>;
+  hasCloses: Set<string>;
+  closes: (ticker: string, date: IsoDate) => number | null;
+  problem: (text: string) => void;
+}
+
+/** Check one account's holdings file and plan its writes; null (with problems noted) when it doesn't check out. */
+async function planHoldings(deps: Deps, tenant: Tenant, context: HoldingsContext): Promise<Plan | null> {
+  const { account, file, today, now, cashIds, byTicker, hasCloses, closes } = context;
+  const manual = account.source === 'manual';
+  let failed = false;
+  const problem = (text: string) => {
+    failed = true;
+    context.problem(text);
+  };
+
+  // Each of the file's securities as one of the household's.
+  const fileSecurities = new Map(file.securities.map((security) => [security.id, security]));
+  const securityOf = new Map<string, string>();
+  const nameOf = new Map<string, string>();
+  const filePriced = new Set<string>();
+  const tickerOf = new Map<string, string>();
+  for (const id of new Set([...file.positions.map((row) => row.security), ...file.transactions.flatMap((txn) => (txn.security ? [txn.security] : []))])) {
+    const security = fileSecurities.get(id);
+    const ticker = security?.ticker?.toUpperCase();
+    const known = ticker ? byTicker.get(ticker) : undefined;
+    if (known) {
+      securityOf.set(id, known);
+      tickerOf.set(known, ticker!);
+      if (!cashIds.has(known) && !hasCloses.has(ticker!)) filePriced.add(known);
+    } else {
+      // No market ticker: the file's id for it (a CUSIP) stands in.
+      const securityId = await stableId(`security:import:${tenant.householdId}:${id}`);
+      const name = security?.name ?? id;
+      const suggestion = suggestClassification({ ticker: id, name, type: 'mutual fund', currency: account.currency });
+      context.statements.push(
+        tenant.db
+          .insert(securities)
+          .values({
+            id: securityId,
+            householdId: tenant.householdId,
+            ticker: id,
+            name,
+            type: 'mutual fund',
+            currency: account.currency,
+            isPublic: false,
+            classification: suggestion.classification,
+            classificationSource: suggestion.source,
+            needsReview: suggestion.needsReview,
+            createdAt: now,
+          })
+          // Keep a classification you've set; follow the file's name.
+          .onConflictDoUpdate({ target: securities.id, set: { name } }),
+      );
+      securityOf.set(id, securityId);
+      filePriced.add(securityId);
+    }
+    nameOf.set(securityOf.get(id)!, security?.name ?? id);
+  }
+  const describe = (securityId: string) => tickerOf.get(securityId) ?? nameOf.get(securityId) ?? 'a holding';
+  // Market funds without closes for now: re-importing once they can be fetched prices them at each day's close.
+  const estimated = [...filePriced].flatMap((id) => (tickerOf.has(id) ? [tickerOf.get(id)!] : [])).sort();
+  const isCash = (securityId: string | null) => securityId === null || cashIds.has(securityId);
+
+  // The account's cash: the cash security it holds (a settlement fund, or Plaid's CUR:USD), else one for its currency.
+  const held = context.created
+    ? []
+    : await tenant.db
+        .select({ securityId: holdings.securityId, type: securities.type, ticker: securities.ticker })
+        .from(holdings)
+        .innerJoin(securities, eq(securities.id, holdings.securityId))
+        .where(tenant.scope(holdings, eq(holdings.accountId, account.id)));
+  let cashSecurityId = held.find((row) => isCashSecurity(row))?.securityId ?? file.positions.map((row) => securityOf.get(row.security)!).find((id) => cashIds.has(id));
   if (!cashSecurityId) {
     cashSecurityId = await stableId(`security:manual:${tenant.householdId}:CUR:${account.currency}`);
-    statements.push(
+    context.statements.push(
       tenant.db
         .insert(securities)
         .values({
@@ -210,233 +437,154 @@ export async function importHoldingsHistory(
           classification: { categories: { cash: 1 } },
           classificationSource: 'heuristic',
           needsReview: false,
-          createdAt: deps.now().getTime(),
+          createdAt: now,
         })
         .onConflictDoNothing(),
     );
   }
 
-  const tickers = [...file.positions, ...file.transactions].flatMap((row) => (row.ticker && !isCash(row.ticker) ? [row.ticker.toUpperCase()] : []));
-  const found = await securitiesForTickers(deps, tenant, account.currency, tickers);
-  statements.push(...found.statements);
-  const securityOf = (ticker: string) => found.byTicker.get(ticker.toUpperCase())!;
-
   // Positions and transactions as the walk back takes them: shares per security, cash in cents (positive out).
-  const cashUnits = file.positions.filter((row) => isCash(row.ticker)).reduce((sum, row) => sum + row.shares, 0);
-  const holdingsNow: BackfillHolding[] = [
-    ...file.positions.filter((row) => !isCash(row.ticker)).map((row) => ({ securityId: securityOf(row.ticker!), quantity: row.shares })),
-    { securityId: cashSecurityId, quantity: cashUnits },
-  ];
+  const positions = file.positions.map((row) => ({ ...row, securityId: securityOf.get(row.security)! }));
+  const cashUnits = file.cash / 100 + positions.filter((row) => isCash(row.securityId)).reduce((sum, row) => sum + row.shares, 0);
+  const holdingsNow: BackfillHolding[] = [...positions.filter((row) => !isCash(row.securityId)).map((row) => ({ securityId: row.securityId, quantity: row.shares })), { securityId: cashSecurityId, quantity: cashUnits }];
+  // An account holding no cash and moving none (a 401(k)): contributions and fees buy and sell its funds directly.
+  const cashless = cashUnits === 0 && !file.transactions.some((txn) => CASH_KINDS.has(txn.kind) || (txn.security && isCash(securityOf.get(txn.security)!)));
   const transactions: BackfillTransaction[] = file.transactions.flatMap((txn) => {
-    const type = txn.type.toLowerCase();
-    const cash = isCash(txn.ticker);
-    const cashIn = SWEEPS.has(type) || (cash && CASH_FUND_TRADES.has(type)) ? 0 : type === 'fee' ? -Math.abs(txn.amount) : txn.amount;
-    const quantity = cash ? 0 : txn.shares;
+    const securityId = txn.security ? securityOf.get(txn.security)! : null;
+    const cash = isCash(securityId);
+    const quantity = !cash && SHARE_KINDS.has(txn.kind) ? txn.shares : 0;
+    // Between the account's cash and a money market fund, or a sweep: both cash, so cash doesn't change.
+    const cashIn = cashless || txn.kind === 'sweep' || (cash && SHARE_KINDS.has(txn.kind)) ? 0 : txn.kind === 'fee' ? -Math.abs(txn.amount) : txn.amount;
     if (quantity === 0 && cashIn === 0) return [];
-    return [{ date: txn.date, securityId: cash ? null : securityOf(txn.ticker!), quantity, amount: -cashIn }];
+    return [{ date: txn.date, securityId: cash ? null : securityId, quantity, amount: -cashIn }];
   });
 
-  const today = marketDate(deps.now());
-  const start = transactions.map((txn) => txn.date).sort()[0];
-  const [first] = await tenant.db
-    .select({ date: min(accountDaily.date) })
-    .from(accountDaily)
-    .where(tenant.scope(accountDaily, eq(accountDaily.accountId, account.id), eq(accountDaily.source, 'snapshot')));
-  const firstSynced = first?.date ?? null;
-  const cutoff = firstSynced ? addDays(firstSynced, -1) : addDays(today, -1);
-  if (!start || cutoff < start) throw new HttpError(409, 'The file has no days before Wattle started syncing this account. Nothing was imported.');
+  // Walking back from the positions, no fund can have held fewer than none.
+  const quantities = new Map(holdingsNow.map((row) => [row.securityId, row.quantity]));
+  const short = new Set<string>();
+  for (const txn of [...transactions].sort((a, b) => b.date.localeCompare(a.date))) {
+    if (!txn.securityId || txn.quantity === 0) continue;
+    const earlier = (quantities.get(txn.securityId) ?? 0) - txn.quantity;
+    quantities.set(txn.securityId, earlier);
+    if (earlier < -SHARES_EPSILON && !short.has(txn.securityId)) {
+      short.add(txn.securityId);
+      problem(`before ${txn.date}, ${describe(txn.securityId)} would have ${earlier.toFixed(4)} shares`);
+    }
+  }
+  for (const txn of file.transactions) {
+    const securityId = txn.security ? securityOf.get(txn.security)! : null;
+    if (!securityId || isCash(securityId) || txn.price <= 0) continue;
+    // Priced from the file: each total must be its shares × price.
+    if (filePriced.has(securityId) && PRICED_KINDS.has(txn.kind) && txn.value > 0) {
+      const worth = Math.round(Math.abs(txn.shares) * txn.price * 100);
+      if (Math.abs(txn.value - worth) > txn.charges + 1 + Math.ceil(SHARE_ROUNDING * txn.price * 100)) problem(`on ${txn.date}, ${describe(securityId)} shows ${txn.value / 100} for ${Math.abs(txn.shares)} shares at ${txn.price}`);
+    }
+    // A market fund: each buy or sell near that day's close.
+    const ticker = tickerOf.get(securityId);
+    if (ticker && hasCloses.has(ticker) && TRADES.has(txn.kind)) {
+      const close = closes(ticker, txn.date);
+      if (close && Math.abs(txn.price - close) / close > PRICE_TOLERANCE) problem(`on ${txn.date}, ${ticker} traded at ${txn.price} but closed at ${close}`);
+    }
+  }
 
-  const problems: string[] = [];
-  const priced = [...new Set(holdingsNow.map((row) => row.securityId).concat(transactions.flatMap((txn) => (txn.securityId ? [txn.securityId] : []))))];
-  const priceTickers = securityRows.filter((row) => priced.includes(row.id) && row.isPublic && row.ticker).map((row) => row.ticker!);
-  // New securities aren't in securityRows yet: they're all public tickers.
-  const newTickers = [...found.byTicker.entries()].filter(([, id]) => !securityRows.some((row) => row.id === id)).map(([ticker]) => ticker);
-  const gaps = await ensureCloses(deps, [...priceTickers, ...newTickers], start, today);
-  if (gaps.failed.length > 0 || gaps.rateLimited) throw new HttpError(409, `Prices couldn't be fetched${gaps.failed.length > 0 ? ` for ${gaps.failed.join(', ')}` : ''}. Try again later; nothing was imported.`);
-
-  const tickerOf = new Map([...found.byTicker.entries()].map(([ticker, id]) => [id, ticker]));
-  // (a) Since the link: the walk reaches the share counts actually synced.
-  if (firstSynced) {
-    const walked = reconstructHistory({ start, end: today, emitFrom: firstSynced, emitTo: today, holdings: holdingsNow, transactions, cashSecurityId, allowNegativeCash: true, price: () => ({ price: 1, source: 'close' }) });
-    const synced = await tenant.db
-      .select({ date: holdingDaily.date, securityId: holdingDaily.securityId, quantity: holdingDaily.quantity })
-      .from(holdingDaily)
-      .where(tenant.scope(holdingDaily, eq(holdingDaily.accountId, account.id), eq(holdingDaily.source, 'snapshot'), gte(holdingDaily.date, firstSynced)));
-    for (const day of walked) {
-      const actual = synced.filter((row) => row.date === day.date);
-      if (actual.length === 0) continue;
-      const ids = new Set([...actual.map((row) => row.securityId), ...day.positions.map((position) => position.securityId)]);
-      for (const id of ids) {
-        const fromFile = day.positions.find((position) => position.securityId === id)?.quantity ?? 0;
-        const fromSync = actual.find((row) => row.securityId === id)?.quantity ?? 0;
-        if (Math.abs(fromFile - fromSync) > 0.001) problems.push(`on ${day.date}, ${id === cashSecurityId ? 'cash' : (tickerOf.get(id) ?? 'a holding')} is ${fromFile} in the file but ${fromSync} synced`);
+  // Which days are written: a linked account's up to its first synced day, a manual account's through today.
+  const start = file.transactions.map((txn) => txn.date).sort()[0];
+  let end = today;
+  if (!manual) {
+    const [first] = await tenant.db
+      .select({ date: min(accountDaily.date) })
+      .from(accountDaily)
+      .where(tenant.scope(accountDaily, eq(accountDaily.accountId, account.id), eq(accountDaily.source, 'snapshot')));
+    const firstSynced = first?.date ?? null;
+    end = firstSynced ? addDays(firstSynced, -1) : addDays(today, -1);
+    if (end < start) problem('the file has no days before Wattle started syncing this account');
+    // Since the link: the walk reaches the share counts actually synced.
+    if (firstSynced) {
+      const walked = reconstructHistory({ start, end: today, emitFrom: firstSynced, emitTo: today, holdings: holdingsNow, transactions, cashSecurityId, allowNegativeCash: true, price: () => ({ price: 1, source: 'close' }) });
+      const synced = await tenant.db
+        .select({ date: holdingDaily.date, securityId: holdingDaily.securityId, quantity: holdingDaily.quantity })
+        .from(holdingDaily)
+        .where(tenant.scope(holdingDaily, eq(holdingDaily.accountId, account.id), eq(holdingDaily.source, 'snapshot'), gte(holdingDaily.date, firstSynced)));
+      for (const day of walked) {
+        const actual = synced.filter((row) => row.date === day.date);
+        if (actual.length === 0) continue;
+        const ids = new Set([...actual.map((row) => row.securityId), ...day.positions.map((position) => position.securityId)]);
+        for (const id of ids) {
+          const fromFile = day.positions.find((position) => position.securityId === id)?.quantity ?? 0;
+          const fromSync = actual.find((row) => row.securityId === id)?.quantity ?? 0;
+          if (Math.abs(fromFile - fromSync) > SHARES_EPSILON) problem(`on ${day.date}, ${id === cashSecurityId ? 'cash' : describe(id)} is ${fromFile} in the file but ${fromSync} synced`);
+        }
       }
     }
   }
-  // (b) Each trade's price is close to that day's close.
-  const closes = await closeLookup(deps, [...priceTickers, ...newTickers], addDays(start, -PRICE_LOOKBACK_DAYS), today);
-  for (const txn of file.transactions) {
-    if (!txn.ticker || isCash(txn.ticker) || !TRADES.has(txn.type.toLowerCase()) || txn.price <= 0) continue;
-    const close = closes(txn.ticker.toUpperCase(), txn.date);
-    if (close && Math.abs(txn.price - close) / close > PRICE_TOLERANCE) problems.push(`on ${txn.date}, ${txn.ticker} traded at ${txn.price} but closed at ${close}`);
-  }
-  if (problems.length > 0) {
-    const listed = problems.slice(0, MAX_PROBLEMS).join('; ');
-    throw new HttpError(409, `The file doesn't match what's known about this account: ${listed}${problems.length > MAX_PROBLEMS ? ` (and ${problems.length - MAX_PROBLEMS} more)` : ''}. Nothing was imported.`);
-  }
+  if (failed) return null;
 
-  // Checked: add any new securities, then write the days as jobs, one window each.
-  if (statements.length > 0) await runAtomic(tenant.db, statements);
-  const runId = crypto.randomUUID();
-  const size = daysPerBlock(deps, priced.length);
-  await enqueue(
-    deps,
-    tenant,
-    windows(start, cutoff, size).map(([from, to]) => {
-      const block: BlockPayload = { accountId: account.id, start, end: today, from, to, holdings: holdingsNow, transactions, cashSecurityId };
-      return { id: `import:${runId}:block:${from}`, type: 'import_block' as const, payload: { ...block }, connectionId: account.connectionId };
-    }),
-  );
-  return { days: dateRange(start, cutoff).length, from: start, to: cutoff, newSecurities: found.created };
-}
-
-/**
- * A manual account's holdings history from its investment statements
- * (OFX/QFX): each day's shares from walking back from the positions through
- * the transactions, priced from the statements' own prices (the funds, e.g. a
- * 401(k)'s collective trusts, have no market prices), written as imported up
- * to today, and the positions become the account's holdings. Checked first:
- * no fund may go below zero, and each total must be its shares × price.
- */
-export async function importFundHistory(
-  deps: Deps,
-  tenant: Tenant,
-  account: typeof accounts.$inferSelect,
-  file: FundHistory,
-): Promise<{ days: number; from: IsoDate; to: IsoDate; funds: number }> {
-  if (account.source !== 'manual') throw new HttpError(409, "Statements import into a manual account: a linked account's holdings come from the institution.");
-  if (file.currency !== account.currency) throw new HttpError(409, `The statements are in ${file.currency} but the account is in ${account.currency}. Nothing was imported.`);
-  const names = new Map(file.funds.map((fund) => [fund.id, fund.name]));
-  const ids = [...new Set([...file.positions.map((row) => row.fund), ...file.transactions.map((txn) => txn.fund)])];
-  const securityOf = new Map<string, string>();
-  for (const fund of ids) securityOf.set(fund, await stableId(`security:statement:${tenant.householdId}:${fund}`));
-  const nameOf = (fund: string) => names.get(fund) ?? fund;
-
-  const problems: string[] = [];
-  for (const txn of file.transactions) {
-    const value = Math.round(Math.abs(txn.shares) * txn.price * 100);
-    if (Math.abs(txn.amount - value) > txn.charges + 1 + Math.ceil(SHARE_ROUNDING * txn.price * 100)) {
-      problems.push(`on ${txn.date}, ${nameOf(txn.fund)} shows ${txn.amount / 100} for ${Math.abs(txn.shares)} shares at ${txn.price}`);
-    }
-  }
-  // Walking back from the positions, no fund can have held fewer than none.
-  const held = new Map(file.positions.map((row) => [row.fund, row.shares]));
-  const newestFirst = [...file.transactions].sort((a, b) => b.date.localeCompare(a.date));
-  for (const txn of newestFirst) {
-    const before = (held.get(txn.fund) ?? 0) - txn.shares;
-    held.set(txn.fund, before);
-    if (before < -0.0001 && !problems.some((problem) => problem.includes(nameOf(txn.fund)))) problems.push(`before ${txn.date}, ${nameOf(txn.fund)} would have ${before.toFixed(4)} shares`);
-  }
-  if (problems.length > 0) {
-    const listed = problems.slice(0, MAX_PROBLEMS).join('; ');
-    throw new HttpError(409, `The statements don't add up: ${listed}${problems.length > MAX_PROBLEMS ? ` (and ${problems.length - MAX_PROBLEMS} more)` : ''}. Nothing was imported.`);
-  }
-
-  // The institution's prices by day, per fund: each transaction's, and the positions' on the day they're as of.
+  // The institution's prices by day, for funds priced from the file: each trade's, and the positions' on the day they're as of.
   const prices: Record<string, [IsoDate, number][]> = {};
-  const addPrice = (fund: string, date: IsoDate, price: number) => {
-    if (price <= 0) return;
-    const points = (prices[securityOf.get(fund)!] ??= []);
+  const addPrice = (securityId: string, date: IsoDate, price: number | undefined) => {
+    if (!filePriced.has(securityId) || !price || price <= 0) return;
+    const points = (prices[securityId] ??= []);
     if (!points.some(([day]) => day === date)) points.push([date, price]);
   };
-  for (const txn of file.transactions) addPrice(txn.fund, txn.date, txn.price);
-  for (const row of file.positions) addPrice(row.fund, file.asOf, row.price);
+  for (const txn of file.transactions) if (txn.security) addPrice(securityOf.get(txn.security)!, txn.date, txn.price);
+  for (const row of positions) addPrice(row.securityId, file.asOf, row.price);
   for (const points of Object.values(prices)) points.sort((a, b) => a[0].localeCompare(b[0]));
 
-  const now = deps.now().getTime();
-  const statements: BatchItem<'sqlite'>[] = [];
-  for (const fund of ids) {
-    const suggestion = suggestClassification({ ticker: fund, name: nameOf(fund), type: 'mutual fund', currency: account.currency });
-    statements.push(
-      tenant.db
-        .insert(securities)
-        .values({
-          id: securityOf.get(fund)!,
-          householdId: tenant.householdId,
-          // The statement's id for it (a CUSIP): there's no exchange ticker.
-          ticker: fund,
-          name: nameOf(fund),
-          type: 'mutual fund',
-          currency: account.currency,
-          isPublic: false,
-          classification: suggestion.classification,
-          classificationSource: suggestion.source,
-          needsReview: suggestion.needsReview,
-          createdAt: now,
-        })
-        // Keep a classification you've set; follow the statement's name.
-        .onConflictDoUpdate({ target: securities.id, set: { name: nameOf(fund) } }),
-    );
-  }
-  for (const row of file.positions) {
-    statements.push(
-      tenant.db
-        .update(securities)
-        .set({ lastPrice: row.price, lastPriceDate: file.asOf })
-        .where(tenant.scope(securities, eq(securities.id, securityOf.get(row.fund)!))),
-    );
-  }
-
-  const today = marketDate(deps.now());
-  const start = file.transactions.map((txn) => txn.date).sort()[0];
-  const cashSecurityId = await stableId(`security:manual:${tenant.householdId}:CUR:${account.currency}`);
-  const holdingsNow: BackfillHolding[] = [...file.positions.map((row) => ({ securityId: securityOf.get(row.fund)!, quantity: row.shares })), { securityId: cashSecurityId, quantity: 0 }];
-  // Shares only: a 401(k)'s contributions and fees buy and sell fund shares directly.
-  const transactions: BackfillTransaction[] = file.transactions.map((txn) => ({ date: txn.date, securityId: securityOf.get(txn.fund)!, quantity: txn.shares, amount: 0 }));
-
-  const lease = await Lease.acquireOrBusy(deps, tenant, accountLease(account.id), 'Someone else is changing this account. Try again in a moment.');
-  try {
-    const [current] = await tenant.db.select({ holdingsVersion: accounts.holdingsVersion }).from(accounts).where(tenant.scope(accounts, eq(accounts.id, account.id)));
-    statements.push(
-      // The positions are the account's holdings now.
-      tenant.db.delete(holdings).where(tenant.scope(holdings, eq(holdings.accountId, account.id))),
+  if (manual) {
+    // The positions are the account's holdings now; a fund without market prices carries the file's last price.
+    for (const row of positions) {
+      if (row.price !== undefined && filePriced.has(row.securityId) && !tickerOf.has(row.securityId)) {
+        context.statements.push(tenant.db.update(securities).set({ lastPrice: row.price, lastPriceDate: file.asOf }).where(tenant.scope(securities, eq(securities.id, row.securityId))));
+      }
+    }
+    const holdingRows = [
+      ...positions.filter((row) => !isCash(row.securityId)).map((row) => ({ securityId: row.securityId, quantity: row.shares, price: row.price ?? null })),
+      ...(cashUnits !== 0 ? [{ securityId: cashSecurityId, quantity: cashUnits, price: 1 }] : []),
+    ];
+    if (!context.created) context.statements.push(tenant.db.delete(holdings).where(tenant.scope(holdings, eq(holdings.accountId, account.id))));
+    context.statements.push(
       ...chunkRows(
         holdings,
-        file.positions.map((row) => ({
+        holdingRows.map((row) => ({
           householdId: tenant.householdId,
           accountId: account.id,
-          securityId: securityOf.get(row.fund)!,
-          quantity: row.shares,
+          securityId: row.securityId,
+          quantity: row.quantity,
           price: row.price,
-          priceAsOf: file.asOf,
-          value: Math.round(row.shares * row.price * 100),
+          priceAsOf: row.price === null ? null : file.asOf,
+          value: row.price === null ? 0 : Math.round(row.quantity * row.price * 100),
           currency: account.currency,
           updatedAt: now,
         })),
       ).map((chunk) => tenant.db.insert(holdings).values(chunk)),
-      tenant.db
-        .update(accounts)
-        .set({ holdingsVersion: (current?.holdingsVersion ?? 0) + 1 })
-        .where(tenant.scope(accounts, eq(accounts.id, account.id))),
     );
-    await lease.renew();
-    await runAtomic(tenant.db, statements);
-  } finally {
-    await lease.forceRelease();
   }
 
-  const runId = crypto.randomUUID();
-  const size = daysPerBlock(deps, ids.length);
-  await enqueue(
-    deps,
-    tenant,
-    windows(start, today, size).map(([from, to]) => {
-      const block: BlockPayload = { accountId: account.id, start, end: today, from, to, holdings: holdingsNow, transactions, cashSecurityId, prices, replaceSnapshots: true };
-      return { id: `import:${runId}:block:${from}`, type: 'import_block' as const, payload: { ...block }, connectionId: account.connectionId };
-    }),
-  );
-  await snapshotHousehold(deps, tenant, today);
-  return { days: dateRange(start, today).length, from: start, to: today, funds: file.positions.length };
+  const size = daysPerBlock(deps, holdingsNow.length);
+  const blocks = windows(start, end, size).map(([from, to]): BlockPayload => ({
+    accountId: account.id,
+    start,
+    end: today,
+    from,
+    to,
+    holdings: holdingsNow,
+    transactions,
+    cashSecurityId: cashSecurityId!,
+    ...(Object.keys(prices).length > 0 ? { prices } : {}),
+    ...(manual ? { replaceSnapshots: true } : {}),
+  }));
+  return {
+    label: context.label,
+    account,
+    created: context.created,
+    statements: context.statements,
+    replacesHoldings: manual && !context.created,
+    blocks,
+    days: dateRange(start, end).length,
+    from: start,
+    to: end,
+    estimated,
+  };
 }
 
 /** import_block: one window of an imported account's days, walked back and written as imported. */
@@ -536,4 +684,140 @@ export async function importBlock({ deps, tenant, job, renew }: JobContext): Pro
     await lease.forceRelease();
   }
   return { days: accountRows.length };
+}
+
+/**
+ * Queue repricing for accounts with imported days of market funds priced from
+ * the file (their closes couldn't be fetched when imported): nightly, once a
+ * day per account, until they're all at a close.
+ */
+export async function queueImportRepricing(deps: Deps, tenant: Tenant): Promise<number> {
+  const accountIds = [...new Set((await importedEstimates(tenant)).map((row) => row.accountId))];
+  const today = marketDate(deps.now());
+  await enqueue(
+    deps,
+    tenant,
+    accountIds.map((accountId) => ({ id: `import-reprice:${accountId}:${today}`, type: 'import_reprice' as const, payload: { accountId } })),
+  );
+  return accountIds.length;
+}
+
+/**
+ * import_reprice: an account's imported estimates at each day's close. First
+ * (no window) the closes are fetched, one request per ticker for the days
+ * missing (those still failing stay estimates for another night); then one
+ * job per window of days reprices them, moving each day's balance by the
+ * difference.
+ */
+export async function importReprice({ deps, tenant, job, renew }: JobContext): Promise<Record<string, unknown>> {
+  const { accountId, from, to } = job.payload as { accountId: string; from?: IsoDate; to?: IsoDate };
+  const [account] = await tenant.db.select().from(accounts).where(tenant.scope(accounts, eq(accounts.id, accountId)));
+  if (!account || account.isHidden) return { rows: 0 };
+  if (!from || !to) {
+    const rows = await importedEstimates(tenant, { accountId });
+    if (rows.length === 0) return { rows: 0 };
+    const tickers = [...new Set(rows.map((row) => row.ticker))];
+    const dates = rows.map((row) => row.date).sort();
+    const gaps = await ensureCloses(deps, tickers, dates[0], dates.at(-1)!);
+    const size = daysPerBlock(deps, tickers.length);
+    await enqueue(
+      deps,
+      tenant,
+      windows(dates[0], dates.at(-1)!, size).map(([blockFrom, blockTo]) => ({ id: `${job.id}:${blockFrom}`, type: 'import_reprice' as const, payload: { accountId, from: blockFrom, to: blockTo }, connectionId: account.connectionId })),
+    );
+    return { rows: rows.length, tickers: tickers.length, unfetched: gaps.failed.length };
+  }
+  const rows = await importedEstimates(tenant, { accountId, from, before: addDays(to, 1) });
+  if (rows.length === 0) return { rows: 0 };
+  const dated = await datedCloseLookup(deps, [...new Set(rows.map((row) => row.ticker))], addDays(from, -PRICE_LOOKBACK_DAYS), to);
+  const statements = repriced(tenant, rows, dated, ['import']);
+  if (statements.length === 0) return { rows: 0 };
+  const lease = await Lease.acquireWaiting(deps, tenant, account.connectionId ? connectionLease(account.connectionId) : accountLease(account.id));
+  if (!lease) throw new RetryLater(BUSY_RETRY_SECONDS, 'The account is busy.');
+  try {
+    await renew();
+    await lease.renew();
+    await runAtomic(tenant.db, statements);
+  } finally {
+    await lease.forceRelease();
+  }
+  return { rows: rows.length };
+}
+
+/** A security's name as compared across institutions: letters and digits only ("Example Corp, Inc." is "examplecorpinc"). */
+const nameKey = (name: string) => name.toLowerCase().replace(/[^a-z0-9]/g, '');
+/** Searches made at most per request, so a long list doesn't spend the market data provider's allowance. */
+const MAX_SEARCHES = 25;
+
+
+/**
+ * Tickers for securities a file names without one (some institutions give a
+ * security no longer held only its CUSIP): a security of yours with the same
+ * name first, else the market data provider's search by name, taking a US
+ * listing whose name is the file's or starts the same (the shortest ticker
+ * of several). Funds with no market
+ * price (a plan's trusts) get none.
+ */
+export async function suggestTickers(deps: Deps, tenant: Tenant, wanted: { id: string; name: string }[]): Promise<TickerSuggestion[]> {
+  const rows = await tenant.db.select({ ticker: securities.ticker, name: securities.name, type: securities.type, isPublic: securities.isPublic }).from(securities).where(tenant.scope(securities));
+  const yours = new Map(rows.filter((row) => row.isPublic && row.ticker && row.name && !isCashSecurity(row)).map((row) => [nameKey(row.name!), row.ticker!.toUpperCase()]));
+  const suggestions: TickerSuggestion[] = [];
+  let searches = 0;
+  for (const { id, name } of wanted) {
+    const key = nameKey(name);
+    const own = yours.get(key);
+    if (own) {
+      suggestions.push({ id, ticker: own, from: 'yours' });
+      continue;
+    }
+    if (!deps.prices?.search || key.length < 4) continue;
+    // The whole name, then its first three words (a search can miss "Example Group Ltd Sponsored ADR" but find "Example Group Ltd").
+    const queries = [name, name.split(/\s+/).slice(0, 3).join(' ')].filter((query, index, all) => all.indexOf(query) === index);
+    let match: { ticker: string; name: string } | undefined;
+    for (const query of queries) {
+      if (match || searches >= MAX_SEARCHES) break;
+      searches += 1;
+      let found: { ticker: string; name: string }[];
+      try {
+        found = await deps.prices.search(query);
+      } catch (error) {
+        // Rate-limited or down: no more searches this time; the rest are typed by hand.
+        console.warn('Ticker search failed', describeError(error));
+        searches = MAX_SEARCHES;
+        break;
+      }
+      const named = found.filter((listing) => {
+        const listed = nameKey(listing.name);
+        return listed === key || (Math.min(listed.length, key.length) >= 6 && (listed.startsWith(key) || key.startsWith(listed)));
+      });
+      // Several listings under one name (a when-issued XYZV beside XYZ): the exact name, then the shortest ticker.
+      match = named.sort((a, b) => Number(nameKey(b.name) === key) - Number(nameKey(a.name) === key) || a.ticker.length - b.ticker.length)[0];
+    }
+    if (match) suggestions.push({ id, ticker: match.ticker, from: 'search' });
+  }
+  return suggestions;
+}
+
+/** Imports still being written, by account: how many of their windows of days are done. */
+export async function importProgress(tenant: Tenant): Promise<Map<string, { done: number; total: number }>> {
+  const underway = await tenant.db
+    .selectDistinct({ groupId: jobs.groupId })
+    .from(jobs)
+    .where(tenant.scope(jobs, eq(jobs.type, 'import_block'), inArray(jobs.status, ['waiting', 'queued', 'running'])));
+  const groups = underway.flatMap((row) => (row.groupId ? [row.groupId] : []));
+  const progress = new Map<string, { done: number; total: number }>();
+  if (groups.length === 0) return progress;
+  const parts = await tenant.db
+    .select({ payload: jobs.payload, status: jobs.status })
+    .from(jobs)
+    .where(tenant.scope(jobs, eq(jobs.type, 'import_block'), inArray(jobs.groupId, groups)));
+  for (const part of parts) {
+    const accountId = (part.payload as { accountId?: string }).accountId;
+    if (!accountId) continue;
+    const entry = progress.get(accountId) ?? { done: 0, total: 0 };
+    entry.total += 1;
+    if (part.status === 'done' || part.status === 'failed') entry.done += 1;
+    progress.set(accountId, entry);
+  }
+  return progress;
 }

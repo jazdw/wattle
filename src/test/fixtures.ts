@@ -46,6 +46,7 @@ export function account(overrides: Partial<AccountSummary>): AccountSummary {
     displayBalance: 0,
     holdingCount: 0,
     possibleDuplicateOf: null,
+    importProgress: null,
     ...overrides,
   };
 }
