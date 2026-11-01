@@ -26,13 +26,14 @@ import { accountDaily, accounts, holdingDaily, holdings, securities } from '../d
 import type { Tenant } from '../db/tenant';
 import { HttpError } from '../lib/http';
 import type { Deps } from '../ports';
-import { reconstructHistory, type BackfillHolding, type BackfillTransaction } from './backfillCore';
+import { reconstructHistory, type BackfillHolding, type BackfillTransaction, type PriceResult } from './backfillCore';
 import { BUSY_RETRY_SECONDS, daysPerBlock, PRICE_LOOKBACK_DAYS, windows } from './backfill';
 import { stableId } from './ids';
 import { enqueue, RetryLater, type JobContext } from './jobRunner';
 import { accountLease, connectionLease, Lease } from './lease';
 import { closeLookup, describeTickers, ensureCloses } from './pricing';
 import { QUALITY_SET, replaceWhere } from './quality';
+import { snapshotHousehold } from './snapshots';
 import { isCashSecurity, priceOn } from './valuation';
 
 /** Transaction types understood (lower case); any other rejects the file. */
@@ -87,6 +88,44 @@ interface BlockPayload {
   holdings: BackfillHolding[];
   transactions: BackfillTransaction[];
   cashSecurityId: string;
+  /** Funds with no market prices: the institution's prices by day, priced between them (fundPrice). */
+  prices?: Record<string, [IsoDate, number][]>;
+  /** A manual account: the file replaces its snapshot days too (there's no institution feed to keep). */
+  replaceSnapshots?: boolean;
+}
+
+/**
+ * Share counts in statements are rounded (to 3 decimals, or 4): a total may
+ * be off shares × price by half that rounding's worth of shares, plus a cent.
+ * A reinvested dividend's shares are rounded from the dividend, so it's off
+ * by a few cents.
+ */
+const SHARE_ROUNDING = 0.0005;
+
+export interface FundHistory {
+  asOf: IsoDate;
+  currency: string;
+  funds: { id: string; name: string }[];
+  positions: { fund: string; shares: number; price: number }[];
+  transactions: { date: IsoDate; type: string; fund: string; shares: number; price: number; amount: number; charges: number }[];
+}
+
+/**
+ * A fund's price on a day from the institution's prices on others (sorted by
+ * day): its own on a day it has one, else on a straight line between the
+ * nearest before and after, or the nearest one held beyond the first or last.
+ */
+export function fundPrice(points: [IsoDate, number][], date: IsoDate): PriceResult | null {
+  if (points.length === 0) return null;
+  let after = points.findIndex(([day]) => day >= date);
+  if (after === -1) after = points.length;
+  if (points[after]?.[0] === date) return { price: points[after][1], source: 'institution' };
+  const before = points[after - 1];
+  const next = points[after];
+  if (!before || !next) return { price: (before ?? next)[1], source: 'interpolated' };
+  const span = dateRange(before[0], next[0]).length - 1;
+  const into = dateRange(before[0], date).length - 1;
+  return { price: before[1] + ((next[1] - before[1]) * into) / span, source: 'interpolated' };
 }
 
 /**
@@ -261,6 +300,145 @@ export async function importHoldingsHistory(
   return { days: dateRange(start, cutoff).length, from: start, to: cutoff, newSecurities: found.created };
 }
 
+/**
+ * A manual account's holdings history from its investment statements
+ * (OFX/QFX): each day's shares from walking back from the positions through
+ * the transactions, priced from the statements' own prices (the funds, e.g. a
+ * 401(k)'s collective trusts, have no market prices), written as imported up
+ * to today, and the positions become the account's holdings. Checked first:
+ * no fund may go below zero, and each total must be its shares × price.
+ */
+export async function importFundHistory(
+  deps: Deps,
+  tenant: Tenant,
+  account: typeof accounts.$inferSelect,
+  file: FundHistory,
+): Promise<{ days: number; from: IsoDate; to: IsoDate; funds: number }> {
+  if (account.source !== 'manual') throw new HttpError(409, "Statements import into a manual account: a linked account's holdings come from the institution.");
+  if (file.currency !== account.currency) throw new HttpError(409, `The statements are in ${file.currency} but the account is in ${account.currency}. Nothing was imported.`);
+  const names = new Map(file.funds.map((fund) => [fund.id, fund.name]));
+  const ids = [...new Set([...file.positions.map((row) => row.fund), ...file.transactions.map((txn) => txn.fund)])];
+  const securityOf = new Map<string, string>();
+  for (const fund of ids) securityOf.set(fund, await stableId(`security:statement:${tenant.householdId}:${fund}`));
+  const nameOf = (fund: string) => names.get(fund) ?? fund;
+
+  const problems: string[] = [];
+  for (const txn of file.transactions) {
+    const value = Math.round(Math.abs(txn.shares) * txn.price * 100);
+    if (Math.abs(txn.amount - value) > txn.charges + 1 + Math.ceil(SHARE_ROUNDING * txn.price * 100)) {
+      problems.push(`on ${txn.date}, ${nameOf(txn.fund)} shows ${txn.amount / 100} for ${Math.abs(txn.shares)} shares at ${txn.price}`);
+    }
+  }
+  // Walking back from the positions, no fund can have held fewer than none.
+  const held = new Map(file.positions.map((row) => [row.fund, row.shares]));
+  const newestFirst = [...file.transactions].sort((a, b) => b.date.localeCompare(a.date));
+  for (const txn of newestFirst) {
+    const before = (held.get(txn.fund) ?? 0) - txn.shares;
+    held.set(txn.fund, before);
+    if (before < -0.0001 && !problems.some((problem) => problem.includes(nameOf(txn.fund)))) problems.push(`before ${txn.date}, ${nameOf(txn.fund)} would have ${before.toFixed(4)} shares`);
+  }
+  if (problems.length > 0) {
+    const listed = problems.slice(0, MAX_PROBLEMS).join('; ');
+    throw new HttpError(409, `The statements don't add up: ${listed}${problems.length > MAX_PROBLEMS ? ` (and ${problems.length - MAX_PROBLEMS} more)` : ''}. Nothing was imported.`);
+  }
+
+  // The institution's prices by day, per fund: each transaction's, and the positions' on the day they're as of.
+  const prices: Record<string, [IsoDate, number][]> = {};
+  const addPrice = (fund: string, date: IsoDate, price: number) => {
+    if (price <= 0) return;
+    const points = (prices[securityOf.get(fund)!] ??= []);
+    if (!points.some(([day]) => day === date)) points.push([date, price]);
+  };
+  for (const txn of file.transactions) addPrice(txn.fund, txn.date, txn.price);
+  for (const row of file.positions) addPrice(row.fund, file.asOf, row.price);
+  for (const points of Object.values(prices)) points.sort((a, b) => a[0].localeCompare(b[0]));
+
+  const now = deps.now().getTime();
+  const statements: BatchItem<'sqlite'>[] = [];
+  for (const fund of ids) {
+    const suggestion = suggestClassification({ ticker: fund, name: nameOf(fund), type: 'mutual fund', currency: account.currency });
+    statements.push(
+      tenant.db
+        .insert(securities)
+        .values({
+          id: securityOf.get(fund)!,
+          householdId: tenant.householdId,
+          // The statement's id for it (a CUSIP): there's no exchange ticker.
+          ticker: fund,
+          name: nameOf(fund),
+          type: 'mutual fund',
+          currency: account.currency,
+          isPublic: false,
+          classification: suggestion.classification,
+          classificationSource: suggestion.source,
+          needsReview: suggestion.needsReview,
+          createdAt: now,
+        })
+        // Keep a classification you've set; follow the statement's name.
+        .onConflictDoUpdate({ target: securities.id, set: { name: nameOf(fund) } }),
+    );
+  }
+  for (const row of file.positions) {
+    statements.push(
+      tenant.db
+        .update(securities)
+        .set({ lastPrice: row.price, lastPriceDate: file.asOf })
+        .where(tenant.scope(securities, eq(securities.id, securityOf.get(row.fund)!))),
+    );
+  }
+
+  const today = marketDate(deps.now());
+  const start = file.transactions.map((txn) => txn.date).sort()[0];
+  const cashSecurityId = await stableId(`security:manual:${tenant.householdId}:CUR:${account.currency}`);
+  const holdingsNow: BackfillHolding[] = [...file.positions.map((row) => ({ securityId: securityOf.get(row.fund)!, quantity: row.shares })), { securityId: cashSecurityId, quantity: 0 }];
+  // Shares only: a 401(k)'s contributions and fees buy and sell fund shares directly.
+  const transactions: BackfillTransaction[] = file.transactions.map((txn) => ({ date: txn.date, securityId: securityOf.get(txn.fund)!, quantity: txn.shares, amount: 0 }));
+
+  const lease = await Lease.acquireOrBusy(deps, tenant, accountLease(account.id), 'Someone else is changing this account. Try again in a moment.');
+  try {
+    const [current] = await tenant.db.select({ holdingsVersion: accounts.holdingsVersion }).from(accounts).where(tenant.scope(accounts, eq(accounts.id, account.id)));
+    statements.push(
+      // The positions are the account's holdings now.
+      tenant.db.delete(holdings).where(tenant.scope(holdings, eq(holdings.accountId, account.id))),
+      ...chunkRows(
+        holdings,
+        file.positions.map((row) => ({
+          householdId: tenant.householdId,
+          accountId: account.id,
+          securityId: securityOf.get(row.fund)!,
+          quantity: row.shares,
+          price: row.price,
+          priceAsOf: file.asOf,
+          value: Math.round(row.shares * row.price * 100),
+          currency: account.currency,
+          updatedAt: now,
+        })),
+      ).map((chunk) => tenant.db.insert(holdings).values(chunk)),
+      tenant.db
+        .update(accounts)
+        .set({ holdingsVersion: (current?.holdingsVersion ?? 0) + 1 })
+        .where(tenant.scope(accounts, eq(accounts.id, account.id))),
+    );
+    await lease.renew();
+    await runAtomic(tenant.db, statements);
+  } finally {
+    await lease.forceRelease();
+  }
+
+  const runId = crypto.randomUUID();
+  const size = daysPerBlock(deps, ids.length);
+  await enqueue(
+    deps,
+    tenant,
+    windows(start, today, size).map(([from, to]) => {
+      const block: BlockPayload = { accountId: account.id, start, end: today, from, to, holdings: holdingsNow, transactions, cashSecurityId, prices, replaceSnapshots: true };
+      return { id: `import:${runId}:block:${from}`, type: 'import_block' as const, payload: { ...block }, connectionId: account.connectionId };
+    }),
+  );
+  await snapshotHousehold(deps, tenant, today);
+  return { days: dateRange(start, today).length, from: start, to: today, funds: file.positions.length };
+}
+
 /** import_block: one window of an imported account's days, walked back and written as imported. */
 export async function importBlock({ deps, tenant, job, renew }: JobContext): Promise<Record<string, unknown>> {
   const block = job.payload as unknown as BlockPayload;
@@ -291,6 +469,8 @@ export async function importBlock({ deps, tenant, job, renew }: JobContext): Pro
     // The institution's own records: cash below zero is an amount owed (a fee charged before money arrived), not a gap.
     allowNegativeCash: true,
     price: (securityId, date) => {
+      const points = block.prices?.[securityId];
+      if (points) return fundPrice(points, date);
       const security = securityById.get(securityId);
       return security ? priceOn(security, date, closes) : null;
     },
@@ -330,7 +510,7 @@ export async function importBlock({ deps, tenant, job, renew }: JobContext): Pro
       // Positions rebuilt, carried or imported before for these days give way: the file says what was held.
       tenant.db
         .delete(holdingDaily)
-        .where(tenant.scope(holdingDaily, eq(holdingDaily.accountId, account.id), gte(holdingDaily.date, block.from), lte(holdingDaily.date, block.to), inArray(holdingDaily.source, ['rebuilt', 'carried', 'import']))),
+        .where(tenant.scope(holdingDaily, eq(holdingDaily.accountId, account.id), gte(holdingDaily.date, block.from), lte(holdingDaily.date, block.to), inArray(holdingDaily.source, block.replaceSnapshots ? ['rebuilt', 'carried', 'import', 'snapshot'] : ['rebuilt', 'carried', 'import']))),
       ...chunkRows(holdingDaily, holdingRows).map((chunk) =>
         tenant.db
           .insert(holdingDaily)

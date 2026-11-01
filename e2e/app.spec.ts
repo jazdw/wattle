@@ -63,8 +63,8 @@ test('a manual account can be added and updated', async ({ page }) => {
 
 test('a Example Bank CSV export imports as daily balances', async ({ page }) => {
   await page.goto('/accounts');
-  await page.getByRole('button', { name: /Import CSV/ }).click();
-  const dialog = page.getByRole('dialog', { name: 'Import balance history' });
+  await page.getByRole('button', { name: 'Import', exact: true }).click();
+  const dialog = page.getByRole('dialog', { name: 'Import history' });
   await dialog.getByLabel('Account').selectOption({ label: 'Example Bank Everyday (demo)' });
   await dialog.getByLabel('CSV file').setInputFiles({
     name: 'examplebank.csv',

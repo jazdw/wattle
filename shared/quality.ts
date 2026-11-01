@@ -28,6 +28,8 @@ export const PRICE_SOURCES = [
   'provisional',
   /** The institution's price, with no market close for the day. */
   'institution',
+  /** Estimated from the institution's prices on other days: on a straight line between two, or the nearest held (an imported fund with no daily prices). */
+  'interpolated',
 ] as const;
 export type PriceSource = (typeof PRICE_SOURCES)[number];
 
@@ -52,7 +54,7 @@ export function mayReplace(next: DailySource, current: DailySource): boolean {
 }
 
 /** Least final first: a provisional price makes a total provisional, and so on. */
-const PRICE_ORDER: (PriceSource | null)[] = ['provisional', 'institution', 'close', null];
+const PRICE_ORDER: (PriceSource | null)[] = ['provisional', 'interpolated', 'institution', 'close', null];
 
 /** The least final of several prices (a day's total of holdings). */
 export function leastFinal(prices: (PriceSource | null)[]): PriceSource | null {

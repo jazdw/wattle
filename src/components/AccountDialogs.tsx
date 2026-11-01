@@ -8,6 +8,7 @@ import type { AccountSummary } from '../../shared/types';
 import { api } from '../api';
 import { useAuth } from '../hooks/useAuth';
 import { accountColumn, extractBalances, parseCsv, PRESETS, vanguardHoldings, type BalanceMapping, type DateFormat, type DownloadedAccount } from '../lib/csv';
+import { isOfx, mergeOfx, ofxHoldings, statementsFor, type OfxHoldings } from '../lib/ofx';
 import { accountKind, longDate, money } from '../lib/format';
 import { Button } from './ui/button';
 import { Dialog, DialogContent } from './ui/dialog';
@@ -462,9 +463,33 @@ export function ImportDialog({ accounts, open, onOpenChange }: { accounts: Accou
   const [presetLabel, setPresetLabel] = useState<string | null>(null);
   // A download with positions and transactions per account (Vanguard's), for accounts with priced holdings.
   const [downloads, setDownloads] = useState<Map<string, DownloadedAccount> | null>(null);
+  // Investment statements (OFX/QFX, one or more files, each with one or more accounts), for a manual investment account.
+  const [downloaded, setDownloaded] = useState<OfxHoldings[] | null>(null);
+  const [fileError, setFileError] = useState<string | null>(null);
 
-  async function loadFile(file: File) {
-    const parsed = parseCsv(await file.text());
+  async function loadFiles(files: File[]) {
+    setFileError(null);
+    const contents = await Promise.all(files.map((file) => file.text()));
+    if (!contents.every(isOfx)) {
+      setDownloaded(null);
+      if (files.length > 1) setFileError('Choose one CSV file, or one or more Quicken (QFX/OFX) files.');
+      else void loadFile(contents[0]);
+      return;
+    }
+    setTable(null);
+    setMapping(null);
+    try {
+      const parsed = contents.map(ofxHoldings);
+      if (parsed.some((found) => found.length === 0)) throw new Error('A file has no investment statement in it (only investment accounts are understood).');
+      setDownloaded(parsed.flat());
+    } catch (error) {
+      setDownloaded(null);
+      setFileError(error instanceof Error ? error.message : String(error));
+    }
+  }
+
+  async function loadFile(content: string) {
+    const parsed = parseCsv(content);
     const preset = parsed.length > 0 ? PRESETS.find((candidate) => candidate.detect(parsed[0])) : undefined;
     const rows = preset?.transform ? preset.transform(parsed) : parsed;
     setTable(rows);
@@ -507,6 +532,32 @@ export function ImportDialog({ accounts, open, onOpenChange }: { accounts: Accou
       }),
     onSuccess: () => invalidate(),
   });
+  // The chosen account's statements, merged (a download can hold several accounts).
+  let statements: OfxHoldings | null = null;
+  let statementsError: string | null = null;
+  if (downloaded) {
+    try {
+      statements = mergeOfx(statementsFor(downloaded, account?.mask));
+    } catch (error) {
+      statementsError = error instanceof Error ? error.message : String(error);
+    }
+  }
+
+  const commitStatements = useMutation({
+    mutationFn: () =>
+      api<{ days: number; from: string; to: string }>('/api/imports/fund-history', {
+        method: 'POST',
+        body: JSON.stringify({
+          accountId,
+          asOf: statements!.asOf,
+          currency: statements!.currency,
+          funds: statements!.funds,
+          positions: statements!.positions,
+          transactions: statements!.transactions.map(({ id: _id, ...txn }) => txn),
+        }),
+      }),
+    onSuccess: () => invalidate(),
+  });
   const commitHoldings = useMutation({
     mutationFn: () =>
       api<{ days: number; from: string; to: string }>('/api/imports/holdings-history', {
@@ -523,8 +574,11 @@ export function ImportDialog({ accounts, open, onOpenChange }: { accounts: Accou
     setMapping(null);
     setPresetLabel(null);
     setDownloads(null);
+    setDownloaded(null);
+    setFileError(null);
     commit.reset();
     commitHoldings.reset();
+    commitStatements.reset();
     onOpenChange(false);
   }
 
@@ -539,8 +593,8 @@ export function ImportDialog({ accounts, open, onOpenChange }: { accounts: Accou
     <Dialog open={open} onOpenChange={(next) => (next ? onOpenChange(true) : close())}>
       <DialogContent
         className="max-w-2xl"
-        title="Import balance history"
-        description="Upload a CSV with a date and a balance per row — e.g. a Example Bank transaction export (its running balance becomes daily history)."
+        title="Import history"
+        description="Upload a CSV with a date and a balance per row — e.g. a Example Bank transaction export (its running balance becomes daily history) — or an investment account's Quicken (QFX/OFX) downloads."
       >
         <div className="grid gap-3 sm:grid-cols-2">
           <Field label="Account">
@@ -555,10 +609,12 @@ export function ImportDialog({ accounts, open, onOpenChange }: { accounts: Accou
                 ))}
             </NativeSelect>
           </Field>
-          <Field label="CSV file">
-            <Input type="file" accept=".csv,text/csv" onChange={(event) => event.target.files?.[0] && void loadFile(event.target.files[0])} />
+          <Field label="File">
+            <Input type="file" multiple accept=".csv,text/csv,.qfx,.ofx" onChange={(event) => event.target.files?.length && void loadFiles([...event.target.files])} />
           </Field>
         </div>
+        {(fileError ?? statementsError) && <Alert variant="error">{fileError ?? statementsError}</Alert>}
+        {statements && <StatementsPreview statements={statements} account={account} />}
 
         {table && mapping && download && (
           <>
@@ -620,6 +676,12 @@ export function ImportDialog({ accounts, open, onOpenChange }: { accounts: Accou
         )}
         {commit.error && <Alert variant="error">{commit.error.message}</Alert>}
         {commit.data && <Alert>Imported {commit.data.imported} days.</Alert>}
+        {commitStatements.error && <Alert variant="error">{commitStatements.error.message}</Alert>}
+        {commitStatements.data && (
+          <Alert>
+            Importing {commitStatements.data.days} days of holdings ({longDate(commitStatements.data.from)} – {longDate(commitStatements.data.to)}). They appear as they're written, in a minute or so.
+          </Alert>
+        )}
         {commitHoldings.error && <Alert variant="error">{commitHoldings.error.message}</Alert>}
         {commitHoldings.data && (
           <Alert>
@@ -630,7 +692,14 @@ export function ImportDialog({ accounts, open, onOpenChange }: { accounts: Accou
           <Button variant="outline" onClick={close}>
             Close
           </Button>
-          {download ? (
+          {downloaded ? (
+            <Button
+              onClick={() => commitStatements.mutate()}
+              disabled={!statements || !statementsFit(statements, account) || commitStatements.isPending || Boolean(commitStatements.data)}
+            >
+              Import
+            </Button>
+          ) : download ? (
             <Button onClick={() => commitHoldings.mutate()} disabled={commitHoldings.isPending || Boolean(commitHoldings.data)}>
               Import
             </Button>
@@ -642,5 +711,45 @@ export function ImportDialog({ accounts, open, onOpenChange }: { accounts: Accou
         </div>
       </DialogContent>
     </Dialog>
+  );
+}
+
+/** Statements can go in a manual investment account, once every transaction type in them is understood. */
+function statementsFit(statements: OfxHoldings, account: AccountSummary | undefined) {
+  return Boolean(account && account.source === 'manual' && account.type === 'investment' && statements.unknownTypes.length === 0 && statements.transactions.length > 0);
+}
+
+function StatementsPreview({ statements, account }: { statements: OfxHoldings; account: AccountSummary | undefined }) {
+  const name = (id: string) => statements.funds.find((fund) => fund.id === id)?.name ?? id;
+  // The account's currency (a statement's is checked against it when imported).
+  const currency = account?.currency ?? (CURRENCIES.includes(statements.currency as Currency) ? (statements.currency as Currency) : 'USD');
+  const total = statements.positions.reduce((sum, row) => sum + Math.round(row.shares * row.price * 100), 0);
+  const from = statements.transactions[0]?.date;
+  return (
+    <>
+      <Alert>Recognised {statements.transactions.length} investment transactions{from && ` from ${longDate(from)}`}, with positions as of {longDate(statements.asOf)}.</Alert>
+      {statements.unknownTypes.length > 0 && <Alert variant="error">These files have transaction types Wattle doesn't understand yet: {statements.unknownTypes.join(', ')}.</Alert>}
+      {account && (account.source !== 'manual' || account.type !== 'investment') && <Alert variant="error">Statements import into a manual investment account.</Alert>}
+      <div className="rounded-md border p-3 text-sm">
+        <p className="font-medium">Holdings history</p>
+        <p className="text-muted-foreground">
+          Each day's shares are worked out from today's positions and the transactions, priced from the statements' own prices (on a straight line between them). These become the account's holdings.
+        </p>
+        <ul className="mt-2 text-xs">
+          {statements.positions.map((row) => (
+            <li key={row.fund} className="flex justify-between gap-3">
+              <span className="truncate">{name(row.fund)}</span>
+              <span className="shrink-0 text-muted-foreground">
+                {row.shares} × {row.price} = {money(Math.round(row.shares * row.price * 100), currency)}
+              </span>
+            </li>
+          ))}
+          <li className="flex justify-between gap-3 font-medium">
+            <span>Total</span>
+            <span>{money(total, currency)}</span>
+          </li>
+        </ul>
+      </div>
+    </>
   );
 }

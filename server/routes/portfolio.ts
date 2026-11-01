@@ -6,6 +6,7 @@ import {
   activityCursorSchema,
   householdPatchSchema,
   importBalancesSchema,
+  importFundHistorySchema,
   importHoldingsHistorySchema,
   importHoldingsSchema,
   securityPatchSchema,
@@ -28,7 +29,7 @@ import { activeTarget, loadPortfolio } from '../services/portfolio';
 import { stableId } from '../services/ids';
 import { Lease, targetsLease } from '../services/lease';
 import { writeBalances } from '../services/balances';
-import { importHoldingsHistory, securitiesForTickers } from '../services/holdingsImport';
+import { importFundHistory, importHoldingsHistory, securitiesForTickers } from '../services/holdingsImport';
 import { QUALITY_SET, replaceWhere } from '../services/quality';
 import { snapshotHousehold } from '../services/snapshots';
 import { activeConnections, MANUAL_SYNC_INTERVAL_MS, syncConnection } from '../services/sync';
@@ -378,6 +379,16 @@ portfolioRoutes.post('/imports/holdings-history', async (c) => {
   const account = await importTarget(tenant, body.accountId);
   if (account.type !== 'investment') throw new HttpError(409, 'Holdings history goes in an investment account.');
   return c.json(await importHoldingsHistory(deps, tenant, account, body));
+});
+
+/** A manual investment account's holdings history from investment statements (OFX/QFX), priced from the statements. */
+portfolioRoutes.post('/imports/fund-history', async (c) => {
+  const deps = c.env.deps;
+  const tenant = c.get('tenant');
+  const body = await readBody(c, importFundHistorySchema);
+  const account = await importTarget(tenant, body.accountId);
+  if (account.type !== 'investment') throw new HttpError(409, 'Holdings history goes in an investment account.');
+  return c.json(await importFundHistory(deps, tenant, account, body));
 });
 
 /* ------------------------------------------------------------------ */
