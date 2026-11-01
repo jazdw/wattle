@@ -59,4 +59,14 @@ describe('foldSeries', () => {
     expect(other).toMatchObject({ key: '__other', label: 'Other (3)' });
     expect(other.values).toEqual([0 + 1 + 2, 10 + 20]);
   });
+
+  it('folds debts apart from accounts with money in them, so neither fold crosses zero', () => {
+    const base = history(8);
+    const owing = (key: string, values: (number | null)[]) => ({ key, label: key, values, quality: [null, null] });
+    // A card owing $5 then paid off (still a debt), a loan, and a small cash account.
+    const series = foldSeries({ ...base, series: [...base.series, owing('card', [-5, 0]), owing('loan', [-50, -40]), owing('cash', [3, 4])] });
+    expect(series.map((item) => item.label).slice(-2)).toEqual(['Other (2)', 'Other debts (2)']);
+    expect(series.at(-1)!.values).toEqual([-55, -40]);
+    expect(series.at(-2)!.values).toEqual([3, 4]); // the cash account and A0 (no value on the 8th)
+  });
 });

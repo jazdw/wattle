@@ -30,3 +30,5 @@ export function seriesColor(index: number): string {
 }
 
 export const OTHER_COLOR = 'var(--series-neutral)';
+/** Small debts folded together (cards, loans): the liabilities grey. */
+export const OTHER_DEBTS_COLOR = 'var(--series-neutral-dark)';
