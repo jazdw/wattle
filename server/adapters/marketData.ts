@@ -57,6 +57,17 @@ export function createTiingo(apiKey: string): PriceProvider {
       return type ? { type, name: match!.name ?? null } : null;
     },
 
+    // Tiingo's search by name (it doesn't find CUSIPs or ISINs): active US listings, best first.
+    async search(name) {
+      const params = new URLSearchParams({ query: name, limit: '10' });
+      const response = await fetch(`https://api.tiingo.com/tiingo/utilities/search?${params}`, {
+        headers: { 'content-type': 'application/json', authorization: `Token ${apiKey}` },
+      });
+      if (!response.ok) throw new ProviderHttpError('Tiingo search', response.status);
+      const rows = (await response.json()) as { ticker?: string; name?: string; countryCode?: string; isActive?: boolean }[];
+      return rows.flatMap((row) => (row.ticker && row.name && row.countryCode === 'US' && row.isActive !== false ? [{ ticker: row.ticker.toUpperCase(), name: row.name }] : []));
+    },
+
     // One request for many stocks/ETFs: Tiingo's IEX endpoint returns the
     // last price (tngoLast) with its timestamp. A price stamped after the
     // 16:00 New York close is that day's closing price. Mutual funds aren't

@@ -263,6 +263,12 @@ export function fakePrices(
       calls.push(`describe:${ticker}`);
       return descriptions[ticker.toUpperCase()] ?? null;
     };
+    // Loosely, like a real search: listings whose name starts with the first word searched for.
+    provider.search = async (name) => {
+      calls.push(`search:${name}`);
+      const first = name.toLowerCase().split(/\s+/)[0];
+      return Object.entries(descriptions).flatMap(([ticker, description]) => (description.name?.toLowerCase().startsWith(first) ? [{ ticker, name: description.name }] : []));
+    };
   }
   if (bulk) {
     provider.latestCloses = async (tickers) => {

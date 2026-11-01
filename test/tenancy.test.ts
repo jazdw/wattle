@@ -33,8 +33,7 @@ describe('tenant isolation', () => {
     }
     const writes: [string, string][] = [
       ['POST', '/api/refresh'],
-      ['POST', '/api/imports/balances'],
-      ['POST', '/api/imports/holdings'],
+      ['POST', '/api/imports'],
       ['POST', '/api/plaid/link-token'],
       ['POST', '/api/plaid/exchange'],
       ['PUT', '/api/targets'],
@@ -63,7 +62,7 @@ describe('tenant isolation', () => {
     expect((await asB(`/api/accounts/${accountId}/balances`, { method: 'POST', json: { date: '2026-10-02', balance: 1 } })).status).toBe(404);
     expect((await asB(`/api/accounts/${accountId}`, { method: 'DELETE' })).status).toBe(404);
     expect((await asB('/api/securities/sec-a', { method: 'PATCH', json: { classification: { categories: { cash: 1 } } } })).status).toBe(404);
-    expect((await asB('/api/imports/balances', { method: 'POST', json: { accountId, rows: [{ date: '2026-01-01', balance: 1 }] } })).status).toBe(404);
+    expect((await asB('/api/imports', { method: 'POST', json: { accounts: [{ label: 'File', target: { accountId }, file: { kind: 'balances', rows: [{ date: '2026-01-01', balance: 1 }] } }] } })).status).toBe(404);
     expect((await asB(`/api/history?range=ALL&group=holding&accountId=${accountId}`)).body.series).toHaveLength(0);
     expect((await asA(`/api/accounts/${accountId}`)).status).toBe(404); // no GET-by-id route; sanity
   });
@@ -148,7 +147,7 @@ describe('tenant isolation: logins, holdings, targets and settings', () => {
     expect((await asB(`/api/accounts/${manualId}/holdings`)).status).toBe(404);
     expect((await asB(`/api/accounts/${manualId}/holdings`, { method: 'PUT', json: { holdings: [], version: 1 } })).status).toBe(404);
     expect(
-      (await asB('/api/imports/holdings', { method: 'POST', json: { accountId: manualId, rows: [{ date: '2026-10-01', ticker: 'VTI', quantity: 99 }] } })).status,
+      (await asB('/api/imports', { method: 'POST', json: { accounts: [{ label: 'File', target: { accountId: manualId }, file: { kind: 'balances', rows: [{ date: '2026-10-01', balance: 99 }] } }] } })).status,
     ).toBe(404);
 
     const holdings = (await asA(`/api/accounts/${manualId}/holdings`)).body.holdings as { ticker: string; quantity: number }[];
@@ -206,8 +205,8 @@ describe('large imports', () => {
       date: new Date(Date.UTC(2025, 0, 1 + index)).toISOString().slice(0, 10),
       balance: 1000 + index,
     }));
-    const result = await asA('/api/imports/balances', { method: 'POST', json: { accountId, rows } });
+    const result = await asA('/api/imports', { method: 'POST', json: { accounts: [{ label: 'File', target: { accountId }, file: { kind: 'balances', rows } }] } });
     expect(result.status).toBe(200);
-    expect(result.body.imported).toBe(400);
+    expect(result.body.accounts[0].days).toBe(400);
   });
 });

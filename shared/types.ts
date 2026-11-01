@@ -142,6 +142,8 @@ export interface AccountSummary {
    * the same one, e.g. a joint account you've both linked: hide one copy.
    */
   possibleDuplicateOf: string | null;
+  /** An import still being written into the account (as background jobs): its windows of days done of all. */
+  importProgress: { done: number; total: number } | null;
 }
 
 /** Kinds of background job (server/db/schema.ts JOB_TYPES). */
@@ -156,7 +158,8 @@ export type JobType =
   | 'report_collect'
   | 'report_account'
   | 'report_finish'
-  | 'import_block';
+  | 'import_block'
+  | 'import_reprice';
 
 /** One entry in the household's activity: a login's run, a snapshot, or the nightly job. */
 export type ActivityEntry =
@@ -335,4 +338,30 @@ export interface SecurityRow {
   classification: Classification | null;
   classificationSource: ClassificationSource | null;
   needsReview: boolean;
+}
+
+/** POST /api/imports: each account imported, in the order sent. */
+export interface ImportedAccount {
+  label: string;
+  accountId: string;
+  created: boolean;
+  /** The days written (holdings: as jobs, appearing over a minute or so). */
+  days: number;
+  from: string;
+  to: string;
+  /** Market funds priced from the file's prices because their closes couldn't be fetched: import again later for daily closes. */
+  estimated: string[];
+}
+
+export interface ImportResponse {
+  accounts: ImportedAccount[];
+}
+
+/** POST /api/imports/tickers: a ticker for a security a file names without one. */
+export interface TickerSuggestion {
+  /** The file's id for the security. */
+  id: string;
+  ticker: string;
+  /** From a security you have with the same name, or the market data provider's search (to check). */
+  from: 'yours' | 'search';
 }

@@ -672,7 +672,7 @@ describe('missed days', () => {
   it("an imported balance stays when the linked account reports that day: your values beat the institution's", async () => {
     const { api, chk, night, day, nightly } = await bank();
     night(1);
-    await api('/api/imports/balances', { method: 'POST', json: { accountId: chk.id, rows: [{ date: '2026-10-09', balance: 5 }] } });
+    await api('/api/imports', { method: 'POST', json: { accounts: [{ label: 'File', target: { accountId: chk.id }, file: { kind: 'balances', rows: [{ date: '2026-10-09', balance: 5 }] } }] } });
     expect(await day('2026-10-09')).toMatchObject({ balance: 5_00, source: 'import' });
     await nightly();
     expect(await day('2026-10-09')).toMatchObject({ balance: 5_00, source: 'import' });
@@ -684,8 +684,8 @@ describe('missed days', () => {
     const row = (date: string, source: 'rebuilt' | 'snapshot') => ({ householdId: tenant.householdId, accountId: chk.id, date, balance: 900_00, currency: 'USD', source });
     await deps.db.insert(schema.accountDaily).values([row('2026-09-01', 'rebuilt'), row('2026-09-02', 'rebuilt'), row('2026-09-03', 'snapshot'), row('2026-09-04', 'rebuilt')]);
     // Only the days the balance changed.
-    const response = await api('/api/imports/balances', { method: 'POST', json: { accountId: chk.id, rows: [{ date: '2026-08-31', balance: 500 }, { date: '2026-09-05', balance: 600 }] } });
-    expect(response.body.imported).toBe(6);
+    const response = await api('/api/imports', { method: 'POST', json: { accounts: [{ label: 'File', target: { accountId: chk.id }, file: { kind: 'balances', rows: [{ date: '2026-08-31', balance: 500 }, { date: '2026-09-05', balance: 600 }] } }] } });
+    expect(response.body.accounts[0].days).toBe(6);
     expect(await day('2026-09-02')).toMatchObject({ balance: 500_00, source: 'import' });
     expect(await day('2026-09-03')).toMatchObject({ balance: 500_00, source: 'import' });
     expect(await day('2026-09-04')).toMatchObject({ balance: 500_00, source: 'import' });
@@ -702,7 +702,7 @@ describe('missed days', () => {
     // Carried forward, and marked as an estimate.
     expect(await day('2026-10-09')).toMatchObject({ balance: 1000_00, source: 'carried' });
     // An import replaces an estimate.
-    await api('/api/imports/balances', { method: 'POST', json: { accountId: chk.id, rows: [{ date: '2026-10-10', balance: 1150 }] } });
+    await api('/api/imports', { method: 'POST', json: { accounts: [{ label: 'File', target: { accountId: chk.id }, file: { kind: 'balances', rows: [{ date: '2026-10-10', balance: 1150 }] } }] } });
 
     failing(false);
     plaid.state.accounts = [account('chk', 'depository', 1300)];

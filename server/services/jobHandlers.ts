@@ -8,7 +8,7 @@ import type { SyncTrigger } from './activity';
 import { finishNightly } from './jobs';
 import { collectReport, collectReportAccount, finishReport, reportFailed } from './assetReports';
 import { finishHistory, historyBlock, historyFailed, historyPrices, planHistory } from './backfill';
-import { importBlock } from './holdingsImport';
+import { importBlock, importReprice, queueImportRepricing } from './holdingsImport';
 import { runJobWith, runNextWith, type FailureHandlers, type JobHandler, type JobHandlers, type JobOutcome } from './jobRunner';
 import { typeHandEnteredSecurities } from './securityTypes';
 import { snapshotHousehold } from './snapshots';
@@ -27,12 +27,14 @@ const sync: JobHandler = async ({ deps, tenant, job }) => {
   return { status: result.status, accounts: result.accounts, holdings: result.holdings, transactions: result.transactions, ...(result.skipped ? { skipped: true } : {}) };
 };
 
-/** Write the household's snapshot for a day (nightly: after typing hand-entered securities). */
+/** Write the household's snapshot for a day (nightly: after typing hand-entered securities, then queueing any imported estimates' repricing). */
 const snapshot: JobHandler = async ({ deps, tenant, job }) => {
   const { date, trigger } = job.payload as { date: IsoDate; trigger: 'nightly' | 'change' };
   if (trigger === 'nightly') await typeHandEnteredSecurities(deps, tenant);
   const result = await snapshotHousehold(deps, tenant, date, trigger);
-  return { accounts: result.accounts, holdings: result.holdings };
+  // Nightly: imported days priced from the file get their closes, once they can be fetched.
+  const repricing = trigger === 'nightly' ? await queueImportRepricing(deps, tenant) : 0;
+  return { accounts: result.accounts, holdings: result.holdings, ...(repricing > 0 ? { repricing } : {}) };
 };
 
 const nightlyFinish: JobHandler = async ({ deps, job }) => {
@@ -51,6 +53,7 @@ export const HANDLERS: JobHandlers = {
   report_account: collectReportAccount,
   report_finish: finishReport,
   import_block: importBlock,
+  import_reprice: importReprice,
 };
 
 /**

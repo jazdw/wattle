@@ -66,6 +66,8 @@ export interface PriceProvider {
   latestCloses?(tickers: string[]): Promise<Map<string, DailyClose>>;
   /** What a ticker is (optional): its kind of security and name; null when unknown. */
   describe?(ticker: string): Promise<SecurityDescription | null>;
+  /** US listings whose name matches a search (optional), best first: for a security a file names without its ticker. */
+  search?(name: string): Promise<{ ticker: string; name: string }[]>;
 }
 
 export interface SecurityDescription {

@@ -5,18 +5,16 @@ import { marketDate, newYorkClock } from '../../shared/dates';
 import {
   activityCursorSchema,
   householdPatchSchema,
-  importBalancesSchema,
-  importFundHistorySchema,
-  importHoldingsHistorySchema,
-  importHoldingsSchema,
+  importSchema,
+  tickerSuggestionsSchema,
   securityPatchSchema,
   targetSchema,
 } from '../../shared/schemas';
 import type { HistoryGroup, QuotesResponse, SecurityRow, TargetResponse } from '../../shared/types';
 import { normalizeWeights, type Category } from '../../shared/taxonomy';
 import { requireAuth } from '../auth/routes';
-import { chunkRows, inChunks, runAtomic } from '../db/batch';
-import { accounts, holdingDaily, holdings, households, pricesDaily, securities, targets } from '../db/schema';
+import { inChunks } from '../db/batch';
+import { accounts, holdings, households, pricesDaily, securities, targets } from '../db/schema';
 import type { Tenant } from '../db/tenant';
 import type { AppEnv } from '../env';
 import { HttpError, notFound, readBody, requestCurrency } from '../lib/http';
@@ -28,9 +26,7 @@ import { sweep } from '../services/jobRunner';
 import { activeTarget, loadPortfolio } from '../services/portfolio';
 import { stableId } from '../services/ids';
 import { Lease, targetsLease } from '../services/lease';
-import { writeBalances } from '../services/balances';
-import { importFundHistory, importHoldingsHistory, securitiesForTickers } from '../services/holdingsImport';
-import { QUALITY_SET, replaceWhere } from '../services/quality';
+import { importAccounts, suggestTickers } from '../services/holdingsImport';
 import { snapshotHousehold } from '../services/snapshots';
 import { activeConnections, MANUAL_SYNC_INTERVAL_MS, syncConnection } from '../services/sync';
 import { describeError } from '../lib/errors';
@@ -310,85 +306,19 @@ portfolioRoutes.get('/quotes', async (c) => {
 });
 
 /* ------------------------------------------------------------------ */
-/* CSV imports (parsed in the browser, validated here)                 */
+/* Imports (files read in the browser, checked here)                   */
 /* ------------------------------------------------------------------ */
 
-async function importTarget(tenant: Tenant, accountId: string) {
-  const [account] = await tenant.db.select().from(accounts).where(tenant.scope(accounts, eq(accounts.id, accountId)));
-  if (!account) notFound('Account not found.');
-  if (account.isHidden) throw new HttpError(409, 'Un-hide the account before importing into it.');
-  return account;
-}
-
-portfolioRoutes.post('/imports/balances', async (c) => {
-  const deps = c.env.deps;
-  const tenant = c.get('tenant');
-  const body = await readBody(c, importBalancesSchema);
-  const account = await importTarget(tenant, body.accountId);
-  const imported = await writeBalances(deps, tenant, account, body.rows, 'import');
-  return c.json({ imported });
+/** Tickers for securities a file names without one (from yours, else a search by name). */
+portfolioRoutes.post('/imports/tickers', async (c) => {
+  const body = await readBody(c, tickerSuggestionsSchema);
+  return c.json({ suggestions: await suggestTickers(c.env.deps, c.get('tenant'), body.securities) });
 });
 
-portfolioRoutes.post('/imports/holdings', async (c) => {
-  const deps = c.env.deps;
-  const tenant = c.get('tenant');
-  const body = await readBody(c, importHoldingsSchema);
-  const account = await importTarget(tenant, body.accountId);
-  const { byTicker, statements, created } = await securitiesForTickers(
-    deps,
-    tenant,
-    account.currency,
-    body.rows.map((row) => row.ticker),
-  );
-
-  const holdingRows = body.rows.map((row) => ({
-    householdId: tenant.householdId,
-    accountId: account.id,
-    securityId: byTicker.get(row.ticker.toUpperCase())!,
-    date: row.date,
-    quantity: row.quantity,
-    price: row.price ?? null,
-    value: row.price !== undefined ? Math.round(row.quantity * row.price * 100) : 0,
-    currency: account.currency,
-    source: 'import' as const,
-    priceSource: row.price !== undefined ? ('close' as const) : null,
-    unmatched: false,
-  }));
-  // New securities and the whole file together, or none of it.
-  await runAtomic(tenant.db, [
-    ...statements,
-    ...chunkRows(holdingDaily, holdingRows).map((chunk) =>
-      tenant.db
-        .insert(holdingDaily)
-        .values(chunk)
-        .onConflictDoUpdate({
-          target: [holdingDaily.accountId, holdingDaily.securityId, holdingDaily.date],
-          set: { quantity: sql`excluded.quantity`, price: sql`excluded.price`, value: sql`excluded.value`, ...QUALITY_SET },
-          setWhere: replaceWhere(holdingDaily.source),
-        }),
-    ),
-  ]);
-  return c.json({ imported: holdingRows.length, newSecurities: created });
-});
-
-/** An investment account's holdings history from a download of its positions and transactions (checked, then written as jobs). */
-portfolioRoutes.post('/imports/holdings-history', async (c) => {
-  const deps = c.env.deps;
-  const tenant = c.get('tenant');
-  const body = await readBody(c, importHoldingsHistorySchema);
-  const account = await importTarget(tenant, body.accountId);
-  if (account.type !== 'investment') throw new HttpError(409, 'Holdings history goes in an investment account.');
-  return c.json(await importHoldingsHistory(deps, tenant, account, body));
-});
-
-/** A manual investment account's holdings history from investment statements (OFX/QFX), priced from the statements. */
-portfolioRoutes.post('/imports/fund-history', async (c) => {
-  const deps = c.env.deps;
-  const tenant = c.get('tenant');
-  const body = await readBody(c, importFundHistorySchema);
-  const account = await importTarget(tenant, body.accountId);
-  if (account.type !== 'investment') throw new HttpError(409, 'Holdings history goes in an investment account.');
-  return c.json(await importFundHistory(deps, tenant, account, body));
+/** Every import: the accounts in one or more files, each into an account you have or a new one. */
+portfolioRoutes.post('/imports', async (c) => {
+  const body = await readBody(c, importSchema);
+  return c.json(await importAccounts(c.env.deps, c.get('tenant'), body));
 });
 
 /* ------------------------------------------------------------------ */
