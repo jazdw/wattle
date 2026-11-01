@@ -14,7 +14,7 @@ import {
 import type { Currency } from '../../shared/money';
 import type { HistoryResponse } from '../../shared/types';
 import { longDate, money, shortDate } from '../lib/format';
-import type { ChartSeries } from '../lib/series';
+import { stackAreas, type ChartSeries } from '../lib/series';
 
 /* ------------------------------------------------------------------ */
 /* Time series                                                         */
@@ -41,7 +41,14 @@ function SeriesTooltip({
   showTotal: boolean;
 }) {
   if (!active || !payload?.length || !label) return null;
-  const rows = payload.filter((row) => row.value !== null && row.value !== undefined);
+  // A series stacked as its parts above and below zero (see TimeSeriesChart) is one row again.
+  const byName = new Map<string, TooltipPayload>();
+  for (const row of payload) {
+    if (row.value === null || row.value === undefined) continue;
+    const seen = byName.get(row.name);
+    byName.set(row.name, seen ? { ...seen, value: seen.value + row.value } : row);
+  }
+  const rows = [...byName.values()];
   const total = rows.reduce((sum, row) => sum + row.value, 0);
   return (
     <div className="min-w-44 rounded-md border bg-card px-3 py-2 text-xs shadow-md">
@@ -82,14 +89,15 @@ export function TimeSeriesChart({
   stacked: boolean;
   height?: number;
 }) {
+  const areas = useMemo(() => stackAreas(series, stacked), [series, stacked]);
   const data = useMemo(
     () =>
       history.dates.map((date, position) => {
         const row: Record<string, string | number | null> = { date };
-        for (const item of series) row[item.key] = item.values[position];
+        for (const item of areas) row[item.key] = item.values[position];
         return row;
       }),
-    [history.dates, series],
+    [history.dates, areas],
   );
   const single = series.length === 1;
 
@@ -118,7 +126,7 @@ export function TimeSeriesChart({
             content={<SeriesTooltip currency={currency} showTotal={stacked} />}
             cursor={{ stroke: 'var(--color-muted-foreground)', strokeWidth: 1 }}
           />
-          {series.map((item) => (
+          {areas.map((item) => (
             <Area
               key={item.key}
               dataKey={item.key}

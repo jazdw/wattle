@@ -41,10 +41,15 @@ const day = (value: unknown) => {
 /** ofx-js decodes one level of entities; some institutions escape twice (S&amp;amp;P). */
 const decode = (value: string) =>
   value.replace(/&(amp|lt|gt|quot|apos|#39);/g, (_, name: string) => ({ amp: '&', lt: '<', gt: '>', quot: '"', apos: "'", '#39': "'" })[name] ?? '');
-/** A market ticker, or null for a fund with none (plans say "Unknown"). */
+/** Words some institutions put in the ticker field of a fund that has no ticker. */
+const NOT_TICKERS = new Set(['UNKNOWN', 'NULL', 'NONE', 'N/A', 'NA', 'CASH', 'LOAN', 'ALLOC']);
+/**
+ * A market ticker, or null for a fund with none: plans fill the field with
+ * "Unknown", a word (CASH, LOAN) or a numbered placeholder (NONE9, NON0Z).
+ */
 const ticker = (value: unknown) => {
   const symbol = text(value).toUpperCase();
-  return /^[A-Z][A-Z0-9.-]{0,9}$/.test(symbol) && symbol !== 'UNKNOWN' && symbol !== 'NULL' && symbol !== 'NONE' ? symbol : null;
+  return /^[A-Z][A-Z0-9.-]{0,9}$/.test(symbol) && !NOT_TICKERS.has(symbol) && !/^NON[E0-9]/.test(symbol) ? symbol : null;
 };
 
 /** Whether a file looks like OFX (either version) rather than CSV. */

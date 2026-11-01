@@ -195,6 +195,9 @@ describe('import into a manual account', () => {
     expect(await position('2026-07-01', 'Cash')).toMatchObject({ quantity: 510 });
     expect(await position('2026-08-01', 'Cash')).toMatchObject({ quantity: 490 });
     expect(await day(TODAY)).toMatchObject({ balance: 490_00 + 5 * 100_00 + 10 * 21_00 });
+    // The provider couldn't describe VTI: it's named as the file names it.
+    const [vti] = await deps.db.select().from(schema.securities).where(eq(schema.securities.ticker, 'VTI'));
+    expect(vti.name).toBe('Vanguard Total Stock Market ETF');
   });
 });
 
