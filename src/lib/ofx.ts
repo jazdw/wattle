@@ -1,56 +1,37 @@
 /**
- * OFX / QFX investment statements (what institutions offer as a "Quicken"
- * download): an account's positions, its transactions and the securities
- * they name. Parsed in the browser with ofx-js (both OFX 1.x SGML and 2.x
- * XML); the server checks the result and works out each day from it.
+ * OFX / QFX investment downloads (what institutions offer for Quicken): each
+ * account's positions and cash, its transactions and the securities they
+ * name, as one import's accounts (./imports). Parsed in the browser with
+ * ofx-js (both OFX 1.x SGML and 2.x XML); the server checks the result and
+ * works out each day from it.
  */
 import { parseStrict } from 'ofx-js';
-import type { IsoDate } from '../../shared/dates';
+import { addDays, type IsoDate } from '../../shared/dates';
 import { toMinor } from '../../shared/money';
+import type { ImportedHoldings, ImportKind } from '../../shared/schemas';
+import type { FileAccount, ReadTransaction } from './imports';
 
-export interface OfxFund {
-  /** The security's id in the file (a CUSIP, usually): the same fund in every download. */
-  id: string;
-  name: string;
-}
-
-export interface OfxTransaction {
-  /** The institution's id for the transaction (FITID): the same in overlapping downloads. */
-  id: string;
-  date: IsoDate;
-  /** The OFX element, e.g. BUYMF. */
-  type: string;
-  fund: string;
-  /** Signed: shares in (bought, reinvested, transferred in) positive. */
-  shares: number;
-  price: number;
-  /** The transaction's total in cents, without sign. */
-  amount: number;
-  /** Commission, fees, load and taxes in cents: the total is shares × price plus or minus these. */
-  charges: number;
-}
-
-export interface OfxHoldings {
-  /** The account's last four characters (a download can hold several accounts). */
-  account: string;
-  currency: string;
-  /** The day the positions are as of. */
-  asOf: IsoDate;
-  funds: OfxFund[];
-  positions: { fund: string; shares: number; price: number }[];
-  transactions: OfxTransaction[];
-  /** Transaction types in the file that aren't understood yet (the import is refused). */
-  unknownTypes: string[];
-}
-
-/** Elements that move shares, and which way. */
-const SHARES_IN = new Set(['BUYMF', 'BUYSTOCK', 'BUYOTHER', 'REINVEST']);
-const SHARES_OUT = new Set(['SELLMF', 'SELLSTOCK', 'SELLOTHER']);
+/** Elements and what they do; any other is listed as not understood. */
+const KINDS: Record<string, ImportKind> = {
+  BUYMF: 'buy',
+  BUYSTOCK: 'buy',
+  BUYOTHER: 'buy',
+  SELLMF: 'sell',
+  SELLSTOCK: 'sell',
+  SELLOTHER: 'sell',
+  REINVEST: 'reinvest',
+  TRANSFER: 'transfer',
+  INCOME: 'income',
+  INVBANKTRAN: 'deposit',
+};
 const LISTS = new Set(['DTSTART', 'DTEND']);
+const CHARGES = ['COMMISSION', 'FEES', 'LOAD', 'TAXES', 'WITHHOLDING'];
+/** How long after its income a reinvestment may come. */
+const REINVEST_DAYS = 7;
 
 type Element = Record<string, unknown>;
 const list = <T>(value: T | T[] | undefined): T[] => (value === undefined ? [] : Array.isArray(value) ? value : [value]);
-const text = (value: unknown) => (typeof value === 'string' ? value : '');
+const text = (value: unknown) => (typeof value === 'string' ? value.trim() : '');
 const number = (value: unknown) => Number(text(value)) || 0;
 /** An OFX date-time (20260105150000.000[-6:CST]) as the institution's calendar day. */
 const day = (value: unknown) => {
@@ -60,115 +41,153 @@ const day = (value: unknown) => {
 /** ofx-js decodes one level of entities; some institutions escape twice (S&amp;amp;P). */
 const decode = (value: string) =>
   value.replace(/&(amp|lt|gt|quot|apos|#39);/g, (_, name: string) => ({ amp: '&', lt: '<', gt: '>', quot: '"', apos: "'", '#39': "'" })[name] ?? '');
+/** A market ticker, or null for a fund with none (plans say "Unknown"). */
+const ticker = (value: unknown) => {
+  const symbol = text(value).toUpperCase();
+  return /^[A-Z][A-Z0-9.-]{0,9}$/.test(symbol) && symbol !== 'UNKNOWN' && symbol !== 'NULL' && symbol !== 'NONE' ? symbol : null;
+};
 
 /** Whether a file looks like OFX (either version) rather than CSV. */
 export function isOfx(content: string): boolean {
   return /^\s*(OFXHEADER:|<\?xml[^>]*>\s*<\?OFX|<OFX>)/i.test(content);
 }
 
-/** Each investment account's holdings in a download (none for a bank statement). */
-export function ofxHoldings(content: string): OfxHoldings[] {
+/** Each investment account in a download (none for a bank statement). */
+export function ofxAccounts(content: string): FileAccount[] {
   const ofx = parseStrict(content).OFX;
-  const funds = new Map<string, OfxFund>();
+  const securities = new Map<string, ImportedHoldings['securities'][number]>();
   for (const [kind, entries] of Object.entries(ofx.SECLISTMSGSRSV1?.SECLIST ?? {})) {
     if (!kind.endsWith('INFO')) continue;
     for (const entry of list(entries as Element | Element[])) {
       const info = entry.SECINFO as Element | undefined;
       const id = text((info?.SECID as Element | undefined)?.UNIQUEID);
-      if (id) funds.set(id, { id, name: decode(text(info?.SECNAME)) || id });
+      if (id) securities.set(id, { id, ticker: ticker(info?.TICKER), name: decode(text(info?.SECNAME)) || id });
     }
   }
-  return list(ofx.INVSTMTMSGSRSV1?.INVSTMTTRNRS).flatMap((response) => (response.INVSTMTRS ? [statement(response.INVSTMTRS as unknown as Element, funds)] : []));
+  const signOn = (ofx.SIGNONMSGSRSV1 as unknown as Element | undefined)?.SONRS as Element | undefined;
+  const institution = text((signOn?.FI as Element | undefined)?.ORG) || null;
+  return list(ofx.INVSTMTMSGSRSV1?.INVSTMTTRNRS).flatMap((response) =>
+    response.INVSTMTRS ? [statement(response.INVSTMTRS as unknown as Element, securities, institution)] : [],
+  );
 }
 
-function statement(response: Element, funds: Map<string, OfxFund>): OfxHoldings {
-  const positions: OfxHoldings['positions'] = [];
+function statement(response: Element, securities: Map<string, ImportedHoldings['securities'][number]>, institution: string | null): FileAccount {
+  const positions: ImportedHoldings['positions'] = [];
   let asOf: IsoDate | null = null;
   for (const entries of Object.values((response.INVPOSLIST ?? {}) as Element)) {
     for (const entry of list(entries as Element | Element[])) {
       const position = entry.INVPOS as Element;
-      const fund = text((position.SECID as Element).UNIQUEID);
+      const security = text((position.SECID as Element).UNIQUEID);
       const date = day(position.DTPRICEASOF);
       if (!asOf || date > asOf) asOf = date;
-      if (number(position.UNITS) !== 0) positions.push({ fund, shares: number(position.UNITS), price: number(position.UNITPRICE) });
+      if (number(position.UNITS) !== 0) positions.push({ security, shares: number(position.UNITS), price: Math.abs(number(position.UNITPRICE)) });
     }
   }
 
-  const transactions: OfxTransaction[] = [];
+  const transactions: ReadTransaction[] = [];
   const unknownTypes = new Set<string>();
-  const transactionList = (response.INVTRANLIST ?? {}) as Record<string, unknown>;
-  for (const [type, entries] of Object.entries(transactionList)) {
+  for (const [type, entries] of Object.entries((response.INVTRANLIST ?? {}) as Record<string, unknown>)) {
     if (LISTS.has(type)) continue;
-    const moves = SHARES_IN.has(type) ? 1 : SHARES_OUT.has(type) ? -1 : type === 'TRANSFER' ? 0 : null;
-    if (moves === null) {
+    const kind = KINDS[type];
+    if (!kind) {
       unknownTypes.add(type);
       continue;
     }
-    for (const entry of list(entries as Element | Element[])) {
-      // Buys and sells keep their details in INVBUY / INVSELL; the others at the top.
-      const detail = (entry.INVBUY ?? entry.INVSELL ?? entry) as Element;
-      const core = detail.INVTRAN as Element;
-      // Institutions differ on the sign of a sale's units: the element says which way they went.
-      const direction = moves !== 0 ? moves : text(entry.TFERACTION) === 'OUT' ? -1 : 1;
-      transactions.push({
-        id: text(core.FITID),
-        date: day(core.DTTRADE),
-        type,
-        fund: text((detail.SECID as Element).UNIQUEID),
-        shares: direction * Math.abs(number(detail.UNITS)),
-        price: number(detail.UNITPRICE),
-        amount: Math.abs(toMinor(number(detail.TOTAL))),
-        charges: ['COMMISSION', 'FEES', 'LOAD', 'TAXES'].reduce((sum, field) => sum + Math.abs(toMinor(number(detail[field]))), 0),
-      });
-    }
+    for (const entry of list(entries as Element | Element[])) transactions.push(transaction(type, kind, entry));
+  }
+  transactions.sort((a, b) => a.date.localeCompare(b.date));
+
+  // A reinvestment is the income and the purchase it pays for, as other downloads list them (into a
+  // money market fund, which is cash, the income is what changes the account's cash). Most come on
+  // their own; one reinvested after it's paid, or less a fee, comes after its income, which then isn't added again.
+  const paid = transactions.filter((txn) => txn.kind === 'income' && txn.security);
+  for (const txn of transactions.filter((candidate) => candidate.kind === 'reinvest')) {
+    txn.amount = -txn.value;
+    // Its income may be more than it reinvests: a fee (an ADR's custody fee, listed on its own) comes out first.
+    const earlier = paid.findIndex((income) => income.security === txn.security && income.amount >= txn.value && income.date <= txn.date && income.date >= addDays(txn.date, -REINVEST_DAYS));
+    if (earlier >= 0) paid.splice(earlier, 1);
+    else transactions.push({ ...txn, id: txn.id && `${txn.id}:income`, kind: 'income', shares: 0, price: 0, amount: txn.value, value: 0, charges: 0 });
   }
 
+  // Sweep funds are cash: moving money into or out of them is a sweep, their income is cash income.
+  const cash = toMinor(number((response.INVBAL as Element | undefined)?.AVAILCASH));
+  const swept = sweepFunds(cash, positions);
+  for (const txn of transactions) {
+    if (!txn.security || !swept.has(txn.security)) continue;
+    if (txn.kind !== 'income') Object.assign(txn, { kind: 'sweep', shares: 0 });
+    txn.security = null;
+  }
+  // Some institutions reinvest the sweep's interest as a withdrawal of the same amount on the day it's
+  // paid: the money moves into the sweep (still cash), it doesn't leave the account.
+  const cashIncome = transactions.filter((txn) => txn.kind === 'income' && txn.security === null);
+  for (const txn of transactions) {
+    if (txn.kind !== 'withdrawal') continue;
+    const paid = cashIncome.findIndex((income) => income.date === txn.date && income.amount === -txn.amount);
+    if (paid < 0) continue;
+    cashIncome.splice(paid, 1);
+    txn.kind = 'sweep';
+  }
+  const held = positions.filter((row) => !swept.has(row.security));
+
+  const account = text((response.INVACCTFROM as Element | undefined)?.ACCTID);
+  const used = new Set([...held.map((row) => row.security), ...transactions.flatMap((txn) => (txn.security ? [txn.security] : []))]);
   const lastTrade = transactions.map((txn) => txn.date).sort().at(-1);
   return {
-    account: text((response.INVACCTFROM as Element | undefined)?.ACCTID).slice(-4),
-    currency: text(response.CURDEF) || 'USD',
-    asOf: asOf ?? lastTrade ?? day(response.DTASOF),
-    funds: [...funds.values()],
-    positions,
-    transactions,
+    number: account || null,
+    institution: institution ?? (text((response.INVACCTFROM as Element | undefined)?.BROKERID) || null),
     unknownTypes: [...unknownTypes],
+    file: {
+      kind: 'holdings',
+      currency: text(response.CURDEF) || 'USD',
+      asOf: asOf ?? lastTrade ?? day(response.DTASOF),
+      securities: [...securities.values()].filter((security) => used.has(security.id)),
+      positions: held,
+      cash,
+      transactions: transactions.sort((a, b) => a.date.localeCompare(b.date)),
+    },
   };
 }
 
 /**
- * The statements for one account: by its last digits when the downloads hold
- * several accounts, else the only account in them. Throws, naming the
- * accounts, when it can't tell.
+ * The funds the account's cash is swept into. OFX's available cash includes
+ * sweep funds: a money market or bank sweep position ($1 a share) worth
+ * exactly that much is the cash itself, not a holding beside it.
  */
-export function statementsFor(statements: OfxHoldings[], mask: string | null | undefined): OfxHoldings[] {
-  const accounts = [...new Set(statements.map((statement) => statement.account))];
-  const last4 = mask?.slice(-4);
-  if (last4 && accounts.includes(last4)) return statements.filter((statement) => statement.account === last4);
-  if (accounts.length === 1) return statements;
-  throw new Error(`These files hold accounts ending ${accounts.map((account) => `··${account}`).join(', ')}: choose the account whose number ends the same (set its last digits when editing it).`);
+function sweepFunds(available: number, positions: ImportedHoldings['positions']): Set<string> {
+  const dollar = positions.filter((row) => row.price === 1);
+  const worth = (rows: typeof dollar) => rows.reduce((sum, row) => sum + toMinor(row.shares), 0);
+  if (available === 0 || dollar.length === 0) return new Set();
+  const one = dollar.find((row) => Math.abs(worth([row]) - available) <= 1);
+  if (one) return new Set([one.security]);
+  return Math.abs(worth(dollar) - available) <= 1 ? new Set(dollar.map((row) => row.security)) : new Set();
 }
 
-/**
- * Several downloads of one account as one: transactions merged by the
- * institution's id (overlapping date ranges count once), positions from the
- * most recent download. Throws when the files disagree on the currency.
- */
-export function mergeOfx(statements: OfxHoldings[]): OfxHoldings {
-  if (new Set(statements.map((statement) => statement.currency)).size > 1) throw new Error('These files are in different currencies.');
-  const latest = statements.reduce((best, statement) => (statement.asOf > best.asOf ? statement : best));
-  const transactions = new Map<string, OfxTransaction>();
-  const funds = new Map<string, OfxFund>();
-  for (const statement of statements) {
-    for (const txn of statement.transactions) transactions.set(txn.id || `${txn.date}:${txn.type}:${txn.fund}:${txn.shares}`, txn);
-    for (const fund of statement.funds) funds.set(fund.id, fund);
+function transaction(type: string, kind: ImportKind, entry: Element): ReadTransaction {
+  if (type === 'INVBANKTRAN') {
+    // Money in or out of the account's cash.
+    const bank = entry.STMTTRN as Element;
+    const amount = toMinor(number(bank.TRNAMT));
+    return { id: text(bank.FITID), date: day(bank.DTPOSTED), kind: amount < 0 ? 'withdrawal' : 'deposit', label: type, security: null, shares: 0, price: 0, amount, value: 0, charges: 0 };
   }
+  // Buys and sells keep their details in INVBUY / INVSELL; the others at the top.
+  const detail = (entry.INVBUY ?? entry.INVSELL ?? entry) as Element;
+  const core = detail.INVTRAN as Element;
+  const total = Math.abs(toMinor(number(detail.TOTAL)));
+  // Institutions differ on the sign of a sale's units: the element says which way they went.
+  const direction = kind === 'sell' || (kind === 'transfer' && text(entry.TFERACTION) === 'OUT') ? -1 : 1;
+  const shares = kind === 'income' ? 0 : direction * Math.abs(number(detail.UNITS));
+  // Cash: a buy pays the total, a sale and income bring it in; a transfer only moves shares (a reinvestment's income is added by the caller).
+  const amount = kind === 'buy' ? -total : kind === 'sell' ? total : kind === 'income' ? toMinor(number(detail.TOTAL)) : 0;
   return {
-    account: latest.account,
-    currency: latest.currency,
-    asOf: latest.asOf,
-    funds: [...funds.values()],
-    positions: latest.positions,
-    transactions: [...transactions.values()].sort((a, b) => a.date.localeCompare(b.date)),
-    unknownTypes: [...new Set(statements.flatMap((statement) => statement.unknownTypes))],
+    id: text(core.FITID),
+    date: day(core.DTTRADE),
+    kind,
+    label: type,
+    security: text((detail.SECID as Element | undefined)?.UNIQUEID) || null,
+    shares,
+    price: Math.abs(number(detail.UNITPRICE)),
+    amount,
+    value: kind === 'income' || kind === 'transfer' ? 0 : total,
+    charges: CHARGES.reduce((sum, field) => sum + Math.abs(toMinor(number(detail[field]))), 0),
   };
 }
