@@ -1,7 +1,14 @@
 /**
- * Minimal CSV parsing and column mapping for history imports. Parsing happens
- * in the browser; the server validates the normalised rows.
+ * Minimal CSV parsing and column mapping for history imports: dates and
+ * balances, or transactions (cash, or investments) whose columns are found
+ * from the header. Parsing happens in the browser; the server validates the
+ * normalised rows.
  */
+import type { IsoDate } from '../../shared/dates';
+import { toMinor } from '../../shared/money';
+import type { ImportedFile, ImportedHoldings, ImportKind } from '../../shared/schemas';
+import type { FileAccount, ReadTransaction } from './imports';
+import { ticker } from './ofx';
 
 /** RFC 4180-ish parser: quoted fields, escaped quotes, CRLF. */
 export function parseCsv(text: string): string[][] {
@@ -115,5 +122,142 @@ export function extractBalances(rows: string[][], mapping: BalanceMapping): { ro
   return {
     rows: [...byDate].map(([date, balance]) => ({ date, balance })).sort((a, b) => a.date.localeCompare(b.date)),
     skipped,
+  };
+}
+
+/** A header cell for each column a transactions CSV may have, tried in order. */
+const COLUMNS = {
+  date: /\bdate\b/,
+  shares: /\b(shares?|units?|quantity|qty)\b/,
+  price: /\bprice\b/,
+  amount: /\b(amount|total)\b/,
+  value: /\bvalue\b/,
+  debit: /\b(debit|withdrawals?|money out|paid out|outflow)\b/,
+  credit: /\b(credit|deposits?|money in|paid in|inflow)\b/,
+  symbol: /\b(symbol|ticker)\b/,
+  security: /\b(fund|security|investment|holding|name)\b/,
+  type: /\b(type|action|activity|transaction)\b/,
+  description: /\b(description|details|memo|payee|narrative)\b/,
+  status: /\bstatus\b/,
+} as const;
+
+type Columns = { -readonly [key in keyof typeof COLUMNS]: number };
+
+/** Each column found in the header (-1 when missing), no column used twice. */
+function findColumns(header: string[]): Columns {
+  const cells = header.map((cell) => cell.toLowerCase());
+  const used = new Set<number>();
+  const found = {} as Columns;
+  for (const [key, pattern] of Object.entries(COLUMNS) as [keyof Columns, RegExp][]) {
+    const index = cells.findIndex((cell, at) => !used.has(at) && pattern.test(cell));
+    if (index >= 0) used.add(index);
+    found[key] = index;
+  }
+  return found;
+}
+
+/**
+ * What a transactions CSV holds: investments when it has shares and the
+ * security they're in, cash when it has amounts (one column, or debits and
+ * credits). Null for anything else (a CSV of balances is read as one).
+ */
+export function transactionsKind(rows: string[][]): 'holdings' | 'cash' | null {
+  const columns = findColumns(rows[0] ?? []);
+  if (columns.date < 0) return null;
+  if (columns.shares >= 0 && (columns.security >= 0 || columns.symbol >= 0)) return 'holdings';
+  if (columns.amount >= 0 || columns.debit >= 0 || columns.credit >= 0) return 'cash';
+  return null;
+}
+
+/**
+ * The kind of an investment transaction from the file's type for it and the
+ * shares it moves; null for a type it doesn't know (listed, never guessed).
+ * With no type column, the shares say which way a trade went.
+ */
+export function investmentKind(type: string, shares: number, amount: number): ImportKind | null {
+  const text = type.toLowerCase();
+  const moves = Math.abs(shares) > 0;
+  if (!text) return moves ? (shares > 0 ? 'buy' : 'sell') : amount > 0 ? 'deposit' : amount < 0 ? 'withdrawal' : null;
+  if (/reinvest/.test(text)) return 'reinvest';
+  if (/split/.test(text)) return 'transfer';
+  if (/\b(fees?|expense|charge)\b/.test(text)) return moves ? 'sell' : 'fee';
+  if (/dividend|interest|capital gain|distribution|income/.test(text)) return moves ? 'reinvest' : 'income';
+  if (/\b(buy|bought|purchase)/.test(text)) return 'buy';
+  if (/\b(sell|sold|sale|redemption|redeem)/.test(text)) return 'sell';
+  if (/transfer|exchange/.test(text)) return moves ? 'transfer' : amount >= 0 ? 'deposit' : 'withdrawal';
+  if (/contribution|deposit/.test(text)) return moves ? 'buy' : 'deposit';
+  if (/withdraw/.test(text)) return moves ? 'sell' : 'withdrawal';
+  return null;
+}
+
+/**
+ * A CSV of transactions as one account with no balance yet (it's known once
+ * given: ./known). Cash: each row's amount, signed as the file has it.
+ * Investments: each row's kind, shares and price, the cash amount signed by
+ * its kind (a buy pays, a sale brings in). Pending rows are left out; a row
+ * whose date or amount can't be read stops the import, saying which.
+ */
+export function transactionsAccount(rows: string[][]): FileAccount | null {
+  const kind = transactionsKind(rows);
+  if (!kind) return null;
+  const columns = findColumns(rows[0]);
+  const cell = (row: string[], column: number) => (column >= 0 ? (row[column] ?? '').trim() : '');
+  const dateFormat = guessDateFormat(rows.slice(1).map((row) => cell(row, columns.date)));
+  const transactions: ReadTransaction[] = [];
+  const securities = new Map<string, ImportedHoldings['securities'][number]>();
+  const unknownTypes = new Set<string>();
+  rows.slice(1).forEach((row, index) => {
+    if (/pending/i.test(cell(row, columns.status))) return;
+    const line = index + 2;
+    const date = parseDate(cell(row, columns.date), dateFormat) as IsoDate | null;
+    if (!date) throw new Error(`Row ${line} of the CSV has no date Wattle can read.`);
+    const label = cell(row, columns.type);
+    const amountCell = cell(row, columns.amount) || cell(row, columns.value);
+    let amount = amountCell ? parseAmount(amountCell) : null;
+    if (amount === null && (cell(row, columns.debit) || cell(row, columns.credit))) amount = Math.abs(parseAmount(cell(row, columns.credit)) ?? 0) - Math.abs(parseAmount(cell(row, columns.debit)) ?? 0);
+    if (kind === 'cash') {
+      if (amount === null) throw new Error(`Row ${line} of the CSV has no amount Wattle can read.`);
+      if (amount === 0) return;
+      const cents = toMinor(amount);
+      // Named by its type, else its description: interest and dividends are income, a charge a fee.
+      const named = label || cell(row, columns.description);
+      const cashKind: ImportKind = /interest|dividend/i.test(named) ? 'income' : /\bfees?\b|charge/i.test(named) && cents < 0 ? 'fee' : cents < 0 ? 'withdrawal' : 'deposit';
+      transactions.push({ date, kind: cashKind, label: named || 'CSV', security: null, shares: 0, price: 0, amount: cents, value: 0, charges: 0 });
+      return;
+    }
+    const shares = parseAmount(cell(row, columns.shares)) ?? 0;
+    const price = Math.abs(parseAmount(cell(row, columns.price)) ?? 0);
+    const value = amount !== null ? Math.abs(toMinor(amount)) : Math.round(Math.abs(shares) * price * 100);
+    const txnKind = investmentKind(label, shares, amount ?? 0);
+    if (!txnKind) {
+      unknownTypes.add(label);
+      return;
+    }
+    const symbol = ticker(cell(row, columns.symbol));
+    const name = cell(row, columns.security);
+    const id = symbol ?? name;
+    const holds = ['buy', 'sell', 'reinvest', 'transfer'].includes(txnKind);
+    if (holds && !id) throw new Error(`Row ${line} of the CSV doesn't say which security it's in.`);
+    if (holds && !securities.has(id)) securities.set(id, { id, ticker: symbol, name: name || id });
+    // Cash: a buy pays its total, a sale and income bring it in; a reinvestment or transfer only moves shares.
+    const signed = txnKind === 'buy' ? -value : txnKind === 'sell' || txnKind === 'income' || txnKind === 'deposit' ? value : txnKind === 'withdrawal' || txnKind === 'fee' ? -value : 0;
+    const direction = txnKind === 'sell' ? -1 : txnKind === 'transfer' ? Math.sign(shares) : 1;
+    transactions.push({ date, kind: txnKind, label: label || 'CSV', security: holds ? id : null, shares: holds ? direction * Math.abs(shares) : 0, price, amount: signed, value: txnKind === 'transfer' ? 0 : value, charges: 0 });
+  });
+  transactions.sort((a, b) => a.date.localeCompare(b.date));
+  const placeholder: ImportedFile =
+    kind === 'cash'
+      ? { kind: 'balances', rows: [] }
+      : { kind: 'holdings', asOf: transactions.at(-1)?.date ?? ('1970-01-01' as IsoDate), securities: [...securities.values()], positions: [], cash: 0, transactions };
+  return {
+    number: null,
+    institution: null,
+    type: kind === 'holdings' ? 'investment' : undefined,
+    unknownTypes: [...unknownTypes],
+    file: placeholder,
+    unanchored:
+      kind === 'cash'
+        ? { kind: 'cash', transactions }
+        : { kind: 'holdings', securities: [...securities.values()], transactions, moneyMoves: transactions.some((txn) => ['income', 'deposit', 'withdrawal', 'fee'].includes(txn.kind)) },
   };
 }

@@ -49,7 +49,7 @@ const NOT_TICKERS = new Set(['UNKNOWN', 'NULL', 'NONE', 'N/A', 'NA', 'CASH', 'LO
  * A market ticker, or null for a fund with none: plans fill the field with
  * "Unknown", a word (CASH, LOAN) or a numbered placeholder (NONE9, NON0Z).
  */
-const ticker = (value: unknown) => {
+export const ticker = (value: unknown) => {
   const symbol = text(value).toUpperCase();
   return /^[A-Z][A-Z0-9.-]{0,9}$/.test(symbol) && !NOT_TICKERS.has(symbol) && !/^NON[E0-9]/.test(symbol) ? symbol : null;
 };

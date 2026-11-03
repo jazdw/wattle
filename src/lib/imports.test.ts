@@ -33,6 +33,12 @@ describe('readFiles', () => {
     expect(read.accounts[0].file).toMatchObject({ rows: [{ date: '2026-09-01', balance: 200 }, { date: '2026-09-10', balance: 700 }, { date: '2026-09-15', balance: 700 }, { date: '2026-10-01', balance: 600 }, { date: '2026-10-08', balance: 600 }] });
   });
 
+  it('reads a CSV of transactions beside other files, named by the file', () => {
+    const read = readFiles(['Date,Type,Symbol,Shares,Price,Amount\n2026-01-05,Buy,VTI,10,100,1000', bankSgml([['20260910', '500.00']], '700.00')], ['funds.csv', 'bank.qfx']);
+    if (read.kind !== 'accounts') throw new Error('expected accounts');
+    expect(read.accounts.map((account) => [account.fileName ?? account.number, account.unanchored?.kind ?? account.file.kind])).toEqual([['funds.csv', 'holdings'], ['99990001', 'balances']]);
+  });
+
   it('gives a CSV of balances its columns to choose, on its own', () => {
     const read = readFiles(['Account,Date,Description,Debit,Credit,Balance\n1,03/10/2026,x,,1,5']);
     expect(read).toMatchObject({ kind: 'table', guess: { dateColumn: 1, balanceColumn: 5 } });

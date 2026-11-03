@@ -232,6 +232,31 @@ describe('Import', () => {
     });
   });
 
+  it('works out a CSV of transactions from a balance you give, at its start or end', async () => {
+    server.use(http.post('*/api/imports', () => HttpResponse.json(accepted)));
+    const { user, dialog } = await openImport();
+    // Made up: a cash export with no balance in it.
+    upload(dialog, 'Date,Description,Amount\n2026-09-01,Contribution,500.00\n2026-09-15,Purchase,-200.00');
+    expect(await within(dialog).findByText(/2 transactions · Sep 1, 2026 – Sep 15, 2026/)).toBeInTheDocument();
+    await user.selectOptions(within(dialog).getByLabelText('Import file0 into'), 'wbc');
+    expect(within(dialog).getByText(/Give the balance known at the start or end/)).toBeInTheDocument();
+    expect(within(dialog).getByRole('button', { name: 'Import' })).toBeDisabled();
+
+    // $1,000 before the first transaction.
+    await user.selectOptions(within(dialog).getByLabelText('Known'), 'start');
+    await user.type(within(dialog).getByLabelText('Balance'), '1000');
+    await user.click(within(dialog).getByRole('button', { name: 'Import' }));
+    await expect.poll(() => sent('POST /api/imports')[0]?.body).toEqual({
+      accounts: [
+        {
+          label: 'file0',
+          target: { accountId: 'wbc' },
+          file: { kind: 'balances', rows: [{ date: '2026-08-31', balance: 1000 }, { date: '2026-09-01', balance: 1500 }, { date: '2026-09-15', balance: 1300 }] },
+        },
+      ],
+    });
+  });
+
   it("won't import an account with transaction types it doesn't understand, until it's skipped", async () => {
     server.use(http.post('*/api/imports/tickers', () => HttpResponse.json({ suggestions: [] })));
     const expense = `<INVEXPENSE><INVTRAN><FITID>E1</FITID><DTTRADE>20260901</DTTRADE></INVTRAN><SECID><UNIQUEID>000000002</UNIQUEID><UNIQUEIDTYPE>CUSIP</UNIQUEIDTYPE></SECID><TOTAL>5.00</TOTAL><SUBACCTSEC>CASH</SUBACCTSEC><SUBACCTFUND>CASH</SUBACCTFUND></INVEXPENSE>`;
