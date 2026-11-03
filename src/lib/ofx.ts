@@ -218,7 +218,10 @@ function transaction(type: string, kind: ImportKind, entry: Element): ReadTransa
     const bank = entry.STMTTRN as Element;
     const amount = toMinor(number(bank.TRNAMT));
     const description = decode(text(bank.MEMO) || text(bank.NAME));
-    return { id: text(bank.FITID), date: day(bank.DTPOSTED), kind: amount < 0 ? 'withdrawal' : 'deposit', label: type, ...(description ? { description } : {}), security: null, shares: 0, price: 0, amount, value: 0, charges: 0 };
+    // The bank's own type says when it's interest, a dividend or a fee; otherwise in or out by its sign.
+    const trntype = text(bank.TRNTYPE).toUpperCase();
+    const cashKind: ImportKind = (trntype === 'INT' || trntype === 'DIV') && amount > 0 ? 'income' : (trntype === 'FEE' || trntype === 'SRVCHG') && amount < 0 ? 'fee' : amount < 0 ? 'withdrawal' : 'deposit';
+    return { id: text(bank.FITID), date: day(bank.DTPOSTED), kind: cashKind, label: type, ...(description ? { description } : {}), security: null, shares: 0, price: 0, amount, value: 0, charges: 0 };
   }
   // Buys and sells keep their details in INVBUY / INVSELL; the others at the top.
   const detail = (entry.INVBUY ?? entry.INVSELL ?? entry) as Element;
