@@ -131,4 +131,17 @@ describe('ofxAccounts', () => {
       ],
     });
   });
+
+  it('pairs each reinvestment with its own income when two are paid on one day, one less a fee', () => {
+    // $10.00 paid and $9.80 reinvested after a $0.20 fee, and $9.00 reinvested on its own (its income not listed apart).
+    const income = `<INCOME><INVTRAN><FITID>I1</FITID><DTTRADE>20260710</DTTRADE></INVTRAN><SECID><UNIQUEID>922908769</UNIQUEID><UNIQUEIDTYPE>CUSIP</UNIQUEIDTYPE></SECID><INCOMETYPE>DIV</INCOMETYPE><TOTAL>10.00</TOTAL><SUBACCTSEC>CASH</SUBACCTSEC><SUBACCTFUND>CASH</SUBACCTFUND></INCOME>`;
+    const reinvest = (fitid: string, units: string, total: string) =>
+      `<REINVEST><INVTRAN><FITID>${fitid}</FITID><DTTRADE>20260710</DTTRADE></INVTRAN><SECID><UNIQUEID>922908769</UNIQUEID><UNIQUEIDTYPE>CUSIP</UNIQUEIDTYPE></SECID><INCOMETYPE>DIV</INCOMETYPE><TOTAL>${total}</TOTAL><SUBACCTSEC>CASH</SUBACCTSEC><UNITS>${units}</UNITS><UNITPRICE>100</UNITPRICE></REINVEST>`;
+    const fee = `<INVBANKTRAN><STMTTRN><TRNTYPE>OTHER</TRNTYPE><DTPOSTED>20260710</DTPOSTED><TRNAMT>-0.20</TRNAMT><FITID>W1</FITID></STMTTRN><SUBACCTFUND>CASH</SUBACCTFUND></INVBANKTRAN>`;
+    const [account] = ofxAccounts(sgml(income + reinvest('R1', '0.09', '9.00') + reinvest('R2', '0.098', '9.80') + fee));
+    if (account.file.kind !== 'holdings') throw new Error('expected holdings');
+    // Paid, less the fee, all reinvested: the day's cash doesn't move.
+    expect(account.file.transactions.reduce((sum, txn) => sum + txn.amount, 0)).toBe(0);
+  });
 });
+

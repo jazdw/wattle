@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import type { ImportedHoldings } from '../../shared/schemas';
-import { mergeAccounts, readFiles, type FileAccount } from './imports';
+import { combineAccounts, mergeAccounts, readFiles, type FileAccount } from './imports';
+import { csvAccounts } from './csv';
 import { bankSgml, buy, sgml } from '../test/ofx';
 
 const holdings = (account: FileAccount) => account.file as ImportedHoldings;
@@ -72,3 +73,28 @@ describe('mergeAccounts', () => {
     expect(() => mergeAccounts([[account([])], [aud]])).toThrow(/different currencies/);
   });
 });
+
+describe('combineAccounts', () => {
+  const year = (date: string, shares: string) => csvAccounts(`Date,Type,Fund,Shares,Price,Amount\n${date},Buy,Example Plan Fund,${shares},25,${Number(shares) * 25}`)!.map((account) => ({ ...account, fileName: `${date}.csv` }))[0];
+
+  it('combines a CSV a year into one account, still waiting for a known balance', () => {
+    const both = combineAccounts([year('2025-03-01', '10'), year('2026-03-01', '4')]);
+    expect(both.unanchored?.transactions.map((txn) => txn.date)).toEqual(['2025-03-01', '2026-03-01']);
+    expect(both.fileName).toBe('2025-03-01.csv');
+  });
+
+  it('takes what a holdings file says is held, with the transactions from the other', () => {
+    const [holdings] = csvAccounts('Fund,Shares,Last trade price\nExample Plan Fund,14,25')!;
+    const both = combineAccounts([year('2025-03-01', '10'), { ...holdings, fileName: 'holdings.csv' }, year('2026-03-01', '4')]);
+    expect(both.unanchored).toBeUndefined();
+    expect(both.file).toMatchObject({ kind: 'holdings', asOf: '2026-03-01', positions: [{ security: 'Example Plan Fund', shares: 14 }] });
+    expect(both.file.kind === 'holdings' && both.file.transactions).toHaveLength(2);
+  });
+
+  it("won't combine one account's Quicken file with a CSV of it: their transactions can't be matched", () => {
+    const read = readFiles([sgml(buy('B1', '20260803', '10', '12.5', '125.00'))]);
+    if (read.kind !== 'accounts') throw new Error('expected accounts');
+    expect(() => combineAccounts([read.accounts[0], year('2026-08-03', '10')])).toThrow(/in a Quicken file and a CSV/);
+  });
+});
+

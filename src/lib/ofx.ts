@@ -136,10 +136,11 @@ function statement(response: Element, securities: Map<string, ImportedHoldings['
   // money market fund, which is cash, the income is what changes the account's cash). Most come on
   // their own; one reinvested after it's paid, or less a fee, comes after its income, which then isn't added again.
   const paid = transactions.filter((txn) => txn.kind === 'income' && txn.security);
-  for (const txn of transactions.filter((candidate) => candidate.kind === 'reinvest')) {
+  // The largest first, so a smaller one doesn't take the income a larger one spent.
+  for (const txn of transactions.filter((candidate) => candidate.kind === 'reinvest').sort((a, b) => b.value - a.value)) {
     txn.amount = -txn.value;
     // Its income may be more than it reinvests: a fee (an ADR's custody fee, listed on its own) comes out first.
-    const earlier = paid.findIndex((income) => income.security === txn.security && income.amount >= txn.value && income.date <= txn.date && income.date >= addDays(txn.date, -REINVEST_DAYS));
+    const earlier = closestIncome(paid, txn);
     if (earlier >= 0) paid.splice(earlier, 1);
     else transactions.push({ ...txn, id: txn.id && `${txn.id}:income`, kind: 'income', shares: 0, price: 0, amount: txn.value, value: 0, charges: 0 });
   }
@@ -181,6 +182,20 @@ function statement(response: Element, securities: Map<string, ImportedHoldings['
       transactions: transactions.sort((a, b) => a.date.localeCompare(b.date)),
     },
   };
+}
+
+/**
+ * The income a reinvestment spent: from the same security in the days
+ * before, at least as much, the closest in amount (two dividends on one day,
+ * one less a fee, each go with their own reinvestment); -1 when none.
+ */
+export function closestIncome(incomes: ReadTransaction[], reinvestment: ReadTransaction): number {
+  let best = -1;
+  incomes.forEach((income, index) => {
+    if (income.security !== reinvestment.security || income.amount < reinvestment.value || income.date > reinvestment.date || income.date < addDays(reinvestment.date, -REINVEST_DAYS)) return;
+    if (best < 0 || income.amount < incomes[best].amount) best = index;
+  });
+  return best;
 }
 
 /**

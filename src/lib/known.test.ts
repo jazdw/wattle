@@ -1,11 +1,11 @@
 import { describe, expect, it } from 'vitest';
-import { parseCsv, transactionsAccount } from './csv';
+import { csvAccounts } from './csv';
 import { balanceRows, withKnown } from './known';
 
 // Made up: a cash account's export with no balance in it.
-const cash = transactionsAccount(parseCsv('Date,Amount\n2026-09-01,500.00\n2026-09-15,-200.00\n2026-09-15,-50.00'))!;
+const cash = csvAccounts('Date,Amount\n2026-09-01,500.00\n2026-09-15,-200.00\n2026-09-15,-50.00')![0]!;
 // Made up: one fund bought twice, and its dividend paid in cash.
-const funds = transactionsAccount(parseCsv('Date,Type,Symbol,Shares,Price,Amount\n2026-01-05,Buy,VTI,10,100,1000\n2026-02-05,Buy,VTI,5,100,500\n2026-03-31,Dividend,VTI,0,0,12'))!;
+const funds = csvAccounts('Date,Type,Symbol,Shares,Price,Amount\n2026-01-05,Buy,VTI,10,100,1000\n2026-02-05,Buy,VTI,5,100,500\n2026-03-31,Dividend,VTI,0,0,12')![0]!;
 
 describe('withKnown', () => {
   it('works out a cash account from its balance at the end, or the same balance at the start, alike', () => {

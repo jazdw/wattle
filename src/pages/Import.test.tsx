@@ -211,4 +211,26 @@ describe('Import page', () => {
     expect(screen.getByRole('status')).toHaveTextContent('1 problem to fix before importing.');
     expect(screen.getByRole('button', { name: 'Import' })).toBeDisabled();
   });
+
+  it('combines files of one account that have no account number, such as a CSV a year', async () => {
+    server.use(http.post('*/api/imports/tickers', () => HttpResponse.json({ suggestions: [] })));
+    server.use(http.post('*/api/imports', () => HttpResponse.json(accepted)));
+    checked();
+    const { user } = await openImport();
+    // Made up: a cash account's exports, one a year, with no balance in them.
+    upload('Date,Description,Amount\n2025-06-01,Contribution,500.00', 'Date,Description,Amount\n2026-06-01,Contribution,300.00');
+    await user.selectOptions(await screen.findByLabelText('Import file1 into'), 'with:0');
+    expect(screen.getByText(/Imported together with that file/)).toBeInTheDocument();
+    expect(screen.getByText(/Choose where file0 goes/)).toBeInTheDocument();
+
+    await user.selectOptions(screen.getByLabelText('Import file0 into'), 'wbc');
+    // One known balance for both: $1,000 after the last.
+    expect(screen.getByText(/2 transactions · Jun 1, 2025 – Jun 1, 2026/)).toBeInTheDocument();
+    await user.type(screen.getByLabelText('Balance'), '1000');
+    await importIt(user);
+    await expect.poll(() => sent('POST /api/imports')[0]?.body).toEqual({
+      accounts: [{ label: 'file0', target: { accountId: 'wbc' }, file: { kind: 'balances', rows: [{ date: '2025-06-01', balance: 700 }, { date: '2026-06-01', balance: 1000 }] } }],
+    });
+  });
 });
+

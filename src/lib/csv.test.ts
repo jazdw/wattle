@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { extractBalances, guessMapping, investmentKind, parseAmount, parseCsv, transactionsAccount, transactionsKind } from './csv';
+import { csvAccounts, extractBalances, guessMapping, investmentKind, parseAmount, parseCsv, transactionsKind } from './csv';
 
 // Made up: a bank's transaction export, newest first, several rows a day, a running balance.
 const BANK = `Account,Date,Description,Debit,Credit,Balance,Category
@@ -80,13 +80,13 @@ const CASH = `Date,Description,Status,Amount
 
 describe('transactions CSV', () => {
   it('tells investments, cash and balances apart from the header', () => {
-    expect(transactionsKind(parseCsv(FUNDS))).toBe('holdings');
-    expect(transactionsKind(parseCsv(CASH))).toBe('cash');
-    expect(transactionsKind(parseCsv('Date,Balance\n2026-01-01,5'))).toBeNull();
+    expect(transactionsKind(FUNDS)).toBe('holdings');
+    expect(transactionsKind(CASH)).toBe('cash');
+    expect(transactionsKind('Date,Balance\n2026-01-01,5')).toBeNull();
   });
 
   it('reads investment transactions: kinds from the type, shares and cash signed by the kind, tickers from the symbol', () => {
-    const account = transactionsAccount(parseCsv(FUNDS))!;
+    const account = csvAccounts(FUNDS)![0]!;
     expect(account).toMatchObject({ number: null, type: 'investment', unknownTypes: [] });
     expect(account.unanchored).toMatchObject({
       kind: 'holdings',
@@ -105,20 +105,20 @@ describe('transactions CSV', () => {
   });
 
   it('reads cash transactions by their sign, leaving out pending ones', () => {
-    const account = transactionsAccount(parseCsv(CASH))!;
+    const account = csvAccounts(CASH)![0]!;
     expect(account.unanchored!.transactions.map(({ date, kind, amount }) => ({ date, kind, amount }))).toEqual([
       { date: '2026-09-01', kind: 'deposit', amount: 500_00 },
       { date: '2026-09-15', kind: 'withdrawal', amount: -200_00 },
       { date: '2026-09-30', kind: 'income', amount: 5 },
     ]);
     // Debits and credits in their own columns.
-    const split = transactionsAccount(parseCsv('Date,Debit,Credit\n2026-09-01,,100\n2026-09-02,40,'))!;
+    const split = csvAccounts('Date,Debit,Credit\n2026-09-01,,100\n2026-09-02,40,')![0]!;
     expect(split.unanchored!.transactions.map((txn) => txn.amount)).toEqual([100_00, -40_00]);
   });
 
   it("lists types it doesn't know, and stops at a row it can't read", () => {
-    expect(transactionsAccount(parseCsv('Date,Type,Fund,Shares,Amount\n2026-01-05,Merger,Example Fund,10,100'))!.unknownTypes).toEqual(['Merger']);
-    expect(() => transactionsAccount(parseCsv('Date,Amount\n2026-01-05,100\nsoon,5'))).toThrow(/Row 3 of the CSV has no date/);
+    expect(csvAccounts('Date,Type,Fund,Shares,Amount\n2026-01-05,Merger,Example Fund,10,100')![0]!.unknownTypes).toEqual(['Merger']);
+    expect(() => csvAccounts('Date,Amount\n2026-01-05,100\nsoon,5')![0]).toThrow(/Row 3 of the CSV has no date/);
   });
 
   it('names investment kinds from common wording', () => {
@@ -131,3 +131,52 @@ describe('transactions CSV', () => {
     expect(investmentKind('Something else', 1, 1)).toBeNull();
   });
 });
+
+// Made up: a download with two tables, holdings now and then transactions, for two accounts.
+const TWO_TABLES = `Account Number,Investment Name,Symbol,Shares,Share Price,Total Value
+11112222,EXAMPLE MONEY MARKET,EXMXX,250,1,250
+11112222,Example Total Market ETF,VTI,12,100,1200
+33334444,EXAMPLE CASH ACCOUNT,null,75,1,75
+
+Account Number,Trade Date,Transaction Type,Transaction Description,Investment Name,Symbol,Shares,Share Price,Net Amount
+11112222,2026-03-02,Funds Received,Deposit,EXAMPLE MONEY MARKET,EXMXX,0,1,1000
+11112222,2026-03-02,Sweep in,Sweep,EXAMPLE MONEY MARKET,EXMXX,0,1,1000
+11112222,2026-03-03,Buy,Buy,Example Total Market ETF,VTI,10,100,-1000
+11112222,2026-03-31,Dividend,Dividend,Example Total Market ETF,VTI,0,0,20
+11112222,2026-03-31,Reinvestment,Reinvestment,Example Total Market ETF,VTI,0.2,100,-20
+11112222,2026-04-01,Buy,Buy,Example Total Market ETF,VTI,1.8,100,-180
+33334444,2026-03-31,Interest,Interest,,null,0,0,5
+33334444,2026-03-31,Reinvestment,Reinvestment,,null,0,0,-5
+`;
+
+describe('CSV tables', () => {
+  it('reads each table of a download, an account per account number, holdings now as what it holds', () => {
+    const [brokerage, cash] = csvAccounts(TWO_TABLES)!;
+    expect(brokerage).toMatchObject({ number: '11112222', type: 'investment' });
+    expect(brokerage.unanchored).toBeUndefined();
+    // The $1 fund cash is swept into is the cash; the rest are holdings.
+    expect(brokerage.file).toMatchObject({ kind: 'holdings', cash: 250_00, positions: [{ security: 'VTI', shares: 12, price: 100 }], securities: [{ id: 'VTI', ticker: 'VTI', name: 'Example Total Market ETF' }] });
+    expect(brokerage.file.kind === 'holdings' && brokerage.file.transactions.map(({ kind, security, shares, amount }) => ({ kind, security, shares, amount }))).toEqual([
+      { kind: 'deposit', security: null, shares: 0, amount: 1000_00 },
+      { kind: 'sweep', security: null, shares: 0, amount: 0 },
+      { kind: 'buy', security: 'VTI', shares: 10, amount: -1000_00 },
+      { kind: 'income', security: null, shares: 0, amount: 20_00 },
+      // Paid for by the dividend listed beside it.
+      { kind: 'reinvest', security: 'VTI', shares: 0.2, amount: -20_00 },
+      { kind: 'buy', security: 'VTI', shares: 1.8, amount: -180_00 },
+    ]);
+    // A $1 holding with no symbol is the cash; interest reinvested in it stays in it.
+    expect(cash.file).toMatchObject({ kind: 'holdings', cash: 75_00, positions: [] });
+    expect(cash.file.kind === 'holdings' && cash.file.transactions.map(({ kind, amount }) => ({ kind, amount }))).toEqual([
+      { kind: 'income', amount: 5_00 },
+      { kind: 'sweep', amount: 0 },
+    ]);
+  });
+
+  it('reads a table of holdings on its own as an account with nothing yet to work back through', () => {
+    const [account] = csvAccounts('Fund,Shares,Last trade date,Last trade price\nExample Plan Fund,40,1/05/2026,25.00')!;
+    expect(account.file).toMatchObject({ kind: 'holdings', positions: [{ security: 'Example Plan Fund', shares: 40, price: 25 }], transactions: [] });
+    expect(account.unanchored).toBeUndefined();
+  });
+});
+

@@ -25,12 +25,18 @@ import { useAuth } from '../hooks/useAuth';
 import { extractBalances, parseAmount, type BalanceMapping, type DateFormat } from '../lib/csv';
 import { ACCOUNT_TYPE_OPTIONS, longDate, money, quantity } from '../lib/format';
 import { previewRows } from '../lib/importPreview';
-import { fileValue, last4, readFiles, type FileAccount, type ReadFiles } from '../lib/imports';
+import { combineAccounts, fileValue, last4, readFiles, type FileAccount, type ReadFiles } from '../lib/imports';
 import { withKnown, type Known } from '../lib/known';
 import { cn } from '../lib/utils';
 
-/** Where an account in the files goes: one of yours, a new manual account, or nowhere. */
-type Choice = { to: 'account'; accountId: string } | { to: 'new'; name: string; type: AccountType; currency: Currency; ownerUserId: string | null } | { to: 'skip' } | { to: 'choose' };
+/** Where an account in the files goes: one of yours, a new manual account, with another file's, or nowhere. */
+type Choice =
+  | { to: 'account'; accountId: string }
+  | { to: 'new'; name: string; type: AccountType; currency: Currency; ownerUserId: string | null }
+  /** The same account as another file's (files with no account number, such as a CSV a year): imported together, where that one goes. */
+  | { to: 'with'; index: number }
+  | { to: 'skip' }
+  | { to: 'choose' };
 /** A known balance as typed: before the file's first transaction or after its last, amounts as text. */
 type KnownInput = { at: 'start' | 'end'; cash: string; shares: Record<string, string> };
 
@@ -103,8 +109,21 @@ export function Import() {
   const preview = read?.kind === 'table' ? extractBalances(read.rows, mapping) : null;
   const fileAccounts: FileAccount[] =
     read?.kind === 'accounts' ? read.accounts : preview ? [{ number: null, institution: null, unknownTypes: [], file: { kind: 'balances', rows: preview.rows } }] : [];
+  // Files you've said are the same account join the one they name (null for those joining another).
+  const combined = fileAccounts.map((account, index): { account: FileAccount; error: string | null } | null => {
+    if (choices[index]?.to === 'with') return null;
+    const members = fileAccounts.filter((_, at) => at === index || (choices[at]?.to === 'with' && (choices[at] as { index: number }).index === index));
+    try {
+      return { account: combineAccounts(members), error: null };
+    } catch (error) {
+      return { account, error: error instanceof Error ? error.message : String(error) };
+    }
+  });
   // Files of transactions are worked out once their known balance is given (null until then).
-  const resolved = fileAccounts.map((account, index) => withKnown(account, knowns[index] && toKnown(knowns[index])));
+  const resolved = combined.map((entry, index) => (entry ? withKnown(entry.account, knowns[index] && toKnown(knowns[index])) : null));
+  /** The other files an account with no number may be combined with: ones of the same kind not already joining another. */
+  const partnersOf = (index: number) =>
+    fileAccounts.flatMap((other, at) => (at !== index && !fileAccounts[index].number && !other.number && other.file.kind === fileAccounts[index].file.kind && choices[at]?.to !== 'with' ? [{ index: at, label: labelOf(other) }] : []));
 
   function defaultNew(account: FileAccount): Choice {
     const currency = isCurrency(account.file.currency) ? account.file.currency : shown;
@@ -118,13 +137,24 @@ export function Import() {
 
   // What stops each account going in (errors), and what's worth knowing (warnings), before the server checks.
   const chosenIds = choices.flatMap((choice) => (choice.to === 'account' ? [choice.accountId] : []));
-  const checks = fileAccounts.map((account, index) => {
+  const checks = fileAccounts.map((read, index) => {
+    let account = read;
     const choice = choices[index] ?? { to: 'choose' };
     const errors: string[] = [];
     const warnings: string[] = [];
     if (choice.to === 'skip') return { errors, warnings };
+    if (choice.to === 'with') {
+      const root = choices[choice.index];
+      if (!root || root.to === 'choose' || root.to === 'skip' || root.to === 'with') errors.push(`Choose where ${labelOf(fileAccounts[choice.index])} goes.`);
+      return { errors, warnings };
+    }
+    const entry = combined[index]!;
+    account = entry.account;
+    if (entry.error) errors.push(entry.error);
     const worked = resolved[index];
-    if (!worked) errors.push(`Give the ${account.unanchored?.kind === 'holdings' ? 'holdings' : 'balance'} known at the start or end of the file.`);
+    if (!worked && !entry.error) errors.push(`Give the ${account.unanchored?.kind === 'holdings' ? 'holdings' : 'balance'} known at the start or end of the file.`);
+    if (!account.unanchored && account.file.kind === 'holdings' && account.file.transactions.length === 0)
+      errors.push('This file has holdings but no transactions to work back through: choose "Same account as" its file of transactions, or skip it.');
     if (account.unknownTypes.length > 0) errors.push(`Wattle doesn't understand these transaction types yet: ${account.unknownTypes.join(', ')}. Skip this account.`);
     if (worked?.file.kind === 'balances' && worked.file.rows.length === 0) errors.push('There are no balances to import.');
     const currency = account.file.currency;
@@ -167,7 +197,7 @@ export function Import() {
         accounts: fileAccounts.flatMap((read, index) => {
           const choice = choices[index];
           const account = resolved[index];
-          if (!account || !choice || choice.to === 'skip') return [];
+          if (!account || !choice || choice.to === 'skip' || choice.to === 'with') return [];
           const target =
             choice.to === 'account'
               ? { accountId: choice.accountId }
@@ -315,8 +345,9 @@ export function Import() {
         {fileAccounts.map((account, index) => (
           <AccountSection
             key={account.number ?? account.fileName ?? `file:${index}`}
-            read={account}
-            account={resolved[index] ?? account}
+            read={combined[index]?.account ?? account}
+            account={resolved[index] ?? combined[index]?.account ?? account}
+            partners={partnersOf(index)}
             choice={choices[index] ?? { to: 'choose' }}
             accounts={visible.filter((candidate) => fits(candidate, account))}
             onChoose={(choice) => choose(index, choice.to === 'new' && choices[index]?.to !== 'new' ? defaultNew(account) : choice)}
@@ -365,6 +396,7 @@ export function Import() {
 function AccountSection({
   read,
   account,
+  partners,
   choice,
   accounts,
   onChoose,
@@ -379,6 +411,7 @@ function AccountSection({
 }: {
   read: FileAccount;
   account: FileAccount;
+  partners: { index: number; label: string }[];
   choice: Choice;
   accounts: AccountSummary[];
   onChoose: (choice: Choice) => void;
@@ -393,7 +426,8 @@ function AccountSection({
 }) {
   const file = account.file;
   const worked = read.unanchored ? account !== read : true;
-  const value = choice.to === 'account' ? choice.accountId : choice.to;
+  const value = choice.to === 'account' ? choice.accountId : choice.to === 'with' ? `with:${choice.index}` : choice.to;
+  const joined = choice.to === 'with';
   const target = choice.to === 'account' ? accounts.find((candidate) => candidate.id === choice.accountId) : undefined;
   const currency = target?.currency ?? (choice.to === 'new' ? choice.currency : isCurrency(file.currency) ? file.currency : shown);
   const label = labelOf(read);
@@ -417,7 +451,15 @@ function AccountSection({
               value={value}
               onChange={(event) => {
                 const next = event.target.value;
-                onChoose(next === 'skip' || next === 'choose' ? { to: next } : next === 'new' ? { to: 'new', name: '', type: 'investment', currency, ownerUserId: null } : { to: 'account', accountId: next });
+                onChoose(
+                  next === 'skip' || next === 'choose'
+                    ? { to: next }
+                    : next === 'new'
+                      ? { to: 'new', name: '', type: 'investment', currency, ownerUserId: null }
+                      : next.startsWith('with:')
+                        ? { to: 'with', index: Number(next.slice(5)) }
+                        : { to: 'account', accountId: next },
+                );
               }}
             >
               <option value="choose">Choose…</option>
@@ -427,6 +469,11 @@ function AccountSection({
                 </option>
               ))}
               <option value="new">New account</option>
+              {partners.map((partner) => (
+                <option key={partner.index} value={`with:${partner.index}`}>
+                  Same account as {partner.label}
+                </option>
+              ))}
               <option value="skip">Skip</option>
             </NativeSelect>
           </Field>
@@ -456,7 +503,8 @@ function AccountSection({
             </>
           )}
         </div>
-        {read.unanchored && choice.to !== 'skip' && <KnownFields pending={read.unanchored} known={known} onKnown={onKnown} />}
+        {joined && <p className="text-muted-foreground">Imported together with that file, where it goes; its preview shows them both.</p>}
+        {read.unanchored && choice.to !== 'skip' && !joined && <KnownFields pending={read.unanchored} known={known} onKnown={onKnown} />}
         {check.errors.map((error) => (
           <Alert key={error} variant="error">
             {error}
@@ -472,7 +520,7 @@ function AccountSection({
             {found.text.charAt(0).toUpperCase() + found.text.slice(1)}.
           </Alert>
         ))}
-        {choice.to !== 'skip' && worked && <PreviewTable file={file} currency={currency} problemDates={new Set(problems.flatMap((found) => (found.date ? [found.date] : [])))} closes={closes} nameOf={nameOf} />}
+        {choice.to !== 'skip' && !joined && worked && <PreviewTable file={file} currency={currency} problemDates={new Set(problems.flatMap((found) => (found.date ? [found.date] : [])))} closes={closes} nameOf={nameOf} />}
       </CardContent>
     </Card>
   );
