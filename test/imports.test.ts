@@ -256,6 +256,17 @@ describe('import of several accounts', () => {
     expect(await day('2026-07-01')).toMatchObject({ source: 'import' });
   });
 
+  it('gives a closed account, holding nothing now, a balance of nothing rather than none', async () => {
+    const { deps, api, importing } = await household();
+    const response = await importing([
+      { target: { new: { name: 'Closed ··9999', type: 'investment', currency: 'USD' } }, file: download([], [{ date: '2026-06-02', kind: 'buy', fund: 'VTI', shares: 5, price: 100, amount: 0 }, { date: '2026-08-03', kind: 'sell', fund: 'VTI', shares: -5, price: 100, amount: 0 }]) },
+    ]);
+    expect(response.status).toBe(200);
+    await settle(deps);
+    const closed = ((await api('/api/accounts')).body.accounts as { id: string; balance: number | null }[]).find((row) => row.id === response.body.accounts[0].accountId);
+    expect(closed?.balance).toBe(0);
+  });
+
   it('writes nothing, and creates no account, when any account doesn’t check out', async () => {
     const { deps, api, accountId, importing } = await household();
     const response = await importing([

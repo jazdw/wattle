@@ -357,6 +357,19 @@ export interface ImportResponse {
   accounts: ImportedAccount[];
 }
 
+/** Something wrong with an account in an import, on a day of it where it's one day's. */
+export interface ImportProblem {
+  label: string;
+  date: string | null;
+  text: string;
+}
+
+/** POST /api/imports/check: what an import would write, and what's wrong with it, writing nothing. */
+export interface ImportCheck {
+  accounts: (Omit<ImportedAccount, 'accountId'> & { closes: { date: string; security: string; close: number }[] })[];
+  problems: ImportProblem[];
+}
+
 /** POST /api/imports/tickers: a ticker for a security a file names without one. */
 export interface TickerSuggestion {
   /** The file's id for the security. */

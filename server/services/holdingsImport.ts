@@ -31,7 +31,7 @@ import { suggestClassification } from '../../shared/classify';
 import { addDays, dateRange, marketDate, type IsoDate } from '../../shared/dates';
 import { leastFinal } from '../../shared/quality';
 import type { ImportedHoldings, ImportKind, ImportRequest } from '../../shared/schemas';
-import type { ImportedAccount, ImportResponse, TickerSuggestion } from '../../shared/types';
+import type { ImportCheck, ImportedAccount, ImportProblem, ImportResponse, TickerSuggestion } from '../../shared/types';
 import { chunkRows, inChunks, runAtomic } from '../db/batch';
 import { accountDaily, accounts, holdingDaily, holdings, householdMembers, jobs, securities } from '../db/schema';
 import type { Tenant } from '../db/tenant';
@@ -188,6 +188,8 @@ interface Plan {
   balances?: { date: string; balance: number }[];
   /** Market funds priced from the file, without closes. */
   estimated?: string[];
+  /** Each trade's close (by the file's id for the security), for a preview. */
+  closes?: { date: string; security: string; close: number }[];
   days: number;
   from: IsoDate;
   to: IsoDate;
@@ -199,10 +201,66 @@ interface Plan {
  * written).
  */
 export async function importAccounts(deps: Deps, tenant: Tenant, request: ImportRequest): Promise<ImportResponse> {
+  const { plans, shared, problems, today } = await prepareImport(deps, tenant, request);
+  stop(problems);
+
+  // Checked: write each account, then queue its days.
+  if (shared.length > 0) await runAtomic(tenant.db, shared);
+  const results: ImportedAccount[] = [];
+  let snapshot = false;
+  for (const plan of plans) {
+    if (plan.statements.length > 0) {
+      const lease = plan.replacesHoldings ? await Lease.acquireOrBusy(deps, tenant, accountLease(plan.account.id), 'Someone else is changing this account. Try again in a moment.') : null;
+      try {
+        if (plan.replacesHoldings) {
+          const [current] = await tenant.db.select({ holdingsVersion: accounts.holdingsVersion }).from(accounts).where(tenant.scope(accounts, eq(accounts.id, plan.account.id)));
+          plan.statements.push(tenant.db.update(accounts).set({ holdingsVersion: (current?.holdingsVersion ?? 0) + 1 }).where(tenant.scope(accounts, eq(accounts.id, plan.account.id))));
+        }
+        await lease?.renew();
+        await runAtomic(tenant.db, plan.statements);
+      } finally {
+        await lease?.forceRelease();
+      }
+    }
+    if (plan.balances) {
+      plan.days = await writeBalances(deps, tenant, plan.account, plan.balances, 'import');
+    } else {
+      const runId = crypto.randomUUID();
+      await enqueue(
+        deps,
+        tenant,
+        plan.blocks.map((block) => ({ id: `import:${runId}:block:${block.from}`, type: 'import_block' as const, payload: { ...block }, groupId: `import:${runId}`, connectionId: plan.account.connectionId })),
+      );
+      snapshot ||= plan.account.source === 'manual';
+    }
+    results.push({ label: plan.label, accountId: plan.account.id, created: plan.created, days: plan.days, from: plan.from, to: plan.to, estimated: plan.estimated ?? [] });
+  }
+  // A manual account's holdings changed: today's value follows them.
+  if (snapshot) await snapshotHousehold(deps, tenant, today);
+  return { accounts: results };
+}
+
+/**
+ * Check an import without writing anything: what each account would get
+ * (days, prices from the file, each trade's close) and every problem found,
+ * dated where it's one day's, for a preview.
+ */
+export async function checkImport(deps: Deps, tenant: Tenant, request: ImportRequest): Promise<ImportCheck> {
+  const { plans, problems } = await prepareImport(deps, tenant, request);
+  return {
+    accounts: plans.map((plan) => ({ label: plan.label, created: plan.created, days: plan.days, from: plan.from, to: plan.to, estimated: plan.estimated ?? [], closes: plan.closes ?? [] })),
+    problems,
+  };
+}
+
+/** Phase 1: every account checked and its writes planned; nothing written. */
+async function prepareImport(deps: Deps, tenant: Tenant, request: ImportRequest) {
   const today = marketDate(deps.now());
   const now = deps.now().getTime();
-  const problems: string[] = [];
-  const problem = (label: string, text: string) => problems.push(`${label}: ${text}`);
+  const problems: ImportProblem[] = [];
+  const problem = (label: string, text: string, date: string | null = null) => problems.push({ label, date, text });
+  const plans: Plan[] = [];
+  const shared: BatchItem<'sqlite'>[] = [];
 
   // The accounts: yours, or new manual ones (inserted with the rest in phase 2).
   const targets: { entry: ImportRequest['accounts'][number]; account: Account; created: boolean }[] = [];
@@ -247,7 +305,8 @@ export async function importAccounts(deps: Deps, tenant: Tenant, request: Import
     if (entry.file.currency && entry.file.currency !== account.currency) problem(entry.label, `the file is in ${entry.file.currency} but ${account.name} is in ${account.currency}`);
     targets.push({ entry, account, created });
   }
-  stop(problems);
+  // Accounts that can't take their files can't be planned.
+  if (problems.length > 0) return { plans, shared, problems, today };
 
   // Securities: the household's, by ticker (adding market ones it doesn't have), or private ones for funds with no ticker.
   const holdingEntries = targets.filter((target): target is typeof target & { entry: { file: ImportedHoldings } } => target.entry.file.kind === 'holdings');
@@ -258,7 +317,6 @@ export async function importAccounts(deps: Deps, tenant: Tenant, request: Import
   const cashTickers = new Set(securityRows.filter((row) => row.ticker && isCashSecurity(row)).map((row) => row.ticker!.toUpperCase()));
   const cashIds = new Set(securityRows.filter((row) => isCashSecurity(row)).map((row) => row.id));
   const privateIds = new Set(securityRows.filter((row) => !row.isPublic).map((row) => row.id));
-  const shared: BatchItem<'sqlite'>[] = [];
   const byTicker = new Map<string, string>();
   const tickersByCurrency = new Map<string, string[]>();
   for (const { entry, account } of holdingEntries) {
@@ -287,7 +345,6 @@ export async function importAccounts(deps: Deps, tenant: Tenant, request: Import
   // Priced at each day's close: fetched, and known to the market data provider (else from the file, like a fund with no ticker).
   const hasCloses = new Set(marketTickers.filter((ticker) => !unfetched.has(ticker) && closes(ticker, today) !== null));
 
-  const plans: Plan[] = [];
   for (const target of targets) {
     const { entry, account, created } = target;
     const base = { label: entry.label, account, created, statements: [] as BatchItem<'sqlite'>[], replacesHoldings: false, blocks: [] as BlockPayload[] };
@@ -297,50 +354,15 @@ export async function importAccounts(deps: Deps, tenant: Tenant, request: Import
       plans.push({ ...base, balances: entry.file.rows, days: dateRange(dates[0], dates.at(-1)!).length, from: dates[0], to: dates.at(-1)! });
       continue;
     }
-    const plan = await planHoldings(deps, tenant, { ...base, file: entry.file, today, now, cashIds, byTicker, hasCloses, closes, problem: (text) => problem(entry.label, text) });
+    const plan = await planHoldings(deps, tenant, { ...base, file: entry.file, today, now, cashIds, byTicker, hasCloses, closes, problem: (text, date) => problem(entry.label, text, date) });
     if (plan) plans.push(plan);
   }
-  stop(problems);
-
-  // Checked: write each account, then queue its days.
-  if (shared.length > 0) await runAtomic(tenant.db, shared);
-  const results: ImportedAccount[] = [];
-  let snapshot = false;
-  for (const plan of plans) {
-    if (plan.statements.length > 0) {
-      const lease = plan.replacesHoldings ? await Lease.acquireOrBusy(deps, tenant, accountLease(plan.account.id), 'Someone else is changing this account. Try again in a moment.') : null;
-      try {
-        if (plan.replacesHoldings) {
-          const [current] = await tenant.db.select({ holdingsVersion: accounts.holdingsVersion }).from(accounts).where(tenant.scope(accounts, eq(accounts.id, plan.account.id)));
-          plan.statements.push(tenant.db.update(accounts).set({ holdingsVersion: (current?.holdingsVersion ?? 0) + 1 }).where(tenant.scope(accounts, eq(accounts.id, plan.account.id))));
-        }
-        await lease?.renew();
-        await runAtomic(tenant.db, plan.statements);
-      } finally {
-        await lease?.forceRelease();
-      }
-    }
-    if (plan.balances) {
-      plan.days = await writeBalances(deps, tenant, plan.account, plan.balances, 'import');
-    } else {
-      const runId = crypto.randomUUID();
-      await enqueue(
-        deps,
-        tenant,
-        plan.blocks.map((block) => ({ id: `import:${runId}:block:${block.from}`, type: 'import_block' as const, payload: { ...block }, groupId: `import:${runId}`, connectionId: plan.account.connectionId })),
-      );
-      snapshot ||= plan.account.source === 'manual';
-    }
-    results.push({ label: plan.label, accountId: plan.account.id, created: plan.created, days: plan.days, from: plan.from, to: plan.to, estimated: plan.estimated ?? [] });
-  }
-  // A manual account's holdings changed: today's value follows them.
-  if (snapshot) await snapshotHousehold(deps, tenant, today);
-  return { accounts: results };
+  return { plans, shared, problems, today };
 }
 
-function stop(problems: string[]) {
+function stop(problems: ImportProblem[]) {
   if (problems.length === 0) return;
-  const listed = problems.slice(0, MAX_PROBLEMS).join('; ');
+  const listed = problems.slice(0, MAX_PROBLEMS).map((found) => `${found.label}: ${found.text}`).join('; ');
   throw new HttpError(409, `Nothing was imported: ${listed}${problems.length > MAX_PROBLEMS ? ` (and ${problems.length - MAX_PROBLEMS} more)` : ''}.`);
 }
 
@@ -358,7 +380,7 @@ interface HoldingsContext {
   byTicker: Map<string, string>;
   hasCloses: Set<string>;
   closes: (ticker: string, date: IsoDate) => number | null;
-  problem: (text: string) => void;
+  problem: (text: string, date?: string) => void;
 }
 
 /** Check one account's holdings file and plan its writes; null (with problems noted) when it doesn't check out. */
@@ -366,9 +388,9 @@ async function planHoldings(deps: Deps, tenant: Tenant, context: HoldingsContext
   const { account, file, today, now, cashIds, byTicker, hasCloses, closes } = context;
   const manual = account.source === 'manual';
   let failed = false;
-  const problem = (text: string) => {
+  const problem = (text: string, date?: string) => {
     failed = true;
-    context.problem(text);
+    context.problem(text, date);
   };
 
   // Each of the file's securities as one of the household's.
@@ -475,23 +497,24 @@ async function planHoldings(deps: Deps, tenant: Tenant, context: HoldingsContext
     quantities.set(txn.securityId, earlier);
     if (earlier < -SHARES_EPSILON && !short.has(txn.securityId)) {
       short.add(txn.securityId);
-      problem(`before ${txn.date}, ${describe(txn.securityId)} would have ${earlier.toFixed(4)} shares`);
+      problem(`before ${txn.date}, ${describe(txn.securityId)} would have ${earlier.toFixed(4)} shares`, txn.date);
     }
   }
+  // Each trade's close, for the preview.
+  const tradeCloses: NonNullable<Plan['closes']> = [];
   for (const txn of file.transactions) {
     const securityId = txn.security ? securityOf.get(txn.security)! : null;
     if (!securityId || isCash(securityId) || txn.price <= 0) continue;
     // Priced from the file: each total must be its shares × price.
     if (filePriced.has(securityId) && PRICED_KINDS.has(txn.kind) && txn.value > 0) {
       const worth = Math.round(Math.abs(txn.shares) * txn.price * 100);
-      if (Math.abs(txn.value - worth) > txn.charges + 1 + Math.ceil(SHARE_ROUNDING * txn.price * 100)) problem(`on ${txn.date}, ${describe(securityId)} shows ${txn.value / 100} for ${Math.abs(txn.shares)} shares at ${txn.price}`);
+      if (Math.abs(txn.value - worth) > txn.charges + 1 + Math.ceil(SHARE_ROUNDING * txn.price * 100)) problem(`on ${txn.date}, ${describe(securityId)} shows ${txn.value / 100} for ${Math.abs(txn.shares)} shares at ${txn.price}`, txn.date);
     }
     // A market fund: each buy or sell near that day's close.
     const ticker = tickerOf.get(securityId);
-    if (ticker && hasCloses.has(ticker) && TRADES.has(txn.kind)) {
-      const close = closes(ticker, txn.date);
-      if (close && Math.abs(txn.price - close) / close > PRICE_TOLERANCE) problem(`on ${txn.date}, ${ticker} traded at ${txn.price} but closed at ${close}`);
-    }
+    const close = ticker && hasCloses.has(ticker) && PRICED_KINDS.has(txn.kind) ? closes(ticker, txn.date) : null;
+    if (close) tradeCloses.push({ date: txn.date, security: txn.security!, close });
+    if (close && TRADES.has(txn.kind) && Math.abs(txn.price - close) / close > PRICE_TOLERANCE) problem(`on ${txn.date}, ${ticker} traded at ${txn.price} but closed at ${close}`, txn.date);
   }
 
   // Which days are written: a linked account's up to its first synced day, a manual account's through today.
@@ -519,7 +542,7 @@ async function planHoldings(deps: Deps, tenant: Tenant, context: HoldingsContext
         for (const id of ids) {
           const fromFile = day.positions.find((position) => position.securityId === id)?.quantity ?? 0;
           const fromSync = actual.find((row) => row.securityId === id)?.quantity ?? 0;
-          if (Math.abs(fromFile - fromSync) > SHARES_EPSILON) problem(`on ${day.date}, ${id === cashSecurityId ? 'cash' : describe(id)} is ${fromFile} in the file but ${fromSync} synced`);
+          if (Math.abs(fromFile - fromSync) > SHARES_EPSILON) problem(`on ${day.date}, ${id === cashSecurityId ? 'cash' : describe(id)} is ${fromFile} in the file but ${fromSync} synced`, day.date);
         }
       }
     }
@@ -549,6 +572,8 @@ async function planHoldings(deps: Deps, tenant: Tenant, context: HoldingsContext
       ...(cashUnits !== 0 ? [{ securityId: cashSecurityId, quantity: cashUnits, price: 1 }] : []),
     ];
     if (!context.created) context.statements.push(tenant.db.delete(holdings).where(tenant.scope(holdings, eq(holdings.accountId, account.id))));
+    // Nothing held now (a closed account): its balance is nothing, not unknown, as the snapshot only counts holdings it has.
+    if (holdingRows.length === 0) context.statements.push(tenant.db.update(accounts).set({ balance: 0, balanceAsOf: now }).where(tenant.scope(accounts, eq(accounts.id, account.id))));
     context.statements.push(
       ...chunkRows(
         holdings,
@@ -591,6 +616,7 @@ async function planHoldings(deps: Deps, tenant: Tenant, context: HoldingsContext
     from: start,
     to: end,
     estimated,
+    closes: tradeCloses,
   };
 }
 

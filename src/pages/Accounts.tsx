@@ -5,7 +5,7 @@ import { Link } from 'react-router-dom';
 import type { AccountSummary, ConnectionSummary } from '../../shared/types';
 import { api } from '../api';
 import { ActivityDialog } from '../components/ActivityDialog';
-import { EditAccountDialog, HoldingsDialog, ImportDialog, NewAccountDialog } from '../components/AccountDialogs';
+import { EditAccountDialog, HoldingsDialog, NewAccountDialog } from '../components/AccountDialogs';
 import { PageHeader } from '../components/Layout';
 import { NewAccountsHistoryDialog } from '../components/NewAccountsHistoryDialog';
 import { PlaidLinkButton } from '../components/PlaidLinkButton';
@@ -55,7 +55,6 @@ export function Accounts() {
   const accounts = useAccounts();
   const [error, setError] = useState<string | null>(null);
   const [creating, setCreating] = useState(false);
-  const [importing, setImporting] = useState(false);
   const [editing, setEditing] = useState<AccountSummary | null>(null);
   const [holdingsFor, setHoldingsFor] = useState<AccountSummary | null>(null);
   const [removing, setRemoving] = useState<ConnectionSummary | null>(null);
@@ -120,8 +119,10 @@ export function Accounts() {
             <Button variant="outline" onClick={() => setCreating(true)}>
               <Plus /> Manual account
             </Button>
-            <Button variant="outline" onClick={() => setImporting(true)}>
-              <Upload /> Import
+            <Button variant="outline" asChild>
+              <Link to="/import">
+                <Upload /> Import
+              </Link>
             </Button>
             <Button variant="outline" asChild>
               <Link to="/activity">
@@ -321,7 +322,6 @@ export function Accounts() {
           </div>
         </DialogContent>
       </Dialog>
-      <ImportDialog accounts={accounts.data?.accounts ?? []} open={importing} onOpenChange={setImporting} />
       <EditAccountDialog
         account={editing}
         duplicateOf={editing?.possibleDuplicateOf ? describeAccount(editing.possibleDuplicateOf) : null}

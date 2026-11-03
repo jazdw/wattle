@@ -34,6 +34,7 @@ describe('tenant isolation', () => {
     const writes: [string, string][] = [
       ['POST', '/api/refresh'],
       ['POST', '/api/imports'],
+      ['POST', '/api/imports/check'],
       ['POST', '/api/plaid/link-token'],
       ['POST', '/api/plaid/exchange'],
       ['PUT', '/api/targets'],
@@ -63,6 +64,7 @@ describe('tenant isolation', () => {
     expect((await asB(`/api/accounts/${accountId}`, { method: 'DELETE' })).status).toBe(404);
     expect((await asB('/api/securities/sec-a', { method: 'PATCH', json: { classification: { categories: { cash: 1 } } } })).status).toBe(404);
     expect((await asB('/api/imports', { method: 'POST', json: { accounts: [{ label: 'File', target: { accountId }, file: { kind: 'balances', rows: [{ date: '2026-01-01', balance: 1 }] } }] } })).status).toBe(404);
+    expect((await asB('/api/imports/check', { method: 'POST', json: { accounts: [{ label: 'File', target: { accountId }, file: { kind: 'balances', rows: [{ date: '2026-01-01', balance: 1 }] } }] } })).status).toBe(404);
     expect((await asB(`/api/history?range=ALL&group=holding&accountId=${accountId}`)).body.series).toHaveLength(0);
     expect((await asA(`/api/accounts/${accountId}`)).status).toBe(404); // no GET-by-id route; sanity
   });
