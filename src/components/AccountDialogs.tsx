@@ -508,10 +508,10 @@ export function ImportDialog({ accounts, open, onOpenChange }: { accounts: Accou
     read?.kind === 'accounts' ? read.accounts : preview ? [{ number: null, institution: null, unknownTypes: [], file: { kind: 'balances', rows: preview.rows } }] : [];
 
   function defaultNew(account: FileAccount): Choice {
-    const currency = account.file.kind === 'holdings' && isCurrency(account.file.currency) ? account.file.currency : shown;
+    const currency = isCurrency(account.file.currency) ? account.file.currency : shown;
     const name = account.number ? `${account.institution ?? 'Imported'} ··${last4(account.number)}` : 'Imported account';
     // Yours, as a manual account you add is (change it later with Edit account).
-    return { to: 'new', name, type: account.file.kind === 'holdings' ? 'investment' : 'depository', currency, ownerUserId: me?.user.id ?? null };
+    return { to: 'new', name, type: account.file.kind === 'holdings' ? 'investment' : (account.type ?? 'depository'), currency, ownerUserId: me?.user.id ?? null };
   }
   function choose(index: number, choice: Choice) {
     setChoices(choices.map((current, at) => (at === index ? choice : current)));
@@ -526,7 +526,7 @@ export function ImportDialog({ accounts, open, onOpenChange }: { accounts: Accou
     if (choice.to === 'skip') return { errors, warnings };
     if (account.unknownTypes.length > 0) errors.push(`Wattle doesn't understand these transaction types yet: ${account.unknownTypes.join(', ')}. Skip this account.`);
     if (account.file.kind === 'balances' && account.file.rows.length === 0) errors.push('There are no balances to import.');
-    const currency = account.file.kind === 'holdings' ? account.file.currency : undefined;
+    const currency = account.file.currency;
     if (choice.to === 'account') {
       const target = visible.find((candidate) => candidate.id === choice.accountId);
       if (target && currency && currency !== target.currency) errors.push(`The file is in ${currency} but ${target.name} is in ${target.currency}.`);
@@ -601,7 +601,7 @@ export function ImportDialog({ accounts, open, onOpenChange }: { accounts: Accou
       <DialogContent
         className="max-w-2xl"
         title="Import history"
-        description="Upload Quicken (QFX/OFX) files from investment accounts, one or more at a time, or a CSV with a date and a balance on each row."
+        description="Upload Quicken (QFX/OFX) files from investment, bank or card accounts, one or more at a time, or a CSV with a date and a balance on each row."
       >
         <Field label="Files">
           <Input type="file" multiple accept=".csv,text/csv,.qfx,.ofx" onChange={(event) => event.target.files?.length && void loadFiles([...event.target.files])} />
@@ -709,7 +709,7 @@ function ImportRow({
   const file = account.file;
   const value = choice.to === 'account' ? choice.accountId : choice.to;
   const target = choice.to === 'account' ? accounts.find((candidate) => candidate.id === choice.accountId) : undefined;
-  const currency = target?.currency ?? (choice.to === 'new' ? choice.currency : file.kind === 'holdings' && isCurrency(file.currency) ? file.currency : shown);
+  const currency = target?.currency ?? (choice.to === 'new' ? choice.currency : isCurrency(file.currency) ? file.currency : shown);
   const label = labelOf(account);
   return (
     <div className="grid gap-2 rounded-md border p-3 text-sm">

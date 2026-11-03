@@ -2,10 +2,11 @@
  * Every import starts here: each file is recognised from its content and
  * read into the accounts it holds, in one shape whatever the format
  * (shared/schemas.ts importSchema), then accounts with the same number
- * across files are merged. Quicken downloads (QFX/OFX) hold investment
- * accounts; a CSV is dates and balances (./csv).
+ * across files are merged. Quicken downloads (QFX/OFX) hold investment,
+ * bank and card accounts; a CSV is dates and balances (./csv).
  */
 import type { ImportedFile, ImportedHoldings } from '../../shared/schemas';
+import type { AccountType } from '../../shared/types';
 import { guessMapping, parseCsv, type BalanceMapping } from './csv';
 import { isOfx, ofxAccounts } from './ofx';
 
@@ -17,6 +18,8 @@ export interface FileAccount {
   /** The account number as the file has it; null for a file with one account and no number. */
   number: string | null;
   institution: string | null;
+  /** What kind of account the file says it is (a bank or card statement), for a new one. */
+  type?: AccountType;
   file: ImportedFile;
   /** Transaction types the reader doesn't understand: the account can't be imported until they are. */
   unknownTypes: string[];
@@ -33,7 +36,7 @@ export function readFiles(contents: string[]): ReadFiles {
   for (const content of contents) {
     if (isOfx(content)) {
       const accounts = ofxAccounts(content);
-      if (accounts.length === 0) throw new Error('A Quicken file has no investment account in it (bank statements aren’t understood yet).');
+      if (accounts.length === 0) throw new Error('A Quicken file has no accounts in it.');
       perFile.push(accounts);
       continue;
     }
@@ -72,7 +75,7 @@ export function mergeAccounts(perFile: FileAccount[][]): FileAccount[] {
     if (copies.some((copy) => copy.file.kind !== first.file.kind)) throw new Error(`The files read account ··${last4(first.number)} in different ways.`);
     if (first.file.kind === 'balances') {
       const byDate = new Map(copies.flatMap((copy) => (copy.file.kind === 'balances' ? copy.file.rows : [])).map((row) => [row.date, row.balance]));
-      return { ...first, unknownTypes, file: { kind: 'balances', rows: [...byDate].map(([date, balance]) => ({ date, balance })).sort((a, b) => a.date.localeCompare(b.date)) } };
+      return { ...first, unknownTypes, file: { kind: 'balances', currency: first.file.currency, rows: [...byDate].map(([date, balance]) => ({ date, balance })).sort((a, b) => a.date.localeCompare(b.date)) } };
     }
     const files = copies.map((copy) => copy.file as ImportedHoldings);
     if (new Set(files.map((file) => file.currency ?? '')).size > 1) throw new Error(`The files for account ··${last4(first.number)} are in different currencies.`);
