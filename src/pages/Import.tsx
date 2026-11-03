@@ -127,7 +127,8 @@ export function Import() {
 
   function defaultNew(account: FileAccount): Choice {
     const currency = isCurrency(account.file.currency) ? account.file.currency : shown;
-    const name = account.number ? `${account.institution ?? 'Imported'} ··${last4(account.number)}` : 'Imported account';
+    // The last digits are kept as the account's mask and shown beside its name, as a linked account's are.
+    const name = account.institution ?? account.fileName?.replace(/\.[^.]+$/, '') ?? 'Imported account';
     // Yours, as a manual account you add is (change it later with Edit account).
     return { to: 'new', name, type: account.file.kind === 'holdings' ? 'investment' : (account.type ?? 'depository'), currency, ownerUserId: me?.user.id ?? null };
   }
@@ -570,7 +571,8 @@ function PreviewTable({
                 <Td className="whitespace-nowrap">{longDate(row.date)}</Td>
                 {holdings && (
                   <Td>
-                    {row.kind} <span className="text-xs text-muted-foreground">{row.label}</span>
+                    {row.label}
+                    {row.description && <span className="block text-xs text-muted-foreground">{row.description}</span>}
                   </Td>
                 )}
                 {holdings && <Td>{nameOf(row.security) ?? '—'}</Td>}

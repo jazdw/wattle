@@ -217,7 +217,8 @@ function transaction(type: string, kind: ImportKind, entry: Element): ReadTransa
     // Money in or out of the account's cash.
     const bank = entry.STMTTRN as Element;
     const amount = toMinor(number(bank.TRNAMT));
-    return { id: text(bank.FITID), date: day(bank.DTPOSTED), kind: amount < 0 ? 'withdrawal' : 'deposit', label: type, security: null, shares: 0, price: 0, amount, value: 0, charges: 0 };
+    const description = decode(text(bank.MEMO) || text(bank.NAME));
+    return { id: text(bank.FITID), date: day(bank.DTPOSTED), kind: amount < 0 ? 'withdrawal' : 'deposit', label: type, ...(description ? { description } : {}), security: null, shares: 0, price: 0, amount, value: 0, charges: 0 };
   }
   // Buys and sells keep their details in INVBUY / INVSELL; the others at the top.
   const detail = (entry.INVBUY ?? entry.INVSELL ?? entry) as Element;
@@ -228,11 +229,13 @@ function transaction(type: string, kind: ImportKind, entry: Element): ReadTransa
   const shares = kind === 'income' ? 0 : direction * Math.abs(number(detail.UNITS));
   // Cash: a buy pays the total, a sale and income bring it in; a transfer only moves shares (a reinvestment's income is added by the caller).
   const amount = kind === 'buy' ? -total : kind === 'sell' ? total : kind === 'income' ? toMinor(number(detail.TOTAL)) : 0;
+  const description = decode(text(core.MEMO));
   return {
     id: text(core.FITID),
     date: day(core.DTTRADE),
     kind,
     label: type,
+    ...(description ? { description } : {}),
     security: text((detail.SECID as Element | undefined)?.UNIQUEID) || null,
     shares,
     price: Math.abs(number(detail.UNITPRICE)),
