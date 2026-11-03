@@ -143,5 +143,17 @@ describe('ofxAccounts', () => {
     // Paid, less the fee, all reinvested: the day's cash doesn't move.
     expect(account.file.transactions.reduce((sum, txn) => sum + txn.amount, 0)).toBe(0);
   });
+
+  it("names money in and out by the bank's own type: interest and dividends are income, a fee a fee", () => {
+    const bank = (fitid: string, type: string, amount: string) => `<INVBANKTRAN><STMTTRN><TRNTYPE>${type}</TRNTYPE><DTPOSTED>20260930</DTPOSTED><TRNAMT>${amount}</TRNAMT><FITID>${fitid}</FITID><NAME>Example</NAME></STMTTRN><SUBACCTFUND>CASH</SUBACCTFUND></INVBANKTRAN>`;
+    const [account] = ofxAccounts(sgml(bank('A', 'INT', '0.05') + bank('B', 'FEE', '-3.00') + bank('C', 'CREDIT', '100.00') + bank('D', 'XFER', '-50.00')));
+    if (account.file.kind !== 'holdings') throw new Error('expected holdings');
+    expect((account.file.transactions as { id?: string; kind: string; amount: number }[]).map((txn) => [txn.id, txn.kind, txn.amount])).toEqual([
+      ['A', 'income', 5],
+      ['B', 'fee', -3_00],
+      ['C', 'deposit', 100_00],
+      ['D', 'withdrawal', -50_00],
+    ]);
+  });
 });
 

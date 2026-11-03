@@ -63,7 +63,8 @@ function useDebounced<T>(value: T, delay: number): T {
   return settled;
 }
 
-export function Import() {
+/** `checkDelay`: how long changes settle before they're checked (tests check straight away). */
+export function Import({ checkDelay = CHECK_DELAY_MS }: { checkDelay?: number }) {
   const queryClient = useQueryClient();
   const { me, currency: shown } = useAuth();
   const accounts = useAccounts();
@@ -209,7 +210,7 @@ export function Import() {
       }
     : null;
   const body = request ? JSON.stringify(request) : null;
-  const settled = useDebounced(body, CHECK_DELAY_MS);
+  const settled = useDebounced(body, checkDelay);
   const check = useQuery({
     queryKey: ['import-check', settled],
     queryFn: () => api<ImportCheck>('/api/imports/check', { method: 'POST', body: settled! }),

@@ -18,7 +18,7 @@ describe('Import page', () => {
   const upload = (...contents: string[]) =>
     fireEvent.change(screen.getByLabelText('Files'), { target: { files: contents.map((content, index) => new File([content], `file${index}`, { type: 'text/plain' })) } });
   async function openImport() {
-    const opened = renderPage(<Import />);
+    const opened = renderPage(<Import checkDelay={0} />);
     // Your accounts loaded, to match the files' accounts against.
     await waitFor(() => expect(sent('GET /api/accounts')).not.toHaveLength(0));
     await waitFor(() => expect(opened.queryClient.getQueryState(['accounts', 'USD'])?.status).toBe('success'));
@@ -30,7 +30,7 @@ describe('Import page', () => {
   /** Import, once the check has run. */
   async function importIt(user: ReturnType<typeof renderPage>['user']) {
     const button = screen.getByRole('button', { name: 'Import' });
-    await waitFor(() => expect(button).toBeEnabled(), { timeout: 3000 });
+    await waitFor(() => expect(button).toBeEnabled());
     await user.click(button);
   }
 
@@ -152,7 +152,7 @@ describe('Import page', () => {
     await user.selectOptions(screen.getByLabelText('Import ··5678 into'), 'new');
     expect(screen.getByRole('button', { name: 'Import' })).toBeDisabled();
     await user.selectOptions(screen.getByLabelText('Import ··1111 into'), 'skip');
-    await waitFor(() => expect(screen.getByRole('button', { name: 'Import' })).toBeEnabled(), { timeout: 3000 });
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Import' })).toBeEnabled());
   });
 
   it('suggests a ticker for a security the file names without one, and sends what you choose', async () => {
@@ -205,7 +205,7 @@ describe('Import page', () => {
     expect(rows()[0]).toMatch(/Aug 17, 2026.*Sale.*Fees.*-0\.08.*260/);
     expect(rows()[1]).toMatch(/Aug 3, 2026.*Purchase.*Contributions.*10.*12\.50.*260\.08/);
 
-    expect(await screen.findByText('On 2026-08-03, XYZ traded at 12.5 but closed at 10.', {}, { timeout: 3000 })).toBeInTheDocument();
+    expect(await screen.findByText('On 2026-08-03, XYZ traded at 12.5 but closed at 10.')).toBeInTheDocument();
     expect(screen.getAllByRole('row')[2].className).toMatch(/bg-negative/);
     expect(rows()[1]).toMatch(/12\.40/); // the day's close beside the trade
     expect(screen.getByRole('status')).toHaveTextContent('1 problem to fix before importing.');
