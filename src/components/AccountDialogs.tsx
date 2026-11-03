@@ -7,8 +7,9 @@ import { CATEGORIES, CATEGORY_LABELS } from '../../shared/taxonomy';
 import type { AccountSummary, ImportResponse, TickerSuggestion } from '../../shared/types';
 import { api } from '../api';
 import { useAuth } from '../hooks/useAuth';
-import { extractBalances, type BalanceMapping, type DateFormat } from '../lib/csv';
+import { extractBalances, parseAmount, type BalanceMapping, type DateFormat } from '../lib/csv';
 import { fileValue, last4, readFiles, type FileAccount, type ReadFiles } from '../lib/imports';
+import { withKnown, type Known } from '../lib/known';
 import { accountKind, longDate, money } from '../lib/format';
 import { Button } from './ui/button';
 import { Dialog, DialogContent } from './ui/dialog';
@@ -463,7 +464,12 @@ const isCurrency = (value: string | undefined): value is Currency => CURRENCIES.
 /** A market ticker as typed (VTI, BRK.B). */
 const TICKER = /^[A-Z][A-Z0-9.-]{0,9}$/;
 /** How the import names an account in the files: its last digits, or the file for one without a number. */
-const labelOf = (account: FileAccount) => (account.number ? `··${last4(account.number)}` : 'The file');
+const labelOf = (account: FileAccount) => (account.number ? `··${last4(account.number)}` : (account.fileName ?? 'The file'));
+/** A known balance as typed: before the file's first transaction or after its last, amounts as text. */
+type KnownInput = { at: 'start' | 'end'; cash: string; shares: Record<string, string> };
+const NO_KNOWN: KnownInput = { at: 'end', cash: '', shares: {} };
+const typed = (value: string | undefined) => (value?.trim() ? parseAmount(value) : null);
+const toKnown = (input: KnownInput): Known => ({ at: input.at, cash: typed(input.cash), shares: Object.fromEntries(Object.entries(input.shares).map(([id, value]) => [id, typed(value)])) });
 /** Holdings go only in investment accounts; balances in any. */
 const fits = (target: AccountSummary, account: FileAccount) => account.file.kind === 'balances' || target.type === 'investment';
 
@@ -476,6 +482,8 @@ export function ImportDialog({ accounts, open, onOpenChange }: { accounts: Accou
   const [fileError, setFileError] = useState<string | null>(null);
   // Tickers typed for securities the files name without one (by the file's id for it).
   const [tickers, setTickers] = useState<Record<string, string>>({});
+  // Known balances typed for files of transactions with none (by the account's place in the files).
+  const [knowns, setKnowns] = useState<Record<number, KnownInput>>({});
   const visible = accounts.filter((candidate) => !candidate.isHidden);
 
   /** The account you have with the same last digits, when it can take the file. */
@@ -486,7 +494,8 @@ export function ImportDialog({ accounts, open, onOpenChange }: { accounts: Accou
     setRead(null);
     commit.reset();
     try {
-      const result = readFiles(await Promise.all(files.map((file) => file.text())));
+      const result = readFiles(await Promise.all(files.map((file) => file.text())), files.map((file) => file.name));
+      setKnowns({});
       setRead(result);
       if (result.kind === 'table') {
         setMapping(result.guess ?? { ...DEFAULT_MAPPING, balanceColumn: Math.max(0, (result.rows[0]?.length ?? 1) - 1) });
@@ -506,6 +515,8 @@ export function ImportDialog({ accounts, open, onOpenChange }: { accounts: Accou
   const preview = read?.kind === 'table' ? extractBalances(read.rows, mapping) : null;
   const fileAccounts: FileAccount[] =
     read?.kind === 'accounts' ? read.accounts : preview ? [{ number: null, institution: null, unknownTypes: [], file: { kind: 'balances', rows: preview.rows } }] : [];
+  // Files of transactions are worked out once their known balance is given (null until then).
+  const resolved = fileAccounts.map((account, index) => withKnown(account, knowns[index] && toKnown(knowns[index])));
 
   function defaultNew(account: FileAccount): Choice {
     const currency = isCurrency(account.file.currency) ? account.file.currency : shown;
@@ -524,8 +535,10 @@ export function ImportDialog({ accounts, open, onOpenChange }: { accounts: Accou
     const errors: string[] = [];
     const warnings: string[] = [];
     if (choice.to === 'skip') return { errors, warnings };
+    const worked = resolved[index];
+    if (!worked) errors.push(`Give the ${account.unanchored?.kind === 'holdings' ? 'holdings' : 'balance'} known at the start or end of the file.`);
     if (account.unknownTypes.length > 0) errors.push(`Wattle doesn't understand these transaction types yet: ${account.unknownTypes.join(', ')}. Skip this account.`);
-    if (account.file.kind === 'balances' && account.file.rows.length === 0) errors.push('There are no balances to import.');
+    if (worked?.file.kind === 'balances' && worked.file.rows.length === 0) errors.push('There are no balances to import.');
     const currency = account.file.currency;
     if (choice.to === 'account') {
       const target = visible.find((candidate) => candidate.id === choice.accountId);
@@ -559,8 +572,9 @@ export function ImportDialog({ accounts, open, onOpenChange }: { accounts: Accou
       api<ImportResponse>('/api/imports', {
         method: 'POST',
         body: JSON.stringify({
-          accounts: fileAccounts.flatMap((account, index) => {
+          accounts: fileAccounts.flatMap((read, index) => {
             const choice = choices[index];
+            const account = resolved[index] ?? read;
             if (!choice || choice.to === 'skip' || choice.to === 'choose') return [];
             const target =
               choice.to === 'account'
@@ -583,6 +597,7 @@ export function ImportDialog({ accounts, open, onOpenChange }: { accounts: Accou
     setRead(null);
     setChoices([]);
     setTickers({});
+    setKnowns({});
     setMapping(DEFAULT_MAPPING);
     setFileError(null);
     commit.reset();
@@ -639,7 +654,9 @@ export function ImportDialog({ accounts, open, onOpenChange }: { accounts: Accou
         {fileAccounts.map((account, index) => (
           <ImportRow
             key={account.number ?? `file:${index}`}
-            account={account}
+            account={resolved[index] ?? account}
+            known={knowns[index] ?? NO_KNOWN}
+            onKnown={(known) => setKnowns({ ...knowns, [index]: known })}
             choice={choices[index] ?? { to: 'choose' }}
             accounts={visible.filter((candidate) => fits(candidate, account))}
             onChoose={(choice) => choose(index, choice.to === 'new' && choices[index]?.to !== 'new' ? defaultNew(account) : choice)}
@@ -697,8 +714,12 @@ function ImportRow({
   check,
   skipped,
   shown,
+  known,
+  onKnown,
 }: {
   account: FileAccount;
+  known: KnownInput;
+  onKnown: (known: KnownInput) => void;
   choice: Choice;
   accounts: AccountSummary[];
   onChoose: (choice: Choice) => void;
@@ -715,11 +736,12 @@ function ImportRow({
     <div className="grid gap-2 rounded-md border p-3 text-sm">
       <div className="flex flex-wrap items-baseline justify-between gap-x-3">
         <p className="font-medium">
-          {account.number ? `Account ${label}` : 'Balances'}
+          {account.number ? `Account ${label}` : account.fileName ?? 'Balances'}
           {account.institution && <span className="text-muted-foreground"> · {account.institution}</span>}
         </p>
-        <p className="text-muted-foreground">{summary(file, currency, skipped)}</p>
+        <p className="text-muted-foreground">{summary(file, currency, skipped, account.unanchored?.transactions)}</p>
       </div>
+      {account.unanchored && <KnownFields pending={account.unanchored} known={known} onKnown={onKnown} />}
       {file.kind === 'balances' && file.rows.length > 0 && (
         <ul className="max-h-36 overflow-y-auto text-xs text-muted-foreground">
           {file.rows.slice(-8).map((row) => (
@@ -791,8 +813,49 @@ function ImportRow({
   );
 }
 
+/**
+ * A file of transactions has no balance in it: one known at its start or end
+ * (cash, and each security's shares) works out every day.
+ */
+function KnownFields({ pending, known, onKnown }: { pending: NonNullable<FileAccount['unanchored']>; known: KnownInput; onKnown: (known: KnownInput) => void }) {
+  const first = pending.transactions[0]?.date;
+  const last = pending.transactions.at(-1)?.date;
+  if (!first || !last) return null;
+  const holdings = pending.kind === 'holdings';
+  return (
+    <div className="grid gap-2">
+      <p className="text-muted-foreground">
+        The file has transactions but no {holdings ? 'holdings' : 'balance'}: give {holdings ? 'what the account held' : 'its balance'} before the first or after the last, and every day is worked out from the transactions.
+      </p>
+      <div className="grid gap-2 sm:grid-cols-2">
+        <Field label="Known">
+          <NativeSelect value={known.at} onChange={(event) => onKnown({ ...known, at: event.target.value as KnownInput['at'] })}>
+            <option value="end">After the last transaction ({longDate(last)})</option>
+            <option value="start">Before the first transaction ({longDate(first)})</option>
+          </NativeSelect>
+        </Field>
+        {(!holdings || pending.moneyMoves) && (
+          <Field label={holdings ? 'Cash' : 'Balance'}>
+            <Input inputMode="decimal" value={known.cash} onChange={(event) => onKnown({ ...known, cash: event.target.value })} />
+          </Field>
+        )}
+        {holdings &&
+          pending.securities.map((security) => (
+            <Field key={security.id} label={`Shares of ${security.name}`}>
+              <Input inputMode="decimal" value={known.shares[security.id] ?? ''} onChange={(event) => onKnown({ ...known, shares: { ...known.shares, [security.id]: event.target.value } })} />
+            </Field>
+          ))}
+      </div>
+    </div>
+  );
+}
+
 /** What an account in the files holds, in a line. */
-function summary(file: FileAccount['file'], currency: Currency, skipped: number): string {
+function summary(file: FileAccount['file'], currency: Currency, skipped: number, pending?: { date: string }[]): string {
+  if (pending && (file.kind === 'balances' ? file.rows.length === 0 : file.positions.length === 0 && file.cash === 0)) {
+    if (pending.length === 0) return 'No transactions';
+    return `${pending.length} ${pending.length === 1 ? 'transaction' : 'transactions'} · ${longDate(pending[0].date)} – ${longDate(pending.at(-1)!.date)}`;
+  }
   if (file.kind === 'balances') {
     const { rows } = file;
     if (rows.length === 0) return `No balances${skipped > 0 ? ` (${skipped} rows skipped)` : ''}`;

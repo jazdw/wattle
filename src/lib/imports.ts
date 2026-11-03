@@ -3,11 +3,13 @@
  * read into the accounts it holds, in one shape whatever the format
  * (shared/schemas.ts importSchema), then accounts with the same number
  * across files are merged. Quicken downloads (QFX/OFX) hold investment,
- * bank and card accounts; a CSV is dates and balances (./csv).
+ * bank and card accounts; a CSV is dates and balances, or transactions
+ * worked out from a balance you give (./csv, ./known).
  */
 import type { ImportedFile, ImportedHoldings } from '../../shared/schemas';
 import type { AccountType } from '../../shared/types';
-import { guessMapping, parseCsv, type BalanceMapping } from './csv';
+import type { Unanchored } from './known';
+import { guessMapping, parseCsv, transactionsAccount, transactionsKind, type BalanceMapping } from './csv';
 import { isOfx, ofxAccounts } from './ofx';
 
 /** A transaction as read, with the institution's id for it when the file has one (the server doesn't need it). */
@@ -18,9 +20,13 @@ export interface FileAccount {
   /** The account number as the file has it; null for a file with one account and no number. */
   number: string | null;
   institution: string | null;
+  /** The file's name, for an account it doesn't number. */
+  fileName?: string;
   /** What kind of account the file says it is (a bank or card statement), for a new one. */
   type?: AccountType;
   file: ImportedFile;
+  /** Transactions with no balance in the file: the file is worked out once one is known (./known). */
+  unanchored?: Unanchored;
   /** Transaction types the reader doesn't understand: the account can't be imported until they are. */
   unknownTypes: string[];
 }
@@ -30,19 +36,27 @@ export type ReadFiles =
   /** A CSV of dates and balances: its columns found from its header when it names them (else chosen by hand). */
   | { kind: 'table'; rows: string[][]; guess: BalanceMapping | null };
 
-/** Read the chosen files. Throws, saying why, when one can't be read. */
-export function readFiles(contents: string[]): ReadFiles {
+/** Read the chosen files (named for accounts a file doesn't number). Throws, saying why, when one can't be read. */
+export function readFiles(contents: string[], names: string[] = []): ReadFiles {
   const perFile: FileAccount[][] = [];
-  for (const content of contents) {
+  for (const [index, content] of contents.entries()) {
     if (isOfx(content)) {
       const accounts = ofxAccounts(content);
       if (accounts.length === 0) throw new Error('A Quicken file has no accounts in it.');
       perFile.push(accounts);
       continue;
     }
-    if (contents.length > 1) throw new Error('A CSV of dates and balances is imported on its own.');
+    // Investment transactions; else a balance per row (its columns checked by hand); else cash transactions.
     const rows = parseCsv(content);
-    return { kind: 'table', rows, guess: guessMapping(rows) };
+    const kind = transactionsKind(rows);
+    const guess = guessMapping(rows);
+    if (kind === 'holdings' || (kind === 'cash' && !guess)) {
+      const account = transactionsAccount(rows)!;
+      perFile.push([{ ...account, fileName: names[index] }]);
+      continue;
+    }
+    if (contents.length > 1) throw new Error('A CSV of dates and balances is imported on its own.');
+    return { kind: 'table', rows, guess };
   }
   return { kind: 'accounts', accounts: mergeAccounts(perFile) };
 }
