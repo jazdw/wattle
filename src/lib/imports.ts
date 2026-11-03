@@ -9,7 +9,7 @@
 import type { ImportedFile, ImportedHoldings } from '../../shared/schemas';
 import type { AccountType } from '../../shared/types';
 import type { Unanchored } from './known';
-import { guessMapping, parseCsv, transactionsAccount, transactionsKind, type BalanceMapping } from './csv';
+import { csvAccounts, guessMapping, parseCsv, transactionsKind, type BalanceMapping } from './csv';
 import { isOfx, ofxAccounts } from './ofx';
 
 /** A transaction as read, with the institution's id for it when the file has one (the server doesn't need it). */
@@ -48,11 +48,10 @@ export function readFiles(contents: string[], names: string[] = []): ReadFiles {
     }
     // Investment transactions; else a balance per row (its columns checked by hand); else cash transactions.
     const rows = parseCsv(content);
-    const kind = transactionsKind(rows);
+    const kind = transactionsKind(content);
     const guess = guessMapping(rows);
     if (kind === 'holdings' || (kind === 'cash' && !guess)) {
-      const account = transactionsAccount(rows)!;
-      perFile.push([{ ...account, fileName: names[index] }]);
+      perFile.push(csvAccounts(content)!.map((account) => ({ ...account, fileName: names[index] })));
       continue;
     }
     if (contents.length > 1) throw new Error('A CSV of dates and balances is imported on its own.');
@@ -81,40 +80,59 @@ export function mergeAccounts(perFile: FileAccount[][]): FileAccount[] {
       merged.set(key, [...(merged.get(key) ?? []), account]);
     }),
   );
-  return order.map((key) => {
-    const copies = merged.get(key)!;
-    if (copies.length === 1) return copies[0];
-    const [first] = copies;
-    const unknownTypes = [...new Set(copies.flatMap((copy) => copy.unknownTypes))];
-    if (copies.some((copy) => copy.file.kind !== first.file.kind)) throw new Error(`The files read account ··${last4(first.number)} in different ways.`);
-    if (first.file.kind === 'balances') {
-      const byDate = new Map(copies.flatMap((copy) => (copy.file.kind === 'balances' ? copy.file.rows : [])).map((row) => [row.date, row.balance]));
-      return { ...first, unknownTypes, file: { kind: 'balances', currency: first.file.currency, rows: [...byDate].map(([date, balance]) => ({ date, balance })).sort((a, b) => a.date.localeCompare(b.date)) } };
+  return order.map((key) => combineAccounts(merged.get(key)!));
+}
+
+/** Transactions in several files as one: by the institution's id, else by their details, as many as the file with the most has. */
+function mergeTransactions(lists: ReadTransaction[][]): ReadTransaction[] {
+  const keep = new Map<string, ReadTransaction[]>();
+  for (const list of lists) {
+    const here = new Map<string, ReadTransaction[]>();
+    for (const txn of list) {
+      const key = txn.id ? `id:${txn.id}` : [txn.date, txn.label, txn.security, txn.shares, txn.amount].join('|');
+      here.set(key, [...(here.get(key) ?? []), txn]);
     }
-    const files = copies.map((copy) => copy.file as ImportedHoldings);
-    if (new Set(files.map((file) => file.currency ?? '')).size > 1) throw new Error(`The files for account ··${last4(first.number)} are in different currencies.`);
-    const latest = files.reduce((best, file) => (file.asOf > best.asOf ? file : best));
-    const keep = new Map<string, ReadTransaction[]>();
-    for (const file of files) {
-      const here = new Map<string, ReadTransaction[]>();
-      for (const txn of file.transactions as ReadTransaction[]) {
-        const key = txn.id ? `id:${txn.id}` : [txn.date, txn.label, txn.security, txn.shares, txn.amount].join('|');
-        here.set(key, [...(here.get(key) ?? []), txn]);
-      }
-      for (const [key, found] of here) if (found.length > (keep.get(key)?.length ?? 0)) keep.set(key, found);
-    }
-    const securities = new Map(files.flatMap((file) => file.securities).map((security) => [security.id, security]));
-    return {
-      number: first.number,
-      institution: copies.find((copy) => copy.institution)?.institution ?? null,
-      unknownTypes,
-      file: {
-        ...latest,
-        securities: [...securities.values()],
-        transactions: [...keep.values()].flat().sort((a, b) => a.date.localeCompare(b.date)),
-      },
-    };
-  });
+    for (const [key, found] of here) if (found.length > (keep.get(key)?.length ?? 0)) keep.set(key, found);
+  }
+  return [...keep.values()].flat().sort((a, b) => a.date.localeCompare(b.date));
+}
+
+/**
+ * One account read from several files (the same number, or files you said
+ * are the same account) as one. Holdings come from the latest file that has
+ * them; with none, it still needs a balance known (./known). A Quicken file
+ * and a CSV of the same account can't be combined: their transactions can't
+ * be matched to count each once.
+ */
+export function combineAccounts(copies: FileAccount[]): FileAccount {
+  if (copies.length === 1) return copies[0];
+  const [first] = copies;
+  const name = first.number ? `··${last4(first.number)}` : (first.fileName ?? 'the account');
+  const unknownTypes = [...new Set(copies.flatMap((copy) => copy.unknownTypes))];
+  if (copies.some((copy) => copy.file.kind !== first.file.kind)) throw new Error(`The files read ${name} in different ways.`);
+  const shared = { number: first.number, fileName: first.fileName, institution: copies.find((copy) => copy.institution)?.institution ?? null, type: copies.find((copy) => copy.type)?.type, unknownTypes };
+  const withIds = copies.filter((copy) => (copy.unanchored?.transactions ?? (copy.file.kind === 'holdings' ? copy.file.transactions : [])).some((txn: ReadTransaction) => txn.id));
+  if (withIds.length > 0 && withIds.length < copies.length && copies.some((copy) => copy.fileName)) throw new Error(`${name} is in a Quicken file and a CSV: import it from one of them, or its transactions would count twice.`);
+  if (first.file.kind === 'balances') {
+    const pending = copies.flatMap((copy) => (copy.unanchored?.kind === 'cash' ? [copy.unanchored.transactions] : []));
+    if (pending.length === copies.length) return { ...shared, file: { kind: 'balances', rows: [] }, unanchored: { kind: 'cash', transactions: mergeTransactions(pending) } };
+    if (pending.length > 0) throw new Error(`${name}: a file of balances and a file of transactions can't be combined.`);
+    const byDate = new Map(copies.flatMap((copy) => (copy.file.kind === 'balances' ? copy.file.rows : [])).map((row) => [row.date, row.balance]));
+    return { ...shared, file: { kind: 'balances', currency: first.file.currency, rows: [...byDate].map(([date, balance]) => ({ date, balance })).sort((a, b) => a.date.localeCompare(b.date)) } };
+  }
+  const files = copies.map((copy) => copy.file as ImportedHoldings);
+  if (new Set(files.map((file) => file.currency ?? '')).size > 1) throw new Error(`The files for ${name} are in different currencies.`);
+  const transactions = mergeTransactions(files.map((file) => file.transactions as ReadTransaction[]));
+  const securities = [...new Map(files.flatMap((file) => file.securities).map((security) => [security.id, security])).values()];
+  const asOf = files.map((file) => file.asOf).sort().at(-1)!;
+  // Holdings: from the latest file that has them (not one of transactions only).
+  const known = copies.filter((copy) => !copy.unanchored).map((copy) => copy.file as ImportedHoldings);
+  if (known.length === 0) {
+    const moneyMoves = copies.some((copy) => copy.unanchored?.kind === 'holdings' && copy.unanchored.moneyMoves);
+    return { ...shared, file: { kind: 'holdings', currency: first.file.currency, asOf, securities, positions: [], cash: 0, transactions }, unanchored: { kind: 'holdings', securities, transactions, moneyMoves } };
+  }
+  const latest = known.reduce((best, file) => (file.asOf > best.asOf ? file : best));
+  return { ...shared, file: { ...latest, asOf, securities, transactions } };
 }
 
 /** What an account in the files holds now, in cents (positions at the file's prices, and cash). */
