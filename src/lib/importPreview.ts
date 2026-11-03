@@ -8,8 +8,9 @@ import type { ImportedFile, ImportKind } from '../../shared/schemas';
 
 export interface PreviewRow {
   date: string;
-  /** The file's own name for the transaction (BUYMF, Contribution…). */
+  /** What the transaction is, in words (a purchase, a deposit…), and how the file describes it. */
   label: string;
+  description: string | null;
   kind: ImportKind | null;
   /** The file's id for the security, when it's in one. */
   security: string | null;
@@ -25,6 +26,19 @@ export interface PreviewRow {
 
 const CASH_KINDS = new Set<ImportKind>(['income', 'deposit', 'withdrawal', 'fee', 'sweep']);
 
+/** Each kind of transaction in words. */
+const KIND_WORDS: Record<ImportKind, string> = {
+  buy: 'Purchase',
+  sell: 'Sale',
+  reinvest: 'Reinvested dividend',
+  income: 'Dividend or interest',
+  deposit: 'Money in',
+  withdrawal: 'Money out',
+  fee: 'Fee',
+  transfer: 'Shares moved',
+  sweep: 'Moved within cash',
+};
+
 /** The rows, newest first. */
 export function previewRows(file: ImportedFile): PreviewRow[] {
   if (file.kind === 'balances') {
@@ -32,6 +46,7 @@ export function previewRows(file: ImportedFile): PreviewRow[] {
       .map((row, index) => ({
         date: row.date,
         label: index === 0 ? 'Balance' : 'Change',
+        description: null,
         kind: null,
         security: null,
         shares: 0,
@@ -56,7 +71,9 @@ export function previewRows(file: ImportedFile): PreviewRow[] {
     if (txn.security) held.set(txn.security, (held.get(txn.security) ?? 0) + sharesIn(txn));
     return {
       date: txn.date,
-      label: txn.label,
+      label: KIND_WORDS[txn.kind],
+      // The file's description, else its own name for the type when that's a word (a CSV's "Contribution", not a Quicken file's BUYMF).
+      description: (txn as { description?: string }).description ?? (/^[A-Z]+$/.test(txn.label) || txn.label === 'CSV' || txn.label.toLowerCase() === KIND_WORDS[txn.kind].toLowerCase() ? null : txn.label),
       kind: txn.kind,
       security: txn.security,
       shares: sharesIn(txn),

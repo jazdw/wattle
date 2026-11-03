@@ -12,8 +12,8 @@ import type { Unanchored } from './known';
 import { csvAccounts, guessMapping, parseCsv, transactionsKind, type BalanceMapping } from './csv';
 import { isOfx, ofxAccounts } from './ofx';
 
-/** A transaction as read, with the institution's id for it when the file has one (the server doesn't need it). */
-export type ReadTransaction = ImportedHoldings['transactions'][number] & { id?: string };
+/** A transaction as read, with the institution's id for it and its description when the file has them (for the page; the server doesn't need them). */
+export type ReadTransaction = ImportedHoldings['transactions'][number] & { id?: string; description?: string };
 
 /** One account in the files. */
 export interface FileAccount {

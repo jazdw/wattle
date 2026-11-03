@@ -282,7 +282,8 @@ export function csvAccounts(text: string): FileAccount[] | null {
         // Named by its type, else its description: interest and dividends are income, a charge a fee.
         const named = label || cell(row, columns.description);
         const cashKind: ImportKind = /interest|dividend/i.test(named) ? 'income' : /\bfees?\b|charge/i.test(named) && cents < 0 ? 'fee' : cents < 0 ? 'withdrawal' : 'deposit';
-        found.transactions.push({ date, kind: cashKind, label: named || 'CSV', security: null, shares: 0, price: 0, amount: cents, value: 0, charges: 0 });
+        const description = cell(row, columns.description);
+        found.transactions.push({ date, kind: cashKind, label: named || 'CSV', ...(description ? { description } : {}), security: null, shares: 0, price: 0, amount: cents, value: 0, charges: 0 });
         return;
       }
       const shares = parseAmount(cell(row, columns.shares)) ?? 0;
@@ -304,7 +305,8 @@ export function csvAccounts(text: string): FileAccount[] | null {
       // Cash: a buy pays its total, a sale and income bring it in; a transfer only moves shares (a reinvestment's below).
       const signed = txnKind === 'buy' ? -value : txnKind === 'sell' || txnKind === 'income' || txnKind === 'deposit' ? value : txnKind === 'withdrawal' || txnKind === 'fee' ? -value : 0;
       const direction = txnKind === 'sell' ? -1 : txnKind === 'transfer' ? Math.sign(shares) : 1;
-      found.transactions.push({ date, kind: txnKind, label: label || 'CSV', security: id || null, shares: holds ? direction * Math.abs(shares) : 0, price, amount: signed, value: txnKind === 'transfer' ? 0 : value, charges: 0 });
+      const description = cell(row, columns.description);
+      found.transactions.push({ date, kind: txnKind, label: label || 'CSV', ...(description ? { description } : {}), security: id || null, shares: holds ? direction * Math.abs(shares) : 0, price, amount: signed, value: txnKind === 'transfer' ? 0 : value, charges: 0 });
     });
   }
 

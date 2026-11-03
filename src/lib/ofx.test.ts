@@ -20,8 +20,8 @@ describe('ofxAccounts', () => {
       positions: [{ security: '000000002', shares: 260, price: 13 }],
     });
     expect(account.file.kind === 'holdings' && account.file.transactions).toEqual([
-      { id: 'B1', date: '2026-08-03', kind: 'buy', label: 'BUYMF', security: '000000002', shares: 10, price: 12.5, amount: -125_00, value: 125_00, charges: 0 },
-      { id: 'F1', date: '2026-08-17', kind: 'sell', label: 'SELLMF', security: '000000002', shares: -0.08, price: 12.5, amount: 1_00, value: 1_00, charges: 0 },
+      { id: 'B1', date: '2026-08-03', kind: 'buy', label: 'BUYMF', description: 'Contributions', security: '000000002', shares: 10, price: 12.5, amount: -125_00, value: 125_00, charges: 0 },
+      { id: 'F1', date: '2026-08-17', kind: 'sell', label: 'SELLMF', description: 'Fees', security: '000000002', shares: -0.08, price: 12.5, amount: 1_00, value: 1_00, charges: 0 },
     ]);
   });
 

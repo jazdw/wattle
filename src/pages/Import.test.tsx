@@ -86,7 +86,7 @@ describe('Import page', () => {
     expect(screen.getByRole('button', { name: 'Import' })).toBeDisabled();
 
     await user.selectOptions(screen.getByLabelText('Import ··5678 into'), 'new');
-    expect(screen.getByLabelText("New account's name")).toHaveValue('Example Plan ··5678');
+    expect(screen.getByLabelText("New account's name")).toHaveValue('Example Plan');
     // ··1234 is the linked checking account's last digits: a new account would count it twice.
     await user.selectOptions(screen.getByLabelText('Import ··1234 into'), 'new');
     expect(screen.getByText(/is linked with the same last digits/)).toBeInTheDocument();
@@ -96,7 +96,7 @@ describe('Import page', () => {
     await expect.poll(() => sent('POST /api/imports')[0]?.body).toMatchObject({
       accounts: [
         { label: '··4321', target: { accountId: 'brk' }, file: { kind: 'holdings', positions: [{ security: '000000002', shares: 260, price: 13 }] } },
-        { label: '··5678', target: { new: { name: 'Example Plan ··5678', type: 'investment', currency: 'USD', institutionName: 'Example Plan', mask: '5678', ownerUserId: 'u-me' } } },
+        { label: '··5678', target: { new: { name: 'Example Plan', type: 'investment', currency: 'USD', institutionName: 'Example Plan', mask: '5678', ownerUserId: 'u-me' } } },
       ],
     });
     expect(await screen.findByText('Imported')).toBeInTheDocument();
@@ -111,7 +111,7 @@ describe('Import page', () => {
     expect(screen.getByLabelText('Type')).toHaveValue('credit');
     await importIt(user);
     await expect.poll(() => sent('POST /api/imports')[0]?.body).toMatchObject({
-      accounts: [{ label: '··5555', target: { new: { name: 'Example Bank ··5555', type: 'credit', currency: 'USD' } }, file: { kind: 'balances', currency: 'USD', rows: [{ date: '2026-09-01', balance: 200 }, { date: '2026-09-15', balance: 300 }, { date: '2026-10-08', balance: 300 }] } }],
+      accounts: [{ label: '··5555', target: { new: { name: 'Example Bank', type: 'credit', currency: 'USD' } }, file: { kind: 'balances', currency: 'USD', rows: [{ date: '2026-09-01', balance: 200 }, { date: '2026-09-15', balance: 300 }, { date: '2026-10-08', balance: 300 }] } }],
     });
   });
 
@@ -202,8 +202,8 @@ describe('Import page', () => {
     // Newest first: the fee's sale, then the purchase, each with the shares held after it (260 now).
     const rows = () => screen.getAllByRole('row').slice(1).map((row) => row.textContent);
     expect(rows()).toHaveLength(2);
-    expect(rows()[0]).toMatch(/Aug 17, 2026.*sell.*-0\.08.*260/);
-    expect(rows()[1]).toMatch(/Aug 3, 2026.*buy.*10.*12\.50.*260\.08/);
+    expect(rows()[0]).toMatch(/Aug 17, 2026.*Sale.*Fees.*-0\.08.*260/);
+    expect(rows()[1]).toMatch(/Aug 3, 2026.*Purchase.*Contributions.*10.*12\.50.*260\.08/);
 
     expect(await screen.findByText('On 2026-08-03, XYZ traded at 12.5 but closed at 10.', {}, { timeout: 3000 })).toBeInTheDocument();
     expect(screen.getAllByRole('row')[2].className).toMatch(/bg-negative/);
