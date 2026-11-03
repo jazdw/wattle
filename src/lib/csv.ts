@@ -181,7 +181,7 @@ export function investmentKind(type: string, shares: number, amount: number): Im
   if (/reinvest/.test(text)) return 'reinvest';
   if (/split/.test(text)) return 'transfer';
   if (/\b(fees?|expense|charge)\b/.test(text)) return moves ? 'sell' : 'fee';
-  if (/dividend|interest|capital gain|distribution|income/.test(text)) return moves ? 'reinvest' : 'income';
+  if (/dividend|interest|capital gain|distribution|income|earning/.test(text)) return moves ? 'reinvest' : 'income';
   if (/\b(buy|bought|purchase)/.test(text)) return 'buy';
   if (/\b(sell|sold|sale|redemption|redeem)/.test(text)) return 'sell';
   if (/transfer|exchange/.test(text)) return moves ? 'transfer' : amount >= 0 ? 'deposit' : 'withdrawal';

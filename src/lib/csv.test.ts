@@ -125,6 +125,7 @@ describe('transactions CSV', () => {
     expect(investmentKind('Purchase of shares', 1, 100)).toBe('buy');
     expect(investmentKind('Dividend', 0, 5)).toBe('income');
     expect(investmentKind('Dividend', 0.1, 5)).toBe('reinvest');
+    expect(investmentKind('Earnings', 0.1, 5)).toBe('reinvest');
     expect(investmentKind('Fee', 0.1, 5)).toBe('sell'); // a plan's fee sells shares
     expect(investmentKind('', -2, 50)).toBe('sell');
     expect(investmentKind('Something else', 1, 1)).toBeNull();

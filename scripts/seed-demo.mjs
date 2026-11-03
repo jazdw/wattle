@@ -48,11 +48,8 @@ const owner = me.user.id;
 async function account(spec, endBalance, volatility, drift, seed) {
   const { id } = await call('/api/accounts', 'POST', { ...spec, ownerUserId: spec.ownerUserId ?? owner });
   const series = walk(endBalance, volatility, drift, seed);
-  await call('/api/imports/balances', 'POST', {
-    accountId: id,
-    rows: dates.map((date, index) => ({ date, balance: Math.round(series[index] * 100) / 100 })),
-    overwrite: true,
-  });
+  const rows = dates.map((date, index) => ({ date, balance: Math.round(series[index] * 100) / 100 }));
+  await call('/api/imports', 'POST', { accounts: [{ label: 'Demo', target: { accountId: id }, file: { kind: 'balances', rows } }] });
   await call(`/api/accounts/${id}/balances`, 'POST', { date: dates.at(-1), balance: endBalance });
   return id;
 }
@@ -85,22 +82,30 @@ await call(`/api/accounts/${brokerage}/holdings`, 'PUT', { holdings, version: 0 
 const priceSeries = holdings.map((holding, index) =>
   holding.ticker === 'VMFXX' ? dates.map(() => 1) : walk(holding.price, holding.ticker === 'VBTLX' ? 0.004 : 0.018, 0.0004, 31 + index),
 );
-const holdingRows = [];
-const totals = dates.map(() => 0);
-dates.forEach((date, day) => {
-  holdings.forEach((holding, index) => {
-    const price = Math.round(priceSeries[index][day] * 100) / 100;
-    holdingRows.push({ date, ticker: holding.ticker, quantity: holding.quantity, price });
-    totals[day] += holding.quantity * price;
-  });
-});
-for (let index = 0; index < holdingRows.length; index += 5000) {
-  await call('/api/imports/holdings', 'POST', { accountId: brokerage, rows: holdingRows.slice(index, index + 5000), overwrite: true });
-}
-await call('/api/imports/balances', 'POST', {
-  accountId: brokerage,
-  rows: dates.map((date, day) => ({ date, balance: Math.round(totals[day] * 100) / 100 })),
-  overwrite: true,
+// Its history: the holdings arriving a year ago, priced from a made-up price each month (no market data here).
+const months = dates.filter((date, day) => day % 30 === 0 || day === DAYS - 1);
+await call('/api/imports', 'POST', {
+  accounts: [
+    {
+      label: 'Demo',
+      target: { accountId: brokerage },
+      file: {
+        kind: 'holdings',
+        currency: 'USD',
+        asOf: dates.at(-1),
+        securities: holdings.map((holding) => ({ id: holding.ticker, ticker: holding.ticker, name: holding.name })),
+        positions: holdings.map((holding) => ({ security: holding.ticker, shares: holding.quantity, price: holding.price })),
+        cash: 0,
+        transactions: holdings.flatMap((holding, index) =>
+          months.map((date, month) => {
+            const price = Math.round(priceSeries[index][dates.indexOf(date)] * 100) / 100;
+            // The first moves the shares in; the rest only carry a price.
+            return { date, kind: 'transfer', label: month === 0 ? 'Opening position' : 'Price', security: holding.ticker, shares: month === 0 ? holding.quantity : 0, price, amount: 0, value: 0, charges: 0 };
+          }),
+        ),
+      },
+    },
+  ],
 });
 
 await call('/api/targets', 'PUT', {

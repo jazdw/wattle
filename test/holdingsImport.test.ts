@@ -45,7 +45,7 @@ async function linked(shares = 20) {
   await api('/api/plaid/exchange', { method: 'POST', json: { publicToken: 'p', kind: 'investments' } });
   await settle(deps);
   const [brk] = await deps.db.select().from(schema.accounts);
-  const send = (file: ReturnType<typeof download>) => api('/api/imports', { method: 'POST', json: { accounts: [{ label: '··1234', target: { accountId: brk.id }, file }] } });
+  const send = (file: ReturnType<typeof download>, path = '/api/imports') => api(path, { method: 'POST', json: { accounts: [{ label: '··1234', target: { accountId: brk.id }, file }] } });
   const day = async (date: string) => (await deps.db.select().from(schema.accountDaily).where(and(eq(schema.accountDaily.accountId, brk.id), eq(schema.accountDaily.date, date))))[0];
   const vti = async (date: string) => {
     const [row] = await deps.db.select().from(schema.holdingDaily).innerJoin(schema.securities, eq(schema.securities.id, schema.holdingDaily.securityId)).where(and(eq(schema.holdingDaily.accountId, brk.id), eq(schema.holdingDaily.date, date), eq(schema.securities.ticker, 'VTI')));
@@ -150,5 +150,18 @@ describe('holdings history import', () => {
     expect((await api(`/api/connections/${connection.id}/backfill`, { method: 'POST' })).status).toBe(200);
     await settle(deps);
     expect(await day('2026-07-01')).toMatchObject({ balance: 2500_00, source: 'import' });
+  });
+
+  it('checks a file without writing it: what each account would get, each trade’s close, and every problem by day', async () => {
+    const { deps, send } = await linked();
+    const good = await send(download([{ ticker: 'VTI', shares: 20 }, { ticker: null, shares: 50 }], HISTORY), '/api/imports/check');
+    expect(good.status).toBe(200);
+    expect(good.body).toMatchObject({ problems: [], accounts: [{ label: '··1234', created: false, from: '2026-05-29', days: 132, closes: [{ date: '2026-05-29', security: 'VTI', close: 100 }, { date: '2026-09-01', security: 'VTI', close: 100 }] }] });
+
+    const bad = await send(download([{ ticker: 'VTI', shares: 20 }, { ticker: null, shares: 50 }], [{ ...HISTORY[0], price: 150 }, ...HISTORY.slice(1)]), '/api/imports/check');
+    expect(bad.status).toBe(200);
+    expect(bad.body.problems).toEqual([{ label: '··1234', date: '2026-05-29', text: 'on 2026-05-29, VTI traded at 150 but closed at 100' }]);
+    await settle(deps);
+    expect((await deps.db.select().from(schema.accountDaily)).filter((row) => row.source === 'import')).toHaveLength(0);
   });
 });

@@ -11,6 +11,7 @@ import { Holdings } from './pages/Holdings';
 import { Transactions } from './pages/Transactions';
 import { Style } from './pages/Style';
 import { Accounts } from './pages/Accounts';
+import { Import } from './pages/Import';
 import { Settings } from './pages/Settings';
 import { Activity } from './pages/Activity';
 import { PlaidOAuth } from './pages/PlaidOAuth';
@@ -43,6 +44,7 @@ export default function App() {
         <Route path="transactions" element={<Transactions />} />
         <Route path="style" element={<Style />} />
         <Route path="accounts" element={<Accounts />} />
+        <Route path="import" element={<Import />} />
         <Route path="settings" element={<Settings />} />
         <Route path="activity" element={<Activity />} />
         <Route path="plaid-oauth" element={<PlaidOAuth />} />

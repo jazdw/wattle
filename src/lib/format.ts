@@ -62,6 +62,16 @@ export const ACCOUNT_TYPE_LABELS: Record<string, string> = {
   other: 'Other',
 };
 
+/** The account types to choose from, as a manual account's form lists them. */
+export const ACCOUNT_TYPE_OPTIONS = [
+  { value: 'depository', label: 'Cash (bank account)' },
+  { value: 'investment', label: 'Investments / super' },
+  { value: 'property', label: 'Property' },
+  { value: 'credit', label: 'Credit card' },
+  { value: 'loan', label: 'Loan / mortgage' },
+  { value: 'other', label: 'Other asset' },
+];
+
 export const ACCOUNT_TYPE_ORDER = ['depository', 'investment', 'property', 'other', 'credit', 'loan'];
 
 /** Plaid subtypes whose plain capitalisation reads wrong. */

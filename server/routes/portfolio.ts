@@ -26,7 +26,7 @@ import { sweep } from '../services/jobRunner';
 import { activeTarget, loadPortfolio } from '../services/portfolio';
 import { stableId } from '../services/ids';
 import { Lease, targetsLease } from '../services/lease';
-import { importAccounts, suggestTickers } from '../services/holdingsImport';
+import { checkImport, importAccounts, suggestTickers } from '../services/holdingsImport';
 import { snapshotHousehold } from '../services/snapshots';
 import { activeConnections, MANUAL_SYNC_INTERVAL_MS, syncConnection } from '../services/sync';
 import { describeError } from '../lib/errors';
@@ -316,6 +316,12 @@ portfolioRoutes.post('/imports/tickers', async (c) => {
 });
 
 /** Every import: the accounts in one or more files, each into an account you have or a new one. */
+// What an import would write and what's wrong with it, writing nothing (the import page's preview).
+portfolioRoutes.post('/imports/check', async (c) => {
+  const body = await readBody(c, importSchema);
+  return c.json(await checkImport(c.env.deps, c.get('tenant'), body));
+});
+
 portfolioRoutes.post('/imports', async (c) => {
   const body = await readBody(c, importSchema);
   return c.json(await importAccounts(c.env.deps, c.get('tenant'), body));

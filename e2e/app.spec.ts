@@ -8,7 +8,7 @@ plain('signed-out visitors land on the login page', async ({ page }) => {
 });
 
 test('net worth shows the seeded household', async ({ page }) => {
-  await expect(page.getByText(/^\$[\d,]+$/).first()).toBeVisible();
+  await expect(page.getByText(/^\$[\d,]+(\.\d\d)?$/).first()).toBeVisible();
   for (const group of ['Cash', 'Investments', 'Property', 'Credit cards', 'Loans']) {
     await expect(page.getByRole('heading', { name: group, level: 3 })).toBeVisible();
   }
@@ -63,17 +63,20 @@ test('a manual account can be added and updated', async ({ page }) => {
 
 test('a CSV of balances imports as daily balances', async ({ page }) => {
   await page.goto('/accounts');
-  await page.getByRole('button', { name: 'Import', exact: true }).click();
-  const dialog = page.getByRole('dialog', { name: 'Import history' });
-  await dialog.getByLabel('Files').setInputFiles({
+  await page.getByRole('link', { name: 'Import', exact: true }).click();
+  await expect(page).toHaveURL(/\/import$/);
+  await page.getByLabel('Files').setInputFiles({
     name: 'bank.csv',
     mimeType: 'text/csv',
     buffer: Buffer.from('Account,Date,Description,Debit,Credit,Balance\n' + '000000123456,13/01/2025,SALARY,,1000.00,5000.00\n' + '000000123456,01/01/2025,RENT,600.00,,4000.00\n'),
   });
-  await expect(dialog.getByText('Found its date and balance columns: check them below.')).toBeVisible();
-  await dialog.getByLabel('Import The file into').selectOption({ index: 1 });
-  await dialog.getByRole('button', { name: 'Import' }).click();
-  await expect(dialog).toBeHidden();
+  await expect(page.getByText('Found its date and balance columns: check them below.')).toBeVisible();
+  await page.getByLabel('Import The file into').selectOption({ index: 1 });
+  // The preview: each balance, newest first.
+  await expect(page.getByRole('row', { name: /Jan 13, 2025/ })).toBeVisible();
+  await expect(page.getByRole('status')).toHaveText(/ready to import/);
+  await page.getByRole('button', { name: 'Import', exact: true }).click();
+  await expect(page.getByText('Imported', { exact: true })).toBeVisible();
 });
 
 test('growth drills from accounts into holdings', async ({ page }) => {
