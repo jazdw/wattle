@@ -146,6 +146,7 @@ export const importedHoldingsSchema = z.object({
 /** Dated balances (major units; liabilities as positive amounts owed). */
 export const importedBalancesSchema = z.object({
   kind: z.literal('balances'),
+  currency: z.string().length(3).optional(),
   rows: z.array(z.object({ date: isoDate, balance: z.number().finite() })).min(1).max(5000),
 });
 

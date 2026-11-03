@@ -1,7 +1,8 @@
 /**
- * OFX / QFX investment downloads (what institutions offer for Quicken): each
- * account's positions and cash, its transactions and the securities they
- * name, as one import's accounts (./imports). Parsed in the browser with
+ * OFX / QFX downloads (what institutions offer for Quicken), as one import's
+ * accounts (./imports): an investment account's positions and cash, its
+ * transactions and the securities they name; a bank or card account's
+ * balance on each day its transactions cover. Parsed in the browser with
  * ofx-js (both OFX 1.x SGML and 2.x XML); the server checks the result and
  * works out each day from it.
  */
@@ -10,6 +11,7 @@ import { addDays, type IsoDate } from '../../shared/dates';
 import { toMinor } from '../../shared/money';
 import type { ImportedHoldings, ImportKind } from '../../shared/schemas';
 import type { FileAccount, ReadTransaction } from './imports';
+import { balanceRows } from './known';
 
 /** Elements and what they do; any other is listed as not understood. */
 const KINDS: Record<string, ImportKind> = {
@@ -57,7 +59,7 @@ export function isOfx(content: string): boolean {
   return /^\s*(OFXHEADER:|<\?xml[^>]*>\s*<\?OFX|<OFX>)/i.test(content);
 }
 
-/** Each investment account in a download (none for a bank statement). */
+/** Each account in a download: investment, bank and card statements. */
 export function ofxAccounts(content: string): FileAccount[] {
   const ofx = parseStrict(content).OFX;
   const securities = new Map<string, ImportedHoldings['securities'][number]>();
@@ -71,9 +73,37 @@ export function ofxAccounts(content: string): FileAccount[] {
   }
   const signOn = (ofx.SIGNONMSGSRSV1 as unknown as Element | undefined)?.SONRS as Element | undefined;
   const institution = text((signOn?.FI as Element | undefined)?.ORG) || null;
-  return list(ofx.INVSTMTMSGSRSV1?.INVSTMTTRNRS).flatMap((response) =>
-    response.INVSTMTRS ? [statement(response.INVSTMTRS as unknown as Element, securities, institution)] : [],
-  );
+  const responses = (messages: string, wrapper: string, inner: string) =>
+    list(((ofx as unknown as Element)[messages] as Element | undefined)?.[wrapper] as Element | Element[] | undefined).flatMap((response) => (response[inner] ? [response[inner] as Element] : []));
+  return [
+    ...list(ofx.INVSTMTMSGSRSV1?.INVSTMTTRNRS).flatMap((response) => (response.INVSTMTRS ? [statement(response.INVSTMTRS as unknown as Element, securities, institution)] : [])),
+    // A bank or card statement with no closing balance has nothing to work back from.
+    ...responses('BANKMSGSRSV1', 'STMTTRNRS', 'STMTRS').flatMap((response) => (response.LEDGERBAL ? [bankStatement(response, institution, false)] : [])),
+    ...responses('CREDITCARDMSGSRSV1', 'CCSTMTTRNRS', 'CCSTMTRS').flatMap((response) => (response.LEDGERBAL ? [bankStatement(response, institution, true)] : [])),
+  ];
+}
+
+/**
+ * A bank or card statement as the account's balance at the end of each day
+ * a transaction posted, worked back from its closing (ledger) balance, and
+ * on the day the statement starts; the import carries each forward to the
+ * next. A card's balance is what's owed.
+ */
+function bankStatement(response: Element, institution: string | null, card: boolean): FileAccount {
+  const from = (response.BANKACCTFROM ?? response.CCACCTFROM) as Element | undefined;
+  const ledger = response.LEDGERBAL as Element;
+  const asOf = day(ledger.DTASOF);
+  const transactions = response.BANKTRANLIST as Element | undefined;
+  const posted = list(transactions?.STMTTRN as Element | Element[] | undefined).map((entry) => ({ date: day(entry.DTPOSTED), amount: toMinor(number(entry.TRNAMT)) }));
+  const rows = balanceRows(posted, toMinor(number(ledger.BALAMT)), asOf, text(transactions?.DTSTART) ? day(transactions?.DTSTART) : null, card);
+  const type = text(from?.ACCTTYPE);
+  return {
+    number: text(from?.ACCTID) || null,
+    institution,
+    type: card || type === 'CREDITLINE' ? 'credit' : 'depository',
+    unknownTypes: [],
+    file: { kind: 'balances', currency: text(response.CURDEF) || 'USD', rows },
+  };
 }
 
 function statement(response: Element, securities: Map<string, ImportedHoldings['securities'][number]>, institution: string | null): FileAccount {

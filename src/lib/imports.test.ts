@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import type { ImportedHoldings } from '../../shared/schemas';
 import { mergeAccounts, readFiles, type FileAccount } from './imports';
-import { buy, sgml } from '../test/ofx';
+import { bankSgml, buy, sgml } from '../test/ofx';
 
 const holdings = (account: FileAccount) => account.file as ImportedHoldings;
 
@@ -22,6 +22,15 @@ describe('readFiles', () => {
     const both = one.replace('</INVSTMTMSGSRSV1>', statement.replace('<ACCTID>12345678', '<ACCTID>87654321') + '</INVSTMTMSGSRSV1>');
     const read = readFiles([both]);
     expect(read.kind === 'accounts' && read.accounts.map((account) => account.number)).toEqual(['12345678', '87654321']);
+  });
+
+  it('reads bank downloads beside investment ones, overlapping statements of one account as one', () => {
+    const older = bankSgml([['20260910', '500.00']], '700.00', { asOf: '20260915' });
+    const newer = bankSgml([['20260910', '500.00'], ['20261001', '-100.00']], '600.00');
+    const read = readFiles([older, newer, sgml(buy('B1', '20260803', '10', '12.5', '125.00'))]);
+    if (read.kind !== 'accounts') throw new Error('expected accounts');
+    expect(read.accounts.map((account) => [account.number, account.file.kind])).toEqual([['99990001', 'balances'], ['12345678', 'holdings']]);
+    expect(read.accounts[0].file).toMatchObject({ rows: [{ date: '2026-09-01', balance: 200 }, { date: '2026-09-10', balance: 700 }, { date: '2026-09-15', balance: 700 }, { date: '2026-10-01', balance: 600 }, { date: '2026-10-08', balance: 600 }] });
   });
 
   it('gives a CSV of balances its columns to choose, on its own', () => {

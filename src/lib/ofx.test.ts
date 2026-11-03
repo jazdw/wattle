@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { buy, fee, sgml } from '../test/ofx';
+import { bankSgml, buy, fee, sgml } from '../test/ofx';
 import { isOfx, ofxAccounts } from './ofx';
 
 describe('ofxAccounts', () => {
@@ -87,7 +87,7 @@ describe('ofxAccounts', () => {
     }
   });
 
-  it('lists transaction types it doesn’t understand, and ignores bank statements', () => {
+  it('lists transaction types it doesn’t understand, and skips a bank statement with no closing balance', () => {
     const expense = `<INVEXPENSE><INVTRAN><FITID>E1</FITID><DTTRADE>20260901</DTTRADE></INVTRAN><SECID><UNIQUEID>000000002</UNIQUEID><UNIQUEIDTYPE>CUSIP</UNIQUEIDTYPE></SECID><TOTAL>5.00</TOTAL><SUBACCTSEC>CASH</SUBACCTSEC><SUBACCTFUND>CASH</SUBACCTFUND></INVEXPENSE>`;
     expect(ofxAccounts(sgml(expense))[0].unknownTypes).toEqual(['INVEXPENSE']);
     const bank = `OFXHEADER:100\nDATA:OFXSGML\nVERSION:102\n\n<OFX><BANKMSGSRSV1><STMTTRNRS><TRNUID>0</TRNUID><STMTRS><CURDEF>USD</CURDEF><BANKTRANLIST><DTSTART>20260101</DTSTART><DTEND>20261008</DTEND></BANKTRANLIST></STMTRS></STMTTRNRS></BANKMSGSRSV1></OFX>`;
@@ -99,5 +99,36 @@ describe('ofxAccounts', () => {
     expect(isOfx(xml)).toBe(true);
     const [account] = ofxAccounts(xml);
     expect(account.file.kind === 'holdings' && account.file.transactions).toHaveLength(1);
+  });
+
+  it("reads a bank statement as the balance on each day a transaction posted, worked back from the closing balance", () => {
+    // $1,000 closing on Oct 8: a $500 deposit on Sep 10, $200 and $50 out on Sep 20, $25 in on Oct 8.
+    const [account] = ofxAccounts(bankSgml([['20260910', '500.00'], ['20260920', '-200.00'], ['20260920', '-50.00'], ['20261008', '25.00']], '1000.00'));
+    expect(account).toMatchObject({ number: '99990001', institution: 'Example Bank', type: 'depository', unknownTypes: [] });
+    expect(account.file).toEqual({
+      kind: 'balances',
+      currency: 'USD',
+      rows: [
+        { date: '2026-09-01', balance: 725 }, // from the day the statement starts
+        { date: '2026-09-10', balance: 1225 },
+        { date: '2026-09-20', balance: 975 },
+        { date: '2026-10-08', balance: 1000 },
+      ],
+    });
+  });
+
+  it("reads a card statement as what's owed, to its closing date", () => {
+    // $300 owed at the close (Oct 8), after a $100 purchase on Sep 15 and a $50 payment on Sep 25.
+    const [account] = ofxAccounts(bankSgml([['20260915', '-100.00'], ['20260925', '50.00']], '-300.00', { card: true, start: '20260915' }));
+    expect(account).toMatchObject({ type: 'credit' });
+    expect(account.file).toEqual({
+      kind: 'balances',
+      currency: 'USD',
+      rows: [
+        { date: '2026-09-15', balance: 350 },
+        { date: '2026-09-25', balance: 300 },
+        { date: '2026-10-08', balance: 300 },
+      ],
+    });
   });
 });

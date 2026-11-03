@@ -243,10 +243,8 @@ export async function importAccounts(deps: Deps, tenant: Tenant, request: Import
         createdAt: now,
       };
     }
-    if (entry.file.kind === 'holdings') {
-      if (account.type !== 'investment') problem(entry.label, `holdings go in an investment account, and ${account.name} isn't one`);
-      if (entry.file.currency && entry.file.currency !== account.currency) problem(entry.label, `the file is in ${entry.file.currency} but ${account.name} is in ${account.currency}`);
-    }
+    if (entry.file.kind === 'holdings' && account.type !== 'investment') problem(entry.label, `holdings go in an investment account, and ${account.name} isn't one`);
+    if (entry.file.currency && entry.file.currency !== account.currency) problem(entry.label, `the file is in ${entry.file.currency} but ${account.name} is in ${account.currency}`);
     targets.push({ entry, account, created });
   }
   stop(problems);

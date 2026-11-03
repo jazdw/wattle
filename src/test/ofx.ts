@@ -46,3 +46,29 @@ export function sgmlAccounts(numbers: string[], extra: Record<string, string> = 
   const statements = numbers.map((number) => statement.replace('<ACCTID>12345678', `<ACCTID>${number}`).replace('</INVTRANLIST>', `${extra[number] ?? ''}</INVTRANLIST>`));
   return one.slice(0, one.indexOf('<INVSTMTTRNRS>')) + statements.join('') + one.slice(one.indexOf('</INVSTMTMSGSRSV1>'));
 }
+
+/** A made-up bank (or card) download: a closing balance on `asOf` and transactions as [date, amount]. */
+export function bankSgml(transactions: [string, string][], closing: string, { card = false, asOf = '20261008', start = '20260901', number = '99990001' } = {}) {
+  const rows = transactions.map(([date, amount], index) => `<STMTTRN><TRNTYPE>${amount.startsWith('-') ? 'DEBIT' : 'CREDIT'}</TRNTYPE><DTPOSTED>${date}</DTPOSTED><TRNAMT>${amount}</TRNAMT><FITID>T${index}</FITID><NAME>Example</NAME></STMTTRN>`).join('\n');
+  const [messages, wrapper, statement, from] = card ? ['CREDITCARDMSGSRSV1', 'CCSTMTTRNRS', 'CCSTMTRS', `<CCACCTFROM><ACCTID>${number}</ACCTID></CCACCTFROM>`] : ['BANKMSGSRSV1', 'STMTTRNRS', 'STMTRS', `<BANKACCTFROM><BANKID>000000000</BANKID><ACCTID>${number}</ACCTID><ACCTTYPE>CHECKING</ACCTTYPE></BANKACCTFROM>`];
+  return `OFXHEADER:100
+DATA:OFXSGML
+VERSION:102
+SECURITY:NONE
+ENCODING:USASCII
+CHARSET:1252
+COMPRESSION:NONE
+OLDFILEUID:NONE
+NEWFILEUID:NONE
+
+<OFX>
+<SIGNONMSGSRSV1><SONRS><STATUS><CODE>0</CODE><SEVERITY>INFO</SEVERITY></STATUS><DTSERVER>${asOf}190000</DTSERVER><LANGUAGE>ENG</LANGUAGE><FI><ORG>Example Bank</ORG><FID>1</FID></FI></SONRS></SIGNONMSGSRSV1>
+<${messages}><${wrapper}><TRNUID>0</TRNUID><STATUS><CODE>0</CODE><SEVERITY>INFO</SEVERITY></STATUS>
+<${statement}><CURDEF>USD</CURDEF>${from}
+<BANKTRANLIST><DTSTART>${start}</DTSTART><DTEND>${asOf}</DTEND>
+${rows}
+</BANKTRANLIST>
+<LEDGERBAL><BALAMT>${closing}</BALAMT><DTASOF>${asOf}120000</DTASOF></LEDGERBAL>
+</${statement}></${wrapper}></${messages}>
+</OFX>`;
+}

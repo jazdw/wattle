@@ -3,7 +3,7 @@ import { http, HttpResponse } from 'msw';
 import { describe, expect, it } from 'vitest';
 import { Accounts } from '../pages/Accounts';
 import { ACCOUNTS } from '../test/fixtures';
-import { buy, sgml, sgmlAccounts } from '../test/ofx';
+import { bankSgml, buy, sgml, sgmlAccounts } from '../test/ofx';
 import { renderPage } from '../test/render';
 import { sent, server } from '../test/server';
 
@@ -218,6 +218,18 @@ describe('Import', () => {
       ],
     });
     await waitFor(() => expect(screen.queryByRole('dialog', { name: 'Import history' })).not.toBeInTheDocument());
+  });
+
+  it('imports a card download into a new credit card account', async () => {
+    server.use(http.post('*/api/imports', () => HttpResponse.json(accepted)));
+    const { user, dialog } = await openImport();
+    upload(dialog, bankSgml([['20260915', '-100.00']], '-300.00', { card: true, number: '99995555' }));
+    await user.selectOptions(await within(dialog).findByLabelText('Import ··5555 into'), 'new');
+    expect(within(dialog).getByLabelText('Type')).toHaveValue('credit');
+    await user.click(within(dialog).getByRole('button', { name: 'Import' }));
+    await expect.poll(() => sent('POST /api/imports')[0]?.body).toMatchObject({
+      accounts: [{ label: '··5555', target: { new: { name: 'Example Bank ··5555', type: 'credit', currency: 'USD' } }, file: { kind: 'balances', currency: 'USD', rows: [{ date: '2026-09-01', balance: 200 }, { date: '2026-09-15', balance: 300 }, { date: '2026-10-08', balance: 300 }] } }],
+    });
   });
 
   it("won't import an account with transaction types it doesn't understand, until it's skipped", async () => {
