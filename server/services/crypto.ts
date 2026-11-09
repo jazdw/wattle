@@ -3,7 +3,15 @@
  *
  * TOKEN_ENC_KEY holds one or more base64 32-byte keys: either a bare key
  * (version "v1") or "v2:<key>,v1:<key>". The first key encrypts; any listed
- * key decrypts, so keys can be rotated by prepending a new version.
+ * key decrypts.
+ *
+ * Rotating to a key you hold (the current one can't be read back from the
+ * Worker): set it as TOKEN_ENC_KEY_NEXT. It then encrypts, the current key
+ * still decrypts, and the nightly job re-encrypts every stored token with it
+ * (./tokenRotation). Once none are left on the old key, set TOKEN_ENC_KEY to
+ * the new key and delete TOKEN_ENC_KEY_NEXT. A token whose version isn't
+ * listed is tried with every key (the wrong one fails GCM's check), so the
+ * new key works there with its version prefix or without.
  *
  * Ciphertext format: `<version>.<iv>.<ciphertext>` (base64url). The additional
  * authenticated data binds a token to its household and connection, so a
@@ -17,6 +25,29 @@ export interface TokenKeys {
 }
 
 const keyCache = new Map<string, Promise<TokenKeys>>();
+
+/** TOKEN_ENC_KEY with TOKEN_ENC_KEY_NEXT, when set, first: the next version after the highest listed (or its own). */
+export function withNextKey(current: string | undefined, next: string | undefined): string | undefined {
+  const upcoming = next?.trim();
+  if (!upcoming) return current;
+  const parts = (current ?? '')
+    .split(',')
+    .map((part) => part.trim())
+    .filter(Boolean)
+    .map((part) => (part.indexOf(':') > 0 ? part : `v1:${part}`));
+  const keyOf = (part: string) => part.slice(part.indexOf(':') + 1);
+  const nextKey = upcoming.indexOf(':') > 0 ? keyOf(upcoming) : upcoming;
+  // Already the key that encrypts (the swap done, the extra secret left set): nothing to add.
+  if (parts.length > 0 && keyOf(parts[0]) === nextKey) return parts.join(',');
+  const highest = Math.max(0, ...parts.map((part) => Number(part.slice(1, part.indexOf(':'))) || 0));
+  const labelled = upcoming.indexOf(':') > 0 ? upcoming : `v${highest + 1}:${upcoming}`;
+  return [labelled, ...parts.filter((part) => keyOf(part) !== nextKey)].join(',');
+}
+
+/** Whether a stored token is under a key other than the one that encrypts (so the nightly job re-encrypts it). */
+export function needsRotation(keys: TokenKeys, value: string): boolean {
+  return value.split('.')[0] !== keys.current;
+}
 
 export function loadTokenKeys(config: string | undefined): Promise<TokenKeys> {
   if (!config) throw new Error('TOKEN_ENC_KEY is not configured.');
@@ -60,14 +91,19 @@ export async function encryptToken(keys: TokenKeys, plaintext: string, aad: stri
 
 export async function decryptToken(keys: TokenKeys, value: string, aad: string): Promise<string> {
   const [version, iv, ciphertext] = value.split('.');
+  if (!iv || !ciphertext) throw new Error('Not an encrypted token.');
+  const open = (key: CryptoKey) => crypto.subtle.decrypt({ name: 'AES-GCM', iv: base64ToBytes(iv), additionalData: new TextEncoder().encode(aad) }, key, base64ToBytes(ciphertext));
   const key = keys.keys.get(version);
-  if (!key || !iv || !ciphertext) throw new Error('Unknown token key version.');
-  const plaintext = await crypto.subtle.decrypt(
-    { name: 'AES-GCM', iv: base64ToBytes(iv), additionalData: new TextEncoder().encode(aad) },
-    key,
-    base64ToBytes(ciphertext),
-  );
-  return new TextDecoder().decode(plaintext);
+  if (key) return new TextDecoder().decode(await open(key));
+  // A version not listed (the new key set without its prefix): each key in turn, the wrong ones failing GCM's check.
+  for (const candidate of keys.keys.values()) {
+    try {
+      return new TextDecoder().decode(await open(candidate));
+    } catch {
+      // Not this key.
+    }
+  }
+  throw new Error('Unknown token key version.');
 }
 
 export function tokenAad(householdId: string, connectionId: string): string {

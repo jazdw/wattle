@@ -1,3 +1,4 @@
+import { withNextKey } from './services/crypto';
 import { createFinnhub, createFrankfurter, createTiingo, createTiingoQuotes } from './adapters/marketData';
 import { createPlaidClient } from './adapters/plaid';
 import type { Config, Db, Deps } from './ports';
@@ -9,6 +10,8 @@ export interface RawEnv {
   GOOGLE_CLIENT_ID?: string;
   GOOGLE_CLIENT_SECRET?: string;
   TOKEN_ENC_KEY?: string;
+  /** A new key to rotate to (services/crypto.ts). */
+  TOKEN_ENC_KEY_NEXT?: string;
   PLAID_CLIENT_ID?: string;
   PLAID_SECRET?: string;
   PLAID_ENV?: string;
@@ -63,7 +66,8 @@ export function configFromEnv(env: RawEnv): Config {
     quoteCacheSeconds: positiveInteger(env.QUOTE_CACHE_SECONDS) ?? DEFAULT_QUOTE_CACHE_SECONDS,
     googleClientId: env.GOOGLE_CLIENT_ID || undefined,
     googleClientSecret: env.GOOGLE_CLIENT_SECRET || undefined,
-    tokenEncKey: env.TOKEN_ENC_KEY || undefined,
+    tokenEncKey: withNextKey(env.TOKEN_ENC_KEY || undefined, env.TOKEN_ENC_KEY_NEXT) || undefined,
+    tokenRotating: Boolean(env.TOKEN_ENC_KEY_NEXT?.trim()),
     plaidAllowRemove: env.PLAID_ALLOW_REMOVE === 'true',
     jobChunkRows: positiveInteger(env.JOB_CHUNK_ROWS) ?? DEFAULT_JOB_CHUNK_ROWS,
     dailyWriteBudget: env.D1_DAILY_WRITE_BUDGET === '0' ? 0 : (positiveInteger(env.D1_DAILY_WRITE_BUDGET) ?? DEFAULT_DAILY_WRITE_BUDGET),

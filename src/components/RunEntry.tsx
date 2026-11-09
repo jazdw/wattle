@@ -10,6 +10,7 @@ const ACTION_TEXT: Record<SyncRunSummary['action'], string> = {
   relink: 'Signed in again',
   disconnect: 'Disconnected',
   account: 'Account changed',
+  tokens: 'Encryption key',
 };
 
 const TRIGGER_TEXT: Record<SyncRunSummary['trigger'], string> = {
@@ -18,6 +19,7 @@ const TRIGGER_TEXT: Record<SyncRunSummary['trigger'], string> = {
   nightly: 'nightly',
   manual: 'Sync button',
   refresh: 'Refresh all',
+  key: 'new key set',
 };
 
 const COUNT_TEXT: Record<string, string> = {

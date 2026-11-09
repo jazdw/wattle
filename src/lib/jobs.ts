@@ -15,4 +15,5 @@ export const JOB_TEXT: Record<JobType, string> = {
   import_block: 'importing holdings history',
   import_reprice: 'pricing imported holdings at market closes',
   match_transfers: 'matching transfers between your accounts',
+  rotate_tokens: 'moving Plaid tokens to the new encryption key',
 };

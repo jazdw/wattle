@@ -22,6 +22,8 @@ export interface Config {
   googleClientSecret?: string;
   /** base64-encoded 32-byte key(s) for encrypting aggregator tokens: "v1:<key>[,v0:<key>]" or just "<key>". */
   tokenEncKey?: string;
+  /** TOKEN_ENC_KEY_NEXT is set: tokens are being moved to a new key (services/crypto.ts). */
+  tokenRotating?: boolean;
   /**
    * PLAID_ALLOW_REMOVE: Disconnect also removes the login at Plaid (/item/remove),
    * which can't be undone. Off by default: a disconnected login is kept so it

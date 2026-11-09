@@ -49,6 +49,13 @@ migrations/  drizzle-kit SQL, applied by Wrangler (D1) or Drizzle's migrator (li
 - **No full account numbers.** Wattle never asks for Auth (account and routing numbers), Liabilities or Identity, its Plaid client only calls a fixed list of endpoints, and every Plaid response has account and routing numbers (and asset reports' account owners) removed before anything else sees it. Only masks (the last few digits) are kept.
 - **No account numbers.** Only Plaid's `mask` (last ≤4 characters) is stored. The `auth` product is never requested. `test/schema.test.ts` fails if a column for account or routing numbers appears.
 - **Secrets at rest.** Plaid access tokens and asset-report tokens are AES-256-GCM encrypted with `TOKEN_ENC_KEY`. The ciphertext is bound to its household and connection, and keys can be rotated (`v2:<new>,v1:<old>`).
+- **Rotating the token key** (`services/crypto.ts`, `services/tokenRotation.ts`). The key that encrypts can't be read back from the Worker, so moving to one you hold goes through the Worker, which can still decrypt:
+  1. Generate a key (`openssl rand -base64 32`) and save it in your password manager.
+  2. `npx wrangler secret put TOKEN_ENC_KEY_NEXT` with it. It encrypts from then on; the current key still decrypts.
+  3. Open Wattle Wealth: the first request queues a `rotate_tokens` job per household, which re-encrypts every stored token with the new key (each only if it hasn't changed since it was read) and notes "Moved its tokens to the new encryption key" on each login's Activity. The nightly job does the same pass as a safety net.
+  4. Check none are left on the old key (each token starts with its key's version, `v2.` for the new one):
+     `npx wrangler d1 execute wattle --remote --config .wrangler/remote-d1.json --command "select count(*) as old_key from connections where access_token_enc not like 'v2.%' or (asset_report_token_enc is not null and asset_report_token_enc not like 'v2.%')"`
+  5. `npx wrangler secret put TOKEN_ENC_KEY` with the new key (with or without its `v2:` prefix: a token whose version isn't listed is tried with each key), then `npx wrangler secret delete TOKEN_ENC_KEY_NEXT`.
 - **Nothing personal in logs.** Errors are logged through `describeError` (`server/lib/errors.ts`), which keeps a failed query's SQL but drops its values (Drizzle puts them in the message).
 - **Sessions** last 30 days and end as soon as the email leaves the allow-list. Signing out also tells the browser to drop cached pages, and a page restored by the back button reloads.
 - **App shell.** The app installs as a web app. Its service worker (Workbox, through `vite-plugin-pwa`) caches only the app's own files, never financial data: API calls always reach the Worker. The app is one bundle rather than a file per page, so a tab left open across a deploy never asks for a file the deploy removed. A deploy's new version installs in the background and waits: open tabs keep the version they loaded until the banner's **Reload** switches them all to it. Tabs check for a new version when they come back into view and hourly. Reopening the app's last tab can still get an old page whose bundle is gone (the new version takes over just after the old one served the page), so a bundle that fails to load reloads the page once (`public/boot.js`). Anything that would crash the app shows an error screen with Reload instead of a blank page, and `?reset=1` on any page drops the service worker and its caches.
@@ -185,7 +192,7 @@ Configuration comes in two kinds:
 2. **Deploy:** `CUSTOM_DOMAIN=wattle.example.com PLAID_ENV=sandbox npm run deploy`. It creates the `wattle-jobs` queue if it doesn't exist, finds the D1 database named `wattle` (creating it the first time), builds with its id, applies migrations and deploys to the domain with the plain settings in the environment. The id is never written to the repo: `wrangler.jsonc` keeps a placeholder.
 3. **Worker secrets:** these persist across deploys. For each `<NAME>`, run `npx wrangler secret put <NAME>`:
    - `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`
-   - `TOKEN_ENC_KEY` (generate with `openssl rand -base64 32`)
+   - `TOKEN_ENC_KEY` (generate with `openssl rand -base64 32`, and **keep a copy in your password manager**: the Worker's secret can't be read back, and a database backup restored anywhere else needs it to use its Plaid logins)
    - `PLAID_CLIENT_ID`, `PLAID_SECRET`
    - `TIINGO_API_KEY`, `FINNHUB_API_KEY`
 4. **Who can sign in:** `npm run allow -- add you@gmail.com partner@gmail.com`.
@@ -233,6 +240,7 @@ A second lock in front of the app. Cloudflare's edge only lets your Google accou
 | `CUSTOM_DOMAIN` | GitHub variable | Domain to deploy to (`wrangler deploy --domain`) |
 | `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET` | Worker secrets | Google sign-in |
 | `TOKEN_ENC_KEY` | Worker secret | Encrypts Plaid tokens at rest |
+| `TOKEN_ENC_KEY_NEXT` | Worker secret, only while rotating | A new key to move the tokens to (see Secrets at rest) |
 | `PLAID_CLIENT_ID`, `PLAID_SECRET` | Worker secrets | Plaid |
 | `PLAID_ENV` | GitHub variable | `sandbox` (default) or `production` |
 | `JOB_CHUNK_ROWS` | GitHub variable (optional) | About how many rows one background job builds (default `1000`, sized for Workers Free's 10 ms of CPU). `5000` on Workers Paid for fewer, larger jobs; keep it under about 8,000 (D1 allows 1,000 queries per invocation) |

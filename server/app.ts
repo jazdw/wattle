@@ -15,6 +15,7 @@ import { plaidRoutes } from './routes/plaid';
 import { verifyAccessToken } from './services/accessJwt';
 import { portfolioRoutes } from './routes/portfolio';
 import { transactionRoutes, transferRoutes } from './routes/transactions';
+import { queueRotation } from './services/tokenRotation';
 
 /**
  * Paths that skip the Cloudflare Access check: Plaid's servers call the
@@ -48,6 +49,12 @@ export function createApp(options: { assets?: (request: Request) => Promise<Resp
   // this origin. JSON writes need a CORS preflight, which is never granted.
   const csrfCheck = csrf();
   app.use('*', (c, next) => (CSRF_EXEMPT.has(c.req.path) ? next() : csrfCheck(c, next)));
+
+  // A new encryption key set: the first request this instance serves queues moving the tokens to it (services/tokenRotation.ts).
+  app.use('/api/*', async (c, next) => {
+    await queueRotation(c.env.deps);
+    await next();
+  });
 
   // Optional second lock behind Cloudflare Access: every API request must
   // carry a valid Access token (see services/accessJwt.ts).

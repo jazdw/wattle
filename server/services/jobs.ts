@@ -26,6 +26,7 @@ import { enqueueForHouseholds, pruneJobsStatement, sweep, type JobSpec } from '.
 import { ensureFx } from './pricing';
 import { activeConnections } from './sync';
 import { describeError } from '../lib/errors';
+import { rotateAllTokens } from './tokenRotation';
 
 export interface DailyReport {
   /** The job_runs row; its status and errors are final once its jobs have run. */
@@ -104,6 +105,15 @@ export async function runDaily(deps: Deps): Promise<DailyReport> {
     ['logs', () => pruneLogs(deps)],
     ['jobs', () => pruneJobsStatement(deps)],
     ['sessions', () => deps.db.delete(sessions).where(lt(sessions.expiresAt, startedAt))],
+    // Tokens still under an older key, while one is being rotated to (services/crypto.ts).
+    [
+      'tokens',
+      async () => {
+        if (!deps.config.tokenRotating) return;
+        const { remaining } = await rotateAllTokens(deps);
+        if (remaining > 0) throw new Error(`${remaining} token(s) couldn't be moved to the new key yet.`);
+      },
+    ],
     // Jobs whose wake-up was lost since yesterday.
     ['sweep', () => sweep(deps)],
   ];

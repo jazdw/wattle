@@ -51,6 +51,10 @@ const REVIEWED: Record<string, Record<string, string>> = {
     transactions: "the kind you set: a single update of that one column (syncs and imports never write it)",
     transfers: "yours: confirming, rejecting or linking a pair, atomic with removing other suggestions for its two sides; partial unique indexes keep each transaction in one link at most, so two at once can't both link it",
   },
+  'server/services/tokenRotation.ts': {
+    connections: "re-encrypting a token: a single update, only if the token is unchanged since it was read (a sync's own write wins, and was under the new key anyway)",
+    syncRuns: 'one log row per login whose tokens moved, written after its tokens',
+  },
   'server/services/transfers.ts': {
     transfers: "matching: one atomic batch; automatic links and suggestions insert-or-ignore by the pair (a suggestion becomes automatic only while still a suggestion), so yours are never changed, and the partial unique indexes refuse a second link for a transaction",
   },

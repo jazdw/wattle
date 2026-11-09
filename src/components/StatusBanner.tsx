@@ -11,6 +11,7 @@ const ACTION_TEXT: Record<StatusResponse['interrupted'][number]['action'], strin
   relink: 're-linking',
   disconnect: 'disconnecting',
   account: 'an account change',
+  tokens: 'moving its tokens to the new encryption key',
 };
 
 const day = (time: number) => new Date(time).toLocaleDateString(undefined, { month: 'short', day: 'numeric' });

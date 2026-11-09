@@ -13,6 +13,7 @@ import { runJobWith, runNextWith, type FailureHandlers, type JobHandler, type Jo
 import { typeHandEnteredSecurities } from './securityTypes';
 import { snapshotHousehold } from './snapshots';
 import { syncConnection, type InvestmentFetch } from './sync';
+import { rotateTokensJob } from './tokenRotation';
 import { matchTransfersJob } from './transfers';
 
 /**
@@ -56,6 +57,7 @@ export const HANDLERS: JobHandlers = {
   import_block: importBlock,
   import_reprice: importReprice,
   match_transfers: matchTransfersJob,
+  rotate_tokens: rotateTokensJob,
 };
 
 /**

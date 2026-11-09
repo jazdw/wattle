@@ -69,8 +69,9 @@ export type SyncChange =
 /** A logged sync, history load or balance-history collection (GET /api/connections/:id/activity). */
 export interface SyncRunSummary {
   id: string;
-  action: 'sync' | 'history' | 'balance_history' | 'relink' | 'disconnect' | 'account';
-  trigger: 'link' | 'webhook' | 'nightly' | 'manual' | 'refresh';
+  action: 'sync' | 'history' | 'balance_history' | 'relink' | 'disconnect' | 'account' | 'tokens';
+  /** `key`: a new encryption key was set (services/crypto.ts). */
+  trigger: 'link' | 'webhook' | 'nightly' | 'manual' | 'refresh' | 'key';
   startedAt: number;
   finishedAt: number;
   /** 'skipped': looked, but had nothing to do (`note` says why). */
@@ -206,7 +207,8 @@ export type JobType =
   | 'report_finish'
   | 'import_block'
   | 'import_reprice'
-  | 'match_transfers';
+  | 'match_transfers'
+  | 'rotate_tokens';
 
 /** One entry in the household's activity: a login's run, a snapshot, or the nightly job. */
 export type ActivityEntry =

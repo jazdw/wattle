@@ -543,8 +543,8 @@ export const plaidWebhooks = sqliteTable(
   (table) => [index('plaid_webhooks_connection').on(table.householdId, table.connectionId, table.receivedAt), index('plaid_webhooks_received').on(table.receivedAt)],
 );
 
-export const SYNC_ACTIONS = ['sync', 'history', 'balance_history', 'relink', 'disconnect', 'account'] as const;
-export const SYNC_TRIGGERS = ['link', 'webhook', 'nightly', 'manual', 'refresh'] as const;
+export const SYNC_ACTIONS = ['sync', 'history', 'balance_history', 'relink', 'disconnect', 'account', 'tokens'] as const;
+export const SYNC_TRIGGERS = ['link', 'webhook', 'nightly', 'manual', 'refresh', 'key'] as const;
 export const JOB_STATUSES = ['running', 'ok', 'errors', 'interrupted'] as const;
 
 /**
@@ -718,6 +718,7 @@ export const JOB_TYPES = [
   'import_block',
   'import_reprice',
   'match_transfers',
+  'rotate_tokens',
 ] as const;
 export const JOB_STATES = ['waiting', 'queued', 'running', 'done', 'failed'] as const;
 
