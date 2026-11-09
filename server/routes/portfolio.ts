@@ -48,7 +48,7 @@ portfolioRoutes.get('/portfolio', async (c) => {
   return c.json(await loadPortfolio(c.env.deps, tenant, currency));
 });
 
-const GROUPS: HistoryGroup[] = ['total', 'account', 'category', 'holding'];
+const GROUPS: HistoryGroup[] = ['total', 'account', 'category', 'holding', 'source'];
 
 portfolioRoutes.get('/history', async (c) => {
   const tenant = c.get('tenant');

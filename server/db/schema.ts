@@ -22,6 +22,7 @@ import {
   uniqueIndex,
 } from 'drizzle-orm/sqlite-core';
 import { DAILY_SOURCES, PRICE_SOURCES } from '../../shared/quality';
+import { TRANSACTION_KINDS } from '../../shared/transactionKinds';
 import type { Classification } from '../../shared/taxonomy';
 import type { SyncChange } from '../../shared/types';
 
@@ -287,8 +288,17 @@ export const holdings = sqliteTable(
   ],
 );
 
-export const investmentTransactions = sqliteTable(
-  'investment_transactions',
+/** Where a transaction came from: Plaid's investment transactions, a bank history report, or an imported file. */
+export const TRANSACTION_SOURCES = ['plaid', 'report', 'import'] as const;
+
+/**
+ * Every account's transactions, from wherever they came. Each has a kind
+ * (shared/transactionKinds.ts): set by you, else worked out when it's read
+ * from the institution's type (an imported file's own mapping is kept in
+ * `subtype`), so a better mapping applies to everything already stored.
+ */
+export const transactions = sqliteTable(
+  'transactions',
   {
     id: text('id').primaryKey(),
     householdId: text('household_id')
@@ -297,25 +307,70 @@ export const investmentTransactions = sqliteTable(
     accountId: text('account_id')
       .notNull()
       .references(() => accounts.id, { onDelete: 'cascade' }),
-    externalId: text('external_id'),
-    securityId: text('security_id').references(() => securities.id, { onDelete: 'set null' }),
+    source: text('source', { enum: TRANSACTION_SOURCES }).notNull(),
+    /** Plaid's transaction id, or the file's own (or one derived from the row: holdingsImport). */
+    externalId: text('external_id').notNull(),
     date: text('date').notNull(),
-    name: text('name'),
-    /** buy | sell | cash | fee | transfer | cancel */
-    type: text('type').notNull(),
+    /** Minor units; positive when money leaves the account (Plaid's convention). */
+    amount: integer('amount').notNull().default(0),
+    currency: text('currency').notNull(),
+    /** The institution's own type and subtype: Plaid's (buy/cash/fee…, dividend/contribution…), or a file's type name and the kind it was read as. */
+    type: text('type'),
     subtype: text('subtype'),
+    description: text('description'),
+    securityId: text('security_id').references(() => securities.id, { onDelete: 'set null' }),
     /** Units; positive for buys, negative for sells. */
     quantity: real('quantity').notNull().default(0),
-    /** Minor units; positive when cash leaves the account (Plaid convention). */
-    amount: integer('amount').notNull().default(0),
     price: real('price'),
     fees: integer('fees'),
-    currency: text('currency').notNull().default('USD'),
+    /** Set by you; null: worked out from the type when read. */
+    kind: text('kind', { enum: TRANSACTION_KINDS }),
+    createdAt: integer('created_at').notNull(),
   },
   (table) => [
-    index('inv_txn_account_date').on(table.accountId, table.date),
-    index('inv_txn_household').on(table.householdId),
-    uniqueIndex('inv_txn_external').on(table.accountId, table.externalId),
+    uniqueIndex('transactions_external').on(table.accountId, table.source, table.externalId),
+    // An account's newest first, and every account's (the id breaks a day's ties, as the list sorts them).
+    index('transactions_account_date').on(table.householdId, table.accountId, table.date, table.id),
+    index('transactions_household_date').on(table.householdId, table.date, table.id),
+    // A sync's "already stored?" by Plaid's ids, which don't name the account.
+    index('transactions_household_external').on(table.householdId, table.source, table.externalId),
+  ],
+);
+
+/** A transfer between two of the household's accounts: matched automatically, suggested for you to check, or decided by you. */
+export const TRANSFER_STATUSES = ['auto', 'suggested', 'confirmed', 'rejected'] as const;
+
+/**
+ * Transfers between the household's own accounts: the money out of one
+ * account and the same money into another. Linked ones (auto or confirmed)
+ * are neither new money nor spending for the household, and are counted on
+ * one date in its totals (services/transfers.ts). A rejected pair is kept so
+ * it isn't suggested again.
+ */
+export const transfers = sqliteTable(
+  'transfers',
+  {
+    id: text('id').primaryKey(),
+    householdId: text('household_id')
+      .notNull()
+      .references(() => households.id, { onDelete: 'cascade' }),
+    outId: text('out_id')
+      .notNull()
+      .references(() => transactions.id, { onDelete: 'cascade' }),
+    inId: text('in_id')
+      .notNull()
+      .references(() => transactions.id, { onDelete: 'cascade' }),
+    status: text('status', { enum: TRANSFER_STATUSES }).notNull(),
+    createdAt: integer('created_at').notNull(),
+    /** When you confirmed or rejected it. */
+    decidedAt: integer('decided_at'),
+  },
+  (table) => [
+    uniqueIndex('transfers_pair').on(table.outId, table.inId),
+    // Each transaction is in one real transfer at most.
+    uniqueIndex('transfers_out_linked').on(table.outId).where(sql`status in ('auto', 'confirmed')`),
+    uniqueIndex('transfers_in_linked').on(table.inId).where(sql`status in ('auto', 'confirmed')`),
+    index('transfers_household').on(table.householdId, table.status),
   ],
 );
 
@@ -486,33 +541,6 @@ export const plaidWebhooks = sqliteTable(
     body: text('body').notNull(),
   },
   (table) => [index('plaid_webhooks_connection').on(table.householdId, table.connectionId, table.receivedAt), index('plaid_webhooks_received').on(table.receivedAt)],
-);
-
-/**
- * A bank (non-investment) account's posted transactions, from Plaid's bank
- * history reports (pending ones are left out: their ids change when they
- * post). Only as current as the last report.
- */
-export const bankTransactions = sqliteTable(
-  'bank_transactions',
-  {
-    id: text('id').primaryKey(),
-    householdId: text('household_id')
-      .notNull()
-      .references(() => households.id, { onDelete: 'cascade' }),
-    accountId: text('account_id')
-      .notNull()
-      .references(() => accounts.id, { onDelete: 'cascade' }),
-    /** Plaid transaction_id. */
-    externalId: text('external_id').notNull(),
-    date: text('date').notNull(),
-    /** Minor units; positive when money leaves the account (Plaid convention). */
-    amount: integer('amount').notNull(),
-    currency: text('currency').notNull(),
-    description: text('description'),
-    createdAt: integer('created_at').notNull(),
-  },
-  (table) => [uniqueIndex('bank_transactions_external').on(table.accountId, table.externalId), index('bank_transactions_account_date').on(table.householdId, table.accountId, table.date)],
 );
 
 export const SYNC_ACTIONS = ['sync', 'history', 'balance_history', 'relink', 'disconnect', 'account'] as const;
@@ -689,6 +717,7 @@ export const JOB_TYPES = [
   'report_finish',
   'import_block',
   'import_reprice',
+  'match_transfers',
 ] as const;
 export const JOB_STATES = ['waiting', 'queued', 'running', 'done', 'failed'] as const;
 

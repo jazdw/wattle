@@ -14,4 +14,5 @@ export const JOB_TEXT: Record<JobType, string> = {
   report_finish: 'collecting balance history',
   import_block: 'importing holdings history',
   import_reprice: 'pricing imported holdings at market closes',
+  match_transfers: 'matching transfers between your accounts',
 };

@@ -27,32 +27,56 @@ interface TooltipPayload {
   name: string;
 }
 
+/** The space between two of a chart's lines, shaded and named (Overview: what's between the balance and the money put in). */
+export interface ChartBand {
+  label: string;
+  color: string;
+  /** Where the upper series falls below the lower one (a loss): shaded this instead. */
+  negativeColor?: string;
+  /** The keys of the lower and upper series: the band's value is upper less lower. */
+  from: string;
+  to: string;
+}
+
+const BAND_KEY = '__band';
+const BAND_BELOW_KEY = '__band_below';
+
 function SeriesTooltip({
   active,
   payload,
   label,
   currency,
   showTotal,
+  band,
 }: {
   active?: boolean;
   payload?: TooltipPayload[];
   label?: string;
   currency: Currency;
   showTotal: boolean;
+  band?: ChartBand;
 }) {
   if (!active || !payload?.length || !label) return null;
   // A series stacked as its parts above and below zero (see TimeSeriesChart) is one row again.
   const byName = new Map<string, TooltipPayload>();
   for (const row of payload) {
-    if (row.value === null || row.value === undefined) continue;
+    if (row.value === null || row.value === undefined || row.dataKey === BAND_KEY || row.dataKey === BAND_BELOW_KEY) continue;
     const seen = byName.get(row.name);
     byName.set(row.name, seen ? { ...seen, value: seen.value + row.value } : row);
   }
   const rows = [...byName.values()];
   const total = rows.reduce((sum, row) => sum + row.value, 0);
+  const lower = band && rows.find((row) => row.dataKey === band.from);
+  const upper = band && rows.find((row) => row.dataKey === band.to);
   return (
     <div className="min-w-44 rounded-md border bg-card px-3 py-2 text-xs shadow-md">
       <p className="mb-1 font-medium">{longDate(label)}</p>
+      {band && lower && upper && (
+        <p className="mb-1 flex justify-between gap-4 font-semibold">
+          <span>{band.label}</span>
+          <span>{money(upper.value - lower.value, currency)}</span>
+        </p>
+      )}
       {showTotal && rows.length > 1 && (
         <p className="mb-1 flex justify-between gap-4 font-semibold">
           <span>Total</span>
@@ -81,25 +105,39 @@ export function TimeSeriesChart({
   series,
   currency,
   stacked,
+  lines = false,
+  band,
   height = 280,
 }: {
   history: HistoryResponse;
   series: ChartSeries[];
   currency: Currency;
   stacked: boolean;
+  /** Lines only, no fill (unstacked). */
+  lines?: boolean;
+  band?: ChartBand;
   height?: number;
 }) {
   const areas = useMemo(() => stackAreas(series, stacked), [series, stacked]);
   const data = useMemo(
     () =>
       history.dates.map((date, position) => {
-        const row: Record<string, string | number | null> = { date };
+        const row: Record<string, string | number | null | number[]> = { date };
         for (const item of areas) row[item.key] = item.values[position];
+        if (band) {
+          const from = series.find((item) => item.key === band.from)?.values[position];
+          const to = series.find((item) => item.key === band.to)?.values[position];
+          const known = from !== null && from !== undefined && to !== null && to !== undefined;
+          // Above its lower series it's the band's colour; below, its negative colour (when it has one).
+          const below = known && to < from && Boolean(band.negativeColor);
+          row[BAND_KEY] = known && !below ? [Math.min(from, to), Math.max(from, to)] : null;
+          row[BAND_BELOW_KEY] = known && below ? [to, from] : null;
+        }
         return row;
       }),
-    [history.dates, areas],
+    [history.dates, areas, band, series],
   );
-  const single = series.length === 1;
+  const single = series.length === 1 && !lines;
 
   return (
     <div style={{ height }} className="w-full">
@@ -123,9 +161,11 @@ export function TimeSeriesChart({
             domain={['auto', 'auto']}
           />
           <Tooltip
-            content={<SeriesTooltip currency={currency} showTotal={stacked} />}
+            content={<SeriesTooltip currency={currency} showTotal={stacked} band={band} />}
             cursor={{ stroke: 'var(--color-muted-foreground)', strokeWidth: 1 }}
           />
+          {band && <Area dataKey={BAND_KEY} name={band.label} type="monotone" stroke="none" fill={band.color} fillOpacity={0.18} isAnimationActive={false} activeDot={false} dot={false} />}
+          {band?.negativeColor && <Area dataKey={BAND_BELOW_KEY} name={band.label} type="monotone" stroke="none" fill={band.negativeColor} fillOpacity={0.18} isAnimationActive={false} activeDot={false} dot={false} />}
           {areas.map((item) => (
             <Area
               key={item.key}
@@ -135,8 +175,8 @@ export function TimeSeriesChart({
               stackId={stacked ? 'stack' : undefined}
               stroke={item.color}
               strokeWidth={2}
-              fill={single ? 'url(#fill-single)' : item.color}
-              fillOpacity={single ? 1 : 0.85}
+              fill={lines ? 'none' : single ? 'url(#fill-single)' : item.color}
+              fillOpacity={lines ? 0 : single ? 1 : 0.85}
               connectNulls={!item.gaps}
               isAnimationActive={false}
               activeDot={{ r: 4, strokeWidth: 2, stroke: 'var(--color-card)' }}

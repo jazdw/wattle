@@ -4,6 +4,7 @@ import type { Currency } from './money';
 import type { Quality } from './quality';
 import type { Category, Classification, ClassificationSource } from './taxonomy';
 import type { StyleBreakdown } from './allocation';
+import type { TransactionKind } from './transactionKinds';
 
 export interface AuthUser {
   id: string;
@@ -88,11 +89,24 @@ export type AccountType = 'depository' | 'credit' | 'loan' | 'investment' | 'pro
 /** One transaction of an account: an investment one from Plaid's Investments data, or a bank one from a bank history report. */
 export interface TransactionEntry {
   id: string;
+  /** Its account, and the currency its amount is in. */
+  accountId: string;
+  currency: Currency;
   date: string;
-  /** Investment: buy | sell | cash | fee | transfer | cancel; bank: null. */
+  /** Where it came from: Plaid's investment transactions, a bank history report, or a file you imported. */
+  source: 'plaid' | 'report' | 'import';
+  /** The institution's own type: Plaid's buy | sell | cash | fee | transfer | cancel, a file's type name; bank: null. */
   type: string | null;
   /** Plaid's subtype (dividend, reinvestment, split, …). */
   subtype: string | null;
+  /** What it does (shared/transactionKinds.ts); null when it can't be told and needs one set. */
+  kind: TransactionKind | null;
+  /** The kind was set by you. */
+  kindByYou: boolean;
+  /** The kind worked out from its type, without yours. */
+  automatic: TransactionKind | null;
+  /** The transfer between your accounts it's one side of (linked automatically or by you). */
+  transfer: { id: string; status: 'auto' | 'confirmed'; accountId: string; accountName: string; institutionName: string | null; mask: string | null; date: string } | null;
   description: string | null;
   ticker: string | null;
   security: string | null;
@@ -102,16 +116,48 @@ export interface TransactionEntry {
   amount: number;
 }
 
+/** One side of a transfer between your accounts. */
+export interface TransferSide {
+  transactionId: string;
+  accountId: string;
+  accountName: string;
+  institutionName: string | null;
+  mask: string | null;
+  date: string;
+  /** Cents, positive when money leaves the account (Plaid's convention). */
+  amount: number;
+  currency: Currency;
+  description: string | null;
+}
+
+export interface TransferEntry {
+  id: string;
+  status: 'auto' | 'suggested' | 'confirmed' | 'rejected';
+  out: TransferSide;
+  in: TransferSide;
+}
+
+export interface TransfersResponse {
+  transfers: TransferEntry[];
+}
+
+/** Transactions that could be a transaction's other side. */
+export interface TransferCandidatesResponse {
+  candidates: TransferSide[];
+}
+
 export interface TransactionsResponse {
-  /** Where they come from: investment transactions, or bank transactions from bank history reports. */
-  kind: 'investment' | 'bank';
+  /** An investment account's, a bank account's, or every account's. */
+  kind: 'investment' | 'bank' | 'all';
   currency: Currency;
   /** The earliest and latest transaction dates held. */
   from: string | null;
   to: string | null;
-  /** Newest first, at most TRANSACTIONS_LIMIT. */
+  /** Newest first, at most TRANSACTIONS_LIMIT, of those the filters (dates, search) match. */
   transactions: TransactionEntry[];
-  /** More than were returned. */
+  /** How many the filters match. */
+  matched: number;
+  /** More matched than were returned. */
   truncated: boolean;
 }
 
@@ -159,7 +205,8 @@ export type JobType =
   | 'report_account'
   | 'report_finish'
   | 'import_block'
-  | 'import_reprice';
+  | 'import_reprice'
+  | 'match_transfers';
 
 /** One entry in the household's activity: a login's run, a snapshot, or the nightly job. */
 export type ActivityEntry =
@@ -284,7 +331,7 @@ export interface PortfolioResponse {
   fxRate: number | null;
 }
 
-export type HistoryGroup = 'total' | 'account' | 'category' | 'holding';
+export type HistoryGroup = 'total' | 'account' | 'category' | 'holding' | 'source';
 
 export interface HistorySeries {
   key: string;
@@ -299,6 +346,32 @@ export interface HistoryResponse {
   group: HistoryGroup;
   dates: IsoDate[];
   series: HistorySeries[];
+  /** Grouped by source: where each account's value (and the household's) came from over the range. */
+  breakdown?: BreakdownRow[];
+}
+
+/**
+ * Where an account's value came from over a range, in the display
+ * currency's cents: start + moneyIn − moneyOut + income − fees + market +
+ * other = end.
+ */
+export interface BreakdownRow {
+  /** The account's id, or 'household'. */
+  key: string;
+  label: string;
+  start: number;
+  end: number;
+  moneyIn: number;
+  moneyOut: number;
+  /** Dividends and interest. */
+  income: number;
+  fees: number;
+  /** Market gain or loss (exchange-rate moves included). */
+  market: number;
+  /** Changes that can't be told apart: before its transactions are known, its first and last days, a bank's leftovers. */
+  other: number;
+  /** Transactions in the range whose kind isn't known. */
+  needsType: number;
 }
 
 export interface TargetResponse {
@@ -375,6 +448,8 @@ export interface TickerSuggestion {
   /** The file's id for the security. */
   id: string;
   ticker: string;
-  /** From a security you have with the same name, or the market data provider's search (to check). */
+  /** From a security you have with the same name, or the market data provider's search. */
   from: 'yours' | 'search';
+  /** The name is the file's exactly (letters and digits compared): used as it is; otherwise it only starts the same, to check. */
+  exact: boolean;
 }

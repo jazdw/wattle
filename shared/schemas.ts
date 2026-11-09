@@ -2,6 +2,7 @@
 import { z } from 'zod';
 import { CURRENCIES } from './money';
 import { CATEGORIES, SECURITY_TYPES, SIZES, STYLES } from './taxonomy';
+import { TRANSACTION_KINDS, type TransactionKind } from './transactionKinds';
 
 const isoDate = z.string().regex(/^\d{4}-\d{2}-\d{2}$/, 'Expected YYYY-MM-DD');
 const category = z.enum(CATEGORIES);
@@ -42,6 +43,8 @@ export const manualAccountSchema = z.object({
   currency: z.enum(CURRENCIES),
   category: category.nullable().optional(),
   institutionName: z.string().trim().max(100).nullable().optional(),
+  /** The kind of account within its type (shared/accounts.ts: checking, 401k, hsa…). */
+  subtype: z.string().trim().max(40).nullable().optional(),
   ownerUserId: z.string().nullable().optional(),
   /** Opening balance in major units (liabilities as positive amounts owed). */
   balance: z.number().finite().optional(),
@@ -56,6 +59,9 @@ export const accountPatchSchema = z.object({
   purge: z.boolean().optional(),
   category: category.nullable().optional(),
   currency: z.enum(CURRENCIES).optional(),
+  /** A manual account's institution and kind (a linked one's come from Plaid). */
+  institutionName: z.string().trim().max(100).nullable().optional(),
+  subtype: z.string().trim().max(40).nullable().optional(),
 });
 
 export const balanceEntrySchema = z.object({
@@ -102,10 +108,14 @@ export const householdPatchSchema = z.object({
 });
 
 /** What a transaction does, as every reader maps its file's own types (src/lib/imports.ts). */
-export const IMPORT_KINDS = ['buy', 'sell', 'reinvest', 'income', 'deposit', 'withdrawal', 'fee', 'transfer', 'sweep'] as const;
-export type ImportKind = (typeof IMPORT_KINDS)[number];
+export const IMPORT_KINDS = TRANSACTION_KINDS;
+export type ImportKind = TransactionKind;
 
 const securityRef = z.string().trim().min(1).max(40);
+/** The file's own id for a transaction (a Quicken FITID), kept so a re-import finds it again. */
+const fileTransactionId = z.string().trim().min(1).max(255).optional();
+/** How the file describes a transaction (its memo or payee). */
+const fileDescription = z.string().trim().max(500).optional();
 
 /** An investment account's download: its positions and cash now, and its transactions. */
 export const importedHoldingsSchema = z.object({
@@ -122,10 +132,12 @@ export const importedHoldingsSchema = z.object({
   transactions: z
     .array(
       z.object({
+        id: fileTransactionId,
         date: isoDate,
         kind: z.enum(IMPORT_KINDS),
         /** The file's own name for the type, for messages. */
         label: z.string().trim().min(1).max(60),
+        description: fileDescription,
         /** Null for cash. */
         security: securityRef.nullable(),
         /** Signed: shares in positive. */
@@ -143,11 +155,25 @@ export const importedHoldingsSchema = z.object({
     .max(20000),
 });
 
-/** Dated balances (major units; liabilities as positive amounts owed). */
+/** Dated balances (major units; liabilities as positive amounts owed), and the transactions they came from when the file has them. */
 export const importedBalancesSchema = z.object({
   kind: z.literal('balances'),
   currency: z.string().length(3).optional(),
   rows: z.array(z.object({ date: isoDate, balance: z.number().finite() })).min(1).max(5000),
+  transactions: z
+    .array(
+      z.object({
+        id: fileTransactionId,
+        date: isoDate,
+        kind: z.enum(IMPORT_KINDS),
+        label: z.string().trim().min(1).max(60),
+        description: fileDescription,
+        /** Cents in (+) or out (−) of the account; a card's purchases out, its payments in. */
+        amount: z.number().int(),
+      }),
+    )
+    .max(20000)
+    .optional(),
 });
 
 /** One import: each account in the files, into an account you have or a new one. */
@@ -159,7 +185,7 @@ export const importSchema = z.object({
         label: z.string().trim().min(1).max(100),
         target: z.union([
           z.object({ accountId: z.string() }),
-          z.object({ new: manualAccountSchema.pick({ name: true, type: true, currency: true, institutionName: true, ownerUserId: true }).extend({ mask: z.string().trim().max(4).nullable().optional() }) }),
+          z.object({ new: manualAccountSchema.pick({ name: true, type: true, subtype: true, currency: true, institutionName: true, ownerUserId: true }).extend({ mask: z.string().trim().max(4).nullable().optional() }) }),
         ]),
         file: z.discriminatedUnion('kind', [importedHoldingsSchema, importedBalancesSchema]),
       }),
@@ -168,6 +194,14 @@ export const importSchema = z.object({
     .max(20),
 });
 export type ImportRequest = z.infer<typeof importSchema>;
+
+/** A transaction's kind, set by you; null goes back to working it out from its type. */
+export const transactionPatchSchema = z.object({ kind: z.enum(TRANSACTION_KINDS).nullable() });
+
+/** Two transactions you say are one transfer between your accounts: the money out of one and into the other. */
+export const transferCreateSchema = z.object({ outId: z.string().min(1), inId: z.string().min(1) });
+/** A suggested or linked transfer: it is one (confirmed), or it isn't (rejected, which is also how a link is undone). */
+export const transferPatchSchema = z.object({ status: z.enum(['confirmed', 'rejected']) });
 
 /** Securities a file names without a ticker, to suggest one for. */
 export const tickerSuggestionsSchema = z.object({

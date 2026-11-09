@@ -216,7 +216,7 @@ describe('Plaid webhooks', () => {
     expect((await api(`/api/accounts/${ira.id}`, { method: 'DELETE' })).status).toBe(409);
     expect((await api(`/api/accounts/${brk.id}`, { method: 'DELETE' })).status).toBe(200);
     expect((await deps.db.select().from(schema.accounts)).map((row) => row.externalId)).toEqual(['ira']);
-    for (const table of [schema.accountDaily, schema.holdingDaily, schema.holdings, schema.investmentTransactions]) {
+    for (const table of [schema.accountDaily, schema.holdingDaily, schema.holdings, schema.transactions]) {
       expect((await deps.db.select().from(table)).filter((row) => row.accountId === brk.id)).toEqual([]);
     }
     expect((await deps.db.select().from(schema.syncRuns)).map((run) => run.note)).toContain('Deleted “brk” (no longer reported) and its stored history.');

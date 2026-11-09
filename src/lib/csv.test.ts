@@ -180,3 +180,12 @@ describe('CSV tables', () => {
   });
 });
 
+describe('holdings tables with values', () => {
+  it('works out shares from the value and price, without a share count or with a rounded one', () => {
+    // Made up: one fund given only its value and price, another its rounded shares too.
+    const [account] = csvAccounts('Symbol,Name,Price,Value\nVTI,Example Fund,250.00,2501.25\n\nDate,Type,Symbol,Shares,Price,Amount\n2026-06-01,Buy,VTI,10.005,250,2501.25')!;
+    expect(account.file.kind === 'holdings' && account.file.positions).toEqual([{ security: 'VTI', shares: 10.005, price: 250 }]);
+    const [rounded] = csvAccounts('Symbol,Name,Shares,Price,Value\nVTI,Example Fund,8.117,694.81,5639.63\n\nDate,Type,Symbol,Shares,Price,Amount\n2026-06-01,Buy,VTI,8.117,694.81,5639.63')!;
+    expect(rounded.file.kind === 'holdings' && rounded.file.positions).toEqual([{ security: 'VTI', shares: 8.116795, price: 694.81 }]);
+  });
+});

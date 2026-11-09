@@ -61,7 +61,8 @@ export function withKnown(account: FileAccount, known: Known | undefined): FileA
     const closing = toMinor(known.cash) + (known.at === 'start' ? total : 0);
     const posted = transactions.map((txn) => ({ date: txn.date, amount: cashEffect(txn) }));
     const rows = balanceRows(posted, closing, asOf, known.at === 'start' ? addDays(first, -1) : null);
-    return { ...account, file: { kind: 'balances', currency: account.file.currency, rows } };
+    const kept = transactions.map((txn) => ({ ...(txn.id ? { id: txn.id } : {}), date: txn.date, kind: txn.kind, label: txn.label, ...(txn.description ? { description: txn.description } : {}), amount: cashEffect(txn) }));
+    return { ...account, file: { kind: 'balances', currency: account.file.currency, rows, transactions: kept } };
   }
   if (pending.moneyMoves && known.cash === null) return null;
   if (pending.securities.some((security) => known.shares[security.id] == null)) return null;

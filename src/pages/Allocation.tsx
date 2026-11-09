@@ -1,3 +1,4 @@
+import { accountLabel } from '../../shared/accounts';
 import { useMutation, useQueryClient } from '@tanstack/react-query';
 import { Pencil } from 'lucide-react';
 import { useMemo, useState } from 'react';
@@ -298,7 +299,7 @@ function TargetDialog({
               .filter((account) => !account.isHidden && account.type !== 'credit' && account.type !== 'loan')
               .map((account) => (
                 <label key={account.id} className="flex items-center justify-between py-1 text-sm">
-                  <span className="truncate">{account.name}</span>
+                  <span className="truncate">{accountLabel(account)}</span>
                   <Switch
                     checked={excludedAccounts.includes(account.id)}
                     onCheckedChange={(checked) =>

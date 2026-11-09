@@ -14,6 +14,7 @@ import { HttpError } from './lib/http';
 import { plaidRoutes } from './routes/plaid';
 import { verifyAccessToken } from './services/accessJwt';
 import { portfolioRoutes } from './routes/portfolio';
+import { transactionRoutes, transferRoutes } from './routes/transactions';
 
 /**
  * Paths that skip the Cloudflare Access check: Plaid's servers call the
@@ -65,6 +66,8 @@ export function createApp(options: { assets?: (request: Request) => Promise<Resp
   app.route('/api/plaid', plaidRoutes);
   app.route('/api/connections', connectionRoutes);
   app.route('/api/accounts', accountRoutes);
+  app.route('/api/transactions', transactionRoutes);
+  app.route('/api/transfers', transferRoutes);
   // Mounted last: its auth middleware covers every remaining /api path.
   app.route('/api', portfolioRoutes);
 

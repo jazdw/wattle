@@ -18,7 +18,7 @@ import { marketDate } from '../../shared/dates';
 import { toMinor } from '../../shared/money';
 import { PlaidApiError } from '../adapters/plaid';
 import { chunkRows, runAtomic } from '../db/batch';
-import { accountDaily, accounts, bankTransactions, connections, jobs } from '../db/schema';
+import { accountDaily, accounts, connections, jobs, transactions } from '../db/schema';
 import type { Tenant } from '../db/tenant';
 import type { Deps } from '../ports';
 import { completeRunStatements, SyncRun, type SyncTrigger } from './activity';
@@ -27,7 +27,8 @@ import { enqueue, RetryLater, type JobContext } from './jobRunner';
 import { connectionLease, Lease } from './lease';
 import { missedRetryStatement } from './backfill';
 import { QUALITY_SET, replaceWhere } from './quality';
-import { getConnection, isActive, type ConnectionRow } from './sync';
+import { getConnection, importedFrom, isActive, type ConnectionRow } from './sync';
+import { queueMatching } from './transfers';
 
 /**
  * Days the bank was asked about but had no figure for keep their carried-forward
@@ -121,7 +122,7 @@ async function fetchReport(deps: Deps, tenant: Tenant, connection: ConnectionRow
 
 interface ReportRows {
   balances: (typeof accountDaily.$inferInsert)[];
-  transactions: (typeof bankTransactions.$inferInsert)[];
+  transactions: (typeof transactions.$inferInsert)[];
 }
 
 /** The report's daily balances and posted transactions for the connection's accounts, by account id. */
@@ -160,6 +161,7 @@ async function reportByAccount(deps: Deps, tenant: Tenant, connection: Connectio
           id: crypto.randomUUID(),
           householdId: tenant.householdId,
           accountId: account.id,
+          source: 'report',
           externalId: txn.transaction_id,
           date: txn.date,
           amount: toMinor(txn.amount),
@@ -178,8 +180,9 @@ async function reportByAccount(deps: Deps, tenant: Tenant, connection: Connectio
 function reportStatements(tenant: Tenant, rows: ReportRows): BatchItem<'sqlite'>[] {
   return [
     ...balanceStatements(tenant, rows.balances),
-    ...chunkRows(bankTransactions, rows.transactions).map((chunk) =>
-      tenant.db.insert(bankTransactions).values(chunk).onConflictDoNothing({ target: [bankTransactions.accountId, bankTransactions.externalId] }),
+    ...importedFrom(tenant, rows.transactions),
+    ...chunkRows(transactions, rows.transactions).map((chunk) =>
+      tenant.db.insert(transactions).values(chunk).onConflictDoNothing({ target: [transactions.accountId, transactions.source, transactions.externalId] }),
     ),
   ];
 }
@@ -388,6 +391,8 @@ export async function finishReport({ deps, tenant, job, renew }: JobContext): Pr
   const statements = [...collectedStatements(deps, tenant, connection), ...(await completeRunStatements(deps, tenant, finish.runId, { counts: { days } }))];
   await withLease(deps, tenant, connection.id, renew, () => runAtomic(tenant.db, statements));
   await removeReport(run, token);
+  // The report's transactions may be one side of a transfer between your accounts.
+  await queueMatching(deps, tenant, `report:${finish.runId}`);
   return { days };
 }
 

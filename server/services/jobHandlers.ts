@@ -13,6 +13,7 @@ import { runJobWith, runNextWith, type FailureHandlers, type JobHandler, type Jo
 import { typeHandEnteredSecurities } from './securityTypes';
 import { snapshotHousehold } from './snapshots';
 import { syncConnection, type InvestmentFetch } from './sync';
+import { matchTransfersJob } from './transfers';
 
 /**
  * Sync one connection. Nightly, the household's snapshot is its own job
@@ -54,6 +55,7 @@ export const HANDLERS: JobHandlers = {
   report_finish: finishReport,
   import_block: importBlock,
   import_reprice: importReprice,
+  match_transfers: matchTransfersJob,
 };
 
 /**

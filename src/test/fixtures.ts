@@ -155,6 +155,29 @@ export function portfolio(): PortfolioResponse {
 
 export function history(group = 'total'): HistoryResponse {
   const dates = ['2026-10-05', '2026-10-06', '2026-10-07', '2026-10-08'];
+  if (group === 'source') {
+    // Made up: $240,000 grows by a $5,000 deposit, $1,000 out, $300 of dividends, $50 of fees and $5,750 from the market.
+    const none = dates.map(() => null);
+    const part = (key: string, label: string, values: number[]) => ({ key, label, values, quality: none });
+    return {
+      currency: 'USD',
+      group: 'source',
+      dates,
+      series: [
+        part('balance', 'Balance', [240000_00, 245000_00, 248000_00, 250000_00]),
+        part('in', 'Money in', [0, 5000_00, 5000_00, 5000_00]),
+        part('out', 'Money out', [0, 0, -1000_00, -1000_00]),
+        part('income', 'Dividends and interest', [0, 0, 300_00, 300_00]),
+        part('fees', 'Fees', [0, 0, 0, -50_00]),
+        part('market', 'Market gain/loss', [0, 0, 3700_00, 5750_00]),
+        part('other', 'Not broken down', [0, 0, 0, 0]),
+      ],
+      breakdown: [
+        { key: 'household', label: 'Household', start: 240000_00, end: 250000_00, moneyIn: 5000_00, moneyOut: 1000_00, income: 300_00, fees: 50_00, market: 5750_00, other: 0, needsType: 2 },
+        { key: 'brk', label: 'Vanguard Brokerage', start: 240000_00, end: 250000_00, moneyIn: 5000_00, moneyOut: 1000_00, income: 300_00, fees: 50_00, market: 5750_00, other: 0, needsType: 2 },
+      ],
+    };
+  }
   const series =
     group === 'total'
       ? [{ key: 'total', label: 'Net worth', values: [1300000_00, 1320000_00, 1350000_00, 1366200_00] }]

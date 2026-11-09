@@ -190,7 +190,7 @@ function PhoneBar() {
 
 export function Layout() {
   return (
-    <div className="min-h-screen md:grid md:grid-cols-[13rem_1fr]">
+    <div className="min-h-screen md:grid md:grid-cols-[13rem_minmax(0,1fr)]">
       <PhoneBar />
       <aside className="sticky top-0 hidden h-screen flex-col gap-4 border-r bg-card/90 px-3 py-4 backdrop-blur md:flex">
         <div className="px-2">
@@ -198,7 +198,7 @@ export function Layout() {
         </div>
         <NavPanel sidebar />
       </aside>
-      <main className="mx-auto w-full max-w-6xl px-4 py-5 sm:px-6 sm:py-8">
+      <main className="mx-auto w-full min-w-0 max-w-6xl px-4 py-5 sm:px-6 sm:py-8">
         <StatusBanner />
         <Outlet />
       </main>

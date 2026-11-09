@@ -58,7 +58,7 @@ describe('manual accounts', () => {
     );
     const { user } = await openAccounts();
     await user.click(within(rowFor('Example Super')).getByRole('button', { name: 'Edit account' }));
-    const dialog = await screen.findByRole('dialog', { name: 'Example Super' });
+    const dialog = await screen.findByRole('dialog', { name: 'Example Super Fund · Example Super' });
     expect(await within(dialog).findByText(/Sep 30, 2026/)).toBeInTheDocument();
     expect(within(dialog).getByText('in AUD')).toBeInTheDocument(); // the account's own currency
     await user.type(within(dialog).getByLabelText('Balance (AUD)'), '152000');
@@ -110,7 +110,7 @@ describe('manual accounts', () => {
   it('hides a linked account, optionally deleting its history', async () => {
     const { user } = await openAccounts();
     await user.click(within(rowFor('Northwind Checking')).getByRole('button', { name: 'Edit account' }));
-    const dialog = await screen.findByRole('dialog', { name: 'Northwind Checking' });
+    const dialog = await screen.findByRole('dialog', { name: 'Northwind Checking ··1234' });
     expect(within(dialog).queryByText(/Record a balance/)).not.toBeInTheDocument(); // linked: no manual balances
     await user.click(within(dialog).getByRole('switch', { name: /Hide this account/ }));
     await user.click(within(dialog).getByRole('switch', { name: /delete its stored history/ }));
@@ -128,7 +128,7 @@ describe('manual accounts', () => {
     await user.click(within(dialog).getByRole('button', { name: 'Cancel' }));
 
     await user.click(within(rowFor('Northwind Checking')).getByRole('button', { name: 'Edit account' }));
-    dialog = await screen.findByRole('dialog', { name: 'Northwind Checking' });
+    dialog = await screen.findByRole('dialog', { name: 'Northwind Checking ··1234' });
     expect(within(dialog).getByText(/no longer reports this account/)).toBeInTheDocument();
     await user.click(within(dialog).getByRole('button', { name: /Delete/ }));
     await user.click(within(dialog).getByRole('button', { name: 'Delete account and history' }));

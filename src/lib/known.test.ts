@@ -12,7 +12,13 @@ describe('withKnown', () => {
     expect(withKnown(cash, undefined)).toBeNull();
     expect(withKnown(cash, { at: 'end', cash: null, shares: {} })).toBeNull();
     const fromEnd = withKnown(cash, { at: 'end', cash: 1250, shares: {} })!;
-    expect(fromEnd.file).toEqual({ kind: 'balances', currency: undefined, rows: [{ date: '2026-09-01', balance: 1500 }, { date: '2026-09-15', balance: 1250 }] });
+    expect(fromEnd.file).toMatchObject({ kind: 'balances', currency: undefined, rows: [{ date: '2026-09-01', balance: 1500 }, { date: '2026-09-15', balance: 1250 }] });
+    // The transactions are kept, for the account's transactions.
+    expect(fromEnd.file.kind === 'balances' && fromEnd.file.transactions?.map((txn) => [txn.date, txn.kind, txn.amount])).toEqual([
+      ['2026-09-01', 'deposit', 500_00],
+      ['2026-09-15', 'withdrawal', -200_00],
+      ['2026-09-15', 'withdrawal', -50_00],
+    ]);
     // $1,000 before the first transaction leads to the same $1,250 at the end, and the day before is known too.
     const fromStart = withKnown(cash, { at: 'start', cash: 1000, shares: {} })!;
     expect(fromStart.file.kind === 'balances' && fromStart.file.rows).toEqual([{ date: '2026-08-31', balance: 1000 }, ...(fromEnd.file.kind === 'balances' ? fromEnd.file.rows : [])]);

@@ -1,9 +1,9 @@
 /** Connections, accounts (Plaid and manual), manual balances and holdings. */
-import { and, count, desc, eq, inArray, isNotNull, isNull, lt, max, min, notInArray } from 'drizzle-orm';
+import { and, count, desc, eq, inArray, isNotNull, isNull, lt, notInArray } from 'drizzle-orm';
 import { Hono } from 'hono';
 import { suggestClassification } from '../../shared/classify';
 import { marketDate } from '../../shared/dates';
-import { convertMinor, type Currency } from '../../shared/money';
+import { convertMinor } from '../../shared/money';
 import {
   accountPatchSchema,
   balanceEntrySchema,
@@ -11,20 +11,18 @@ import {
   manualHoldingsSchema,
   newAccountsHistorySchema,
 } from '../../shared/schemas';
-import type { AccountsResponse, AccountSummary, ConnectionsResponse, TransactionEntry, TransactionsResponse } from '../../shared/types';
+import type { AccountsResponse, AccountSummary, ConnectionsResponse } from '../../shared/types';
 import { requireAuth } from '../auth/routes';
 import type { BatchItem } from 'drizzle-orm/batch';
 import { chunkRows, inChunks, runAtomic } from '../db/batch';
 import {
   accountDaily,
   accounts,
-  bankTransactions,
   connections,
   holdingDaily,
   holdings,
   householdMembers,
   households,
-  investmentTransactions,
   securities,
 } from '../db/schema';
 import type { Tenant } from '../db/tenant';
@@ -40,6 +38,7 @@ import { closeLookup, describeTickers, ensureRecentCloses, fxLookup } from '../s
 import { snapshotHousehold } from '../services/snapshots';
 import { accountLease, connectionLease, Lease, snapshotLease } from '../services/lease';
 import { stableId } from '../services/ids';
+import { listTransactions } from '../services/transactionList';
 import { getConnection, MANUAL_SYNC_INTERVAL_MS, purgeStatements, reconnectConnection, removeConnection, syncConnection, underConnectionLease } from '../services/sync';
 
 async function householdCurrency(tenant: Tenant): Promise<string> {
@@ -332,6 +331,7 @@ accountRoutes.post('/', async (c) => {
     name: body.name,
     institutionName: body.institutionName ?? null,
     type: body.type,
+    subtype: body.subtype || null,
     currency: body.currency,
     category: body.category ?? null,
     ownerUserId: body.ownerUserId ?? null,
@@ -374,6 +374,8 @@ accountRoutes.patch('/:id', async (c) => {
   if (body.ownerUserId !== undefined) update.ownerUserId = body.ownerUserId;
   if (body.category !== undefined) update.category = body.category;
   if (body.currency !== undefined && account.source === 'manual') update.currency = body.currency;
+  if (body.institutionName !== undefined && account.source === 'manual') update.institutionName = body.institutionName || null;
+  if (body.subtype !== undefined && account.source === 'manual') update.subtype = body.subtype || null;
   if (body.isHidden !== undefined) {
     update.isHidden = body.isHidden;
     if (body.isHidden) {
@@ -507,60 +509,11 @@ accountRoutes.get('/:id/balances', async (c) => {
   return c.json({ balances: rows });
 });
 
-/** Transactions returned at most (newest first). */
-const TRANSACTIONS_LIMIT = 2000;
-
 accountRoutes.get('/:id/transactions', async (c) => {
   const tenant = c.get('tenant');
   const account = await getAccount(tenant, c.req.param('id'));
   if (!account) notFound('Account not found.');
-  const kind: TransactionsResponse['kind'] = account.type === 'investment' ? 'investment' : 'bank';
-  let transactions: TransactionEntry[];
-  let range: { from: string | null; to: string | null; total: number };
-  if (kind === 'investment') {
-    const scope = tenant.scope(investmentTransactions, eq(investmentTransactions.accountId, account.id));
-    transactions = await tenant.db
-      .select({
-        id: investmentTransactions.id,
-        date: investmentTransactions.date,
-        type: investmentTransactions.type,
-        subtype: investmentTransactions.subtype,
-        description: investmentTransactions.name,
-        ticker: securities.ticker,
-        security: securities.name,
-        quantity: investmentTransactions.quantity,
-        price: investmentTransactions.price,
-        amount: investmentTransactions.amount,
-      })
-      .from(investmentTransactions)
-      .leftJoin(securities, eq(securities.id, investmentTransactions.securityId))
-      .where(scope)
-      .orderBy(desc(investmentTransactions.date), desc(investmentTransactions.id))
-      .limit(TRANSACTIONS_LIMIT);
-    [range] = await tenant.db
-      .select({ from: min(investmentTransactions.date), to: max(investmentTransactions.date), total: count() })
-      .from(investmentTransactions)
-      .where(scope);
-  } else {
-    const scope = tenant.scope(bankTransactions, eq(bankTransactions.accountId, account.id));
-    const rows = await tenant.db
-      .select({ id: bankTransactions.id, date: bankTransactions.date, description: bankTransactions.description, amount: bankTransactions.amount })
-      .from(bankTransactions)
-      .where(scope)
-      .orderBy(desc(bankTransactions.date), desc(bankTransactions.id))
-      .limit(TRANSACTIONS_LIMIT);
-    transactions = rows.map((row) => ({ ...row, type: null, subtype: null, ticker: null, security: null, quantity: null, price: null }));
-    [range] = await tenant.db.select({ from: min(bankTransactions.date), to: max(bankTransactions.date), total: count() }).from(bankTransactions).where(scope);
-  }
-  const response: TransactionsResponse = {
-    kind,
-    currency: account.currency as Currency,
-    from: range?.from ?? null,
-    to: range?.to ?? null,
-    transactions,
-    truncated: (range?.total ?? 0) > transactions.length,
-  };
-  return c.json(response);
+  return c.json(await listTransactions(tenant, account, { from: c.req.query('from'), to: c.req.query('to'), q: c.req.query('q') }));
 });
 
 accountRoutes.get('/:id/holdings', async (c) => {

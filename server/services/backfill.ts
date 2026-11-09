@@ -25,7 +25,7 @@ import { toMinor } from '../../shared/money';
 import { leastFinal, type DailySource } from '../../shared/quality';
 import { PlaidApiError } from '../adapters/plaid';
 import { chunkRows, inChunks, runAtomic, runBatch } from '../db/batch';
-import { accountDaily, accounts, connections, holdingDaily, holdings, investmentTransactions, jobs, pricesDaily, securities, syncRuns } from '../db/schema';
+import { accountDaily, accounts, connections, holdingDaily, holdings, jobs, pricesDaily, securities, syncRuns, transactions as transactionsTable } from '../db/schema';
 import type { Tenant } from '../db/tenant';
 import type { Deps } from '../ports';
 import { reconstructHistory, type BackfillHolding, type BackfillTransaction } from './backfillCore';
@@ -252,9 +252,9 @@ export function windows(start: IsoDate, end: IsoDate, size: number): [IsoDate, I
 async function involvedSecurities(tenant: Tenant, accountId: string, start: IsoDate): Promise<string[]> {
   const held = await tenant.db.select({ id: holdings.securityId }).from(holdings).where(tenant.scope(holdings, eq(holdings.accountId, accountId)));
   const traded = await tenant.db
-    .selectDistinct({ id: investmentTransactions.securityId })
-    .from(investmentTransactions)
-    .where(tenant.scope(investmentTransactions, eq(investmentTransactions.accountId, accountId), gte(investmentTransactions.date, start)));
+    .selectDistinct({ id: transactionsTable.securityId })
+    .from(transactionsTable)
+    .where(tenant.scope(transactionsTable, eq(transactionsTable.accountId, accountId), eq(transactionsTable.source, 'plaid'), gte(transactionsTable.date, start)));
   return [...new Set([...held.map((row) => row.id), ...traded.flatMap((row) => (row.id ? [row.id] : []))])];
 }
 
@@ -445,15 +445,15 @@ export async function historyBlock({ deps, tenant, job, renew }: JobContext): Pr
   const transactions = (
     await tenant.db
       .select({
-        date: investmentTransactions.date,
-        securityId: investmentTransactions.securityId,
-        quantity: investmentTransactions.quantity,
-        amount: investmentTransactions.amount,
-        type: investmentTransactions.type,
-        subtype: investmentTransactions.subtype,
+        date: transactionsTable.date,
+        securityId: transactionsTable.securityId,
+        quantity: transactionsTable.quantity,
+        amount: transactionsTable.amount,
+        type: transactionsTable.type,
+        subtype: transactionsTable.subtype,
       })
-      .from(investmentTransactions)
-      .where(tenant.scope(investmentTransactions, eq(investmentTransactions.accountId, account.id), gte(investmentTransactions.date, block.start)))
+      .from(transactionsTable)
+      .where(tenant.scope(transactionsTable, eq(transactionsTable.accountId, account.id), eq(transactionsTable.source, 'plaid'), gte(transactionsTable.date, block.start)))
   ).map(paidOut);
   const involved = new Set([...current.map((row) => row.securityId), ...transactions.flatMap((row) => (row.securityId ? [row.securityId] : []))]);
   const securityRows = [];
@@ -745,7 +745,7 @@ async function splitLookup(
  * institution has sent one with the sign for money in, which made the walk
  * back find cash below zero.
  */
-export function paidOut<T extends { type: string; amount: number }>(txn: T): T {
+export function paidOut<T extends { type: string | null; amount: number }>(txn: T): T {
   return txn.type === 'fee' ? { ...txn, amount: Math.abs(txn.amount) } : txn;
 }
 
@@ -761,10 +761,10 @@ async function knownSince(tenant: Tenant, accountIds: string[]): Promise<Map<str
   };
   for (const chunk of inChunks(accountIds)) {
     const transactions = await tenant.db
-      .select({ accountId: investmentTransactions.accountId, first: min(investmentTransactions.date) })
-      .from(investmentTransactions)
-      .where(tenant.scope(investmentTransactions, inArray(investmentTransactions.accountId, chunk)))
-      .groupBy(investmentTransactions.accountId);
+      .select({ accountId: transactionsTable.accountId, first: min(transactionsTable.date) })
+      .from(transactionsTable)
+      .where(tenant.scope(transactionsTable, inArray(transactionsTable.accountId, chunk), eq(transactionsTable.source, 'plaid')))
+      .groupBy(transactionsTable.accountId);
     for (const row of transactions) keep(row.accountId, row.first);
     const days = await tenant.db
       .select({ accountId: accountDaily.accountId, first: min(accountDaily.date) })

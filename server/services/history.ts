@@ -15,6 +15,9 @@ import { inChunks } from '../db/batch';
 import { accountDaily, accounts, holdingDaily, securities } from '../db/schema';
 import type { Tenant } from '../db/tenant';
 import type { Deps } from '../ports';
+import { accountLabel } from '../../shared/accounts';
+import { breakdown } from './breakdown';
+import { inTransit, linkedTransfers } from './transfers';
 import { defaultCategory, toCurrency } from './portfolio';
 import { fxLookup } from './pricing';
 
@@ -150,25 +153,45 @@ export async function loadHistory(deps: Deps, tenant: Tenant, options: Options):
       return total;
     });
 
+  // The household's transfers between its accounts: counted on one date, not in both accounts (or neither) while in transit.
+  const linked = options.accountId ? [] : await linkedTransfers(tenant);
+  const transit = inTransit(dates, linked, convert);
+  const withTransit = (values: (number | null)[]) => values.map((value, position) => (value === null ? (transit[position] ? transit[position] : null) : value + transit[position]));
+  const none = dates.map(() => null);
+
   let series: HistorySeries[];
   switch (options.group) {
     case 'total':
-      series = [{ key: 'total', label: 'Net worth', values: sum([...perAccount.values()]), quality: combined(dates, [...perAccountQuality.values()]) }];
+      series = [{ key: 'total', label: 'Net worth', values: withTransit(sum([...perAccount.values()])), quality: combined(dates, [...perAccountQuality.values()]) }];
       break;
     case 'account':
       series = accountRows.map((account) => ({
         key: account.id,
-        label: account.name,
+        label: accountLabel(account),
         values: perAccount.get(account.id)!,
         quality: perAccountQuality.get(account.id)!,
       }));
+      if (transit.some((value) => value !== 0)) series.push({ key: '__transit', label: 'In transit', values: transit, quality: none });
       break;
-    case 'category':
+    case 'category': {
       series = await categorySeries(tenant, accountRows, perAccount, perAccountQuality, dates, start, end, convert);
+      // Money in transit is cash.
+      if (transit.some((value) => value !== 0)) {
+        const cash = series.find((entry) => entry.key === 'cash');
+        if (cash) cash.values = withTransit(cash.values);
+        else series.push({ key: 'cash', label: CATEGORY_LABELS.cash, values: transit, quality: none });
+      }
       break;
+    }
     case 'holding':
       series = await holdingSeries(tenant, accountIds, dates, start, end, convert, index);
       break;
+    case 'source': {
+      // Every part, even one that's nothing throughout: the page combines them.
+      const internal = new Set(linked.flatMap((pair) => [pair.out.id, pair.in.id]));
+      const found = await breakdown(tenant, { dates, accounts: accountRows, values: perAccount, convert, household: !options.accountId, internal, transit });
+      return { currency: options.currency, group: options.group, dates, series: found.series, breakdown: found.rows };
+    }
   }
 
   return { currency: options.currency, group: options.group, dates, series: series.filter((s) => s.values.some((value) => value !== null && value !== 0)) };
@@ -293,15 +316,19 @@ async function categorySeries(
       ),
     );
 
-  // Account/day pairs covered by holdings; other days use the account balance.
-  const covered = new Set<string>();
+  // Account/day pairs covered by holdings, and each one's value by category; other days use the account balance.
+  const covered = new Map<string, Map<string, number>>();
   for (const row of rows) {
     const position = index.get(row.date);
     if (position === undefined) continue;
-    covered.add(`${row.accountId}:${row.date}`);
+    const split = covered.get(`${row.accountId}:${row.date}`) ?? new Map<string, number>();
+    covered.set(`${row.accountId}:${row.date}`, split);
     const weights = normalizeWeights((row.classification as Classification | null)?.categories ?? { other: 1 });
     const value = convert(row.value, row.currency, row.date);
-    for (const [category, weight] of Object.entries(weights)) add(category, position, value * (weight ?? 0), qualityOf(row));
+    for (const [category, weight] of Object.entries(weights)) {
+      add(category, position, value * (weight ?? 0), qualityOf(row));
+      split.set(category, (split.get(category) ?? 0) + value * (weight ?? 0));
+    }
   }
 
   for (const account of accountRows) {
@@ -309,9 +336,19 @@ async function categorySeries(
     const quality = perAccountQuality.get(account.id)!;
     const liability = account.type === 'credit' || account.type === 'loan';
     const category = liability ? 'liabilities' : ((account.category as Category | null) ?? defaultCategory(account.type));
+    // A day without holdings (a missed sync) carries the last day's split, as its balance is carried.
+    let last: Map<string, number> | null = null;
     for (const [position, date] of dates.entries()) {
-      if (values[position] === null || covered.has(`${account.id}:${date}`)) continue;
-      add(category, position, values[position]!, quality[position]);
+      const split = covered.get(`${account.id}:${date}`);
+      if (split) {
+        last = split;
+        continue;
+      }
+      if (values[position] === null) continue;
+      const lastTotal = last ? [...last.values()].reduce((sum, value) => sum + value, 0) : 0;
+      if (last && lastTotal !== 0) {
+        for (const [key, value] of last) add(key, position, (values[position]! * value) / lastTotal, quality[position]);
+      } else add(category, position, values[position]!, quality[position]);
     }
   }
 

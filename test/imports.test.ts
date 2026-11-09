@@ -303,12 +303,15 @@ describe('ticker suggestions', () => {
           { id: '000000001', name: 'EXAMPLE CORP INC' },
           { id: '000000002', name: 'ABCD HOLDINGS INC SPONSORED ADR' },
           { id: '000000003', name: 'Example Target 2050 Trust' },
+          { id: '000000004', name: 'EXAMPLE PARTNERS' },
         ],
       },
     });
     expect(response.body.suggestions).toEqual([
-      { id: '000000001', ticker: 'XMPL', from: 'yours' },
-      { id: '000000002', ticker: 'ABCD', from: 'search' },
+      { id: '000000001', ticker: 'XMPL', from: 'yours', exact: true },
+      // Only the start of the name is the provider's: to check.
+      { id: '000000002', ticker: 'ABCD', from: 'search', exact: false },
+      { id: '000000004', ticker: 'EXMP', from: 'search', exact: true },
     ]);
   });
 });

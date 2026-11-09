@@ -86,7 +86,9 @@ describe('Import page', () => {
     expect(screen.getByRole('button', { name: 'Import' })).toBeDisabled();
 
     await user.selectOptions(screen.getByLabelText('Import ··5678 into'), 'new');
-    expect(screen.getByLabelText("New account's name")).toHaveValue('Example Plan');
+    // Named by its kind (the file doesn't say which: investments), its institution beside it.
+    expect(screen.getByLabelText("New account's name")).toHaveValue('Investments');
+    expect(screen.getByLabelText('Institution')).toHaveValue('Example Plan');
     // ··1234 is the linked checking account's last digits: a new account would count it twice.
     await user.selectOptions(screen.getByLabelText('Import ··1234 into'), 'new');
     expect(screen.getByText(/is linked with the same last digits/)).toBeInTheDocument();
@@ -96,7 +98,7 @@ describe('Import page', () => {
     await expect.poll(() => sent('POST /api/imports')[0]?.body).toMatchObject({
       accounts: [
         { label: '··4321', target: { accountId: 'brk' }, file: { kind: 'holdings', positions: [{ security: '000000002', shares: 260, price: 13 }] } },
-        { label: '··5678', target: { new: { name: 'Example Plan', type: 'investment', currency: 'USD', institutionName: 'Example Plan', mask: '5678', ownerUserId: 'u-me' } } },
+        { label: '··5678', target: { new: { name: 'Investments', type: 'investment', subtype: null, currency: 'USD', institutionName: 'Example Plan', mask: '5678', ownerUserId: 'u-me' } } },
       ],
     });
     expect(await screen.findByText('Imported')).toBeInTheDocument();
@@ -109,9 +111,13 @@ describe('Import page', () => {
     upload(bankSgml([['20260915', '-100.00']], '-300.00', { card: true, number: '99995555' }));
     await user.selectOptions(await screen.findByLabelText('Import ··5555 into'), 'new');
     expect(screen.getByLabelText('Type')).toHaveValue('credit');
+    // The file's institution, to correct.
+    expect(screen.getByLabelText('Institution')).toHaveValue('Example Bank');
+    await user.clear(screen.getByLabelText('Institution'));
+    await user.type(screen.getByLabelText('Institution'), 'Example Card Co');
     await importIt(user);
     await expect.poll(() => sent('POST /api/imports')[0]?.body).toMatchObject({
-      accounts: [{ label: '··5555', target: { new: { name: 'Example Bank', type: 'credit', currency: 'USD' } }, file: { kind: 'balances', currency: 'USD', rows: [{ date: '2026-09-01', balance: 200 }, { date: '2026-09-15', balance: 300 }, { date: '2026-10-08', balance: 300 }] } }],
+      accounts: [{ label: '··5555', target: { new: { name: 'Credit card', institutionName: 'Example Card Co', type: 'credit', subtype: 'credit card', currency: 'USD' } }, file: { kind: 'balances', currency: 'USD', rows: [{ date: '2026-09-01', balance: 200 }, { date: '2026-09-15', balance: 300 }, { date: '2026-10-08', balance: 300 }] } }],
     });
   });
 
@@ -135,7 +141,15 @@ describe('Import page', () => {
         {
           label: 'file0',
           target: { accountId: 'wbc' },
-          file: { kind: 'balances', rows: [{ date: '2026-08-31', balance: 1000 }, { date: '2026-09-01', balance: 1500 }, { date: '2026-09-15', balance: 1300 }] },
+          file: {
+            kind: 'balances',
+            rows: [{ date: '2026-08-31', balance: 1000 }, { date: '2026-09-01', balance: 1500 }, { date: '2026-09-15', balance: 1300 }],
+            // Its transactions go too, to be kept as the account's.
+            transactions: [
+              { date: '2026-09-01', kind: 'deposit', label: 'Contribution', description: 'Contribution', amount: 500_00 },
+              { date: '2026-09-15', kind: 'withdrawal', label: 'Purchase', description: 'Purchase', amount: -200_00 },
+            ],
+          },
         },
       ],
     });
@@ -156,14 +170,15 @@ describe('Import page', () => {
   });
 
   it('suggests a ticker for a security the file names without one, and sends what you choose', async () => {
-    server.use(http.post('*/api/imports/tickers', () => HttpResponse.json({ suggestions: [{ id: '000000002', ticker: 'XYZ', from: 'search' }] })));
+    server.use(http.post('*/api/imports/tickers', () => HttpResponse.json({ suggestions: [{ id: '000000002', ticker: 'XYZ', from: 'search', exact: false }] })));
     server.use(http.post('*/api/imports', () => HttpResponse.json(accepted)));
     checked();
     const { user } = await openImport();
     upload(sgml(buy('B1', '20260803', '10', '12.5', '125.00')));
     const ticker = await screen.findByLabelText('Ticker for Example S&P Index Fund M');
     await expect.poll(() => (ticker as HTMLInputElement).value).toBe('XYZ');
-    expect(screen.getByText(/found by its name: check it/)).toBeInTheDocument();
+    // Filled in, but only a similar name: to check.
+    expect(screen.getByText(/a similar name: check it/)).toBeInTheDocument();
 
     await user.clear(ticker);
     await user.type(ticker, 'not a ticker');
@@ -229,7 +244,20 @@ describe('Import page', () => {
     await user.type(screen.getByLabelText('Balance'), '1000');
     await importIt(user);
     await expect.poll(() => sent('POST /api/imports')[0]?.body).toEqual({
-      accounts: [{ label: 'file0', target: { accountId: 'wbc' }, file: { kind: 'balances', rows: [{ date: '2025-06-01', balance: 700 }, { date: '2026-06-01', balance: 1000 }] } }],
+      accounts: [
+        {
+          label: 'file0',
+          target: { accountId: 'wbc' },
+          file: {
+            kind: 'balances',
+            rows: [{ date: '2025-06-01', balance: 700 }, { date: '2026-06-01', balance: 1000 }],
+            transactions: [
+              { date: '2025-06-01', kind: 'deposit', label: 'Contribution', description: 'Contribution', amount: 500_00 },
+              { date: '2026-06-01', kind: 'deposit', label: 'Contribution', description: 'Contribution', amount: 300_00 },
+            ],
+          },
+        },
+      ],
     });
   });
 });

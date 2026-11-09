@@ -29,6 +29,13 @@
       "when": 1793027540866,
       "tag": "0003_daily_quality",
       "breakpoints": true
+    },
+    {
+      "idx": 4,
+      "version": "6",
+      "when": 1794080803824,
+      "tag": "0004_transactions",
+      "breakpoints": true
     }
   ]
 }

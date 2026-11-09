@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { bankSgml, buy, fee, sgml } from '../test/ofx';
-import { isOfx, ofxAccounts } from './ofx';
+import { bankDescription, isOfx, ofxAccounts, positionShares } from './ofx';
 
 describe('ofxAccounts', () => {
   it("reads an investment account's securities, positions, cash and transactions", () => {
@@ -114,6 +114,13 @@ describe('ofxAccounts', () => {
         { date: '2026-09-20', balance: 975 },
         { date: '2026-10-08', balance: 1000 },
       ],
+      // Kept with their ids, for the account's transactions.
+      transactions: [
+        { id: 'T0', date: '2026-09-10', kind: 'deposit', label: 'CREDIT', description: 'Example', amount: 500_00 },
+        { id: 'T1', date: '2026-09-20', kind: 'withdrawal', label: 'DEBIT', description: 'Example', amount: -200_00 },
+        { id: 'T2', date: '2026-09-20', kind: 'withdrawal', label: 'DEBIT', description: 'Example', amount: -50_00 },
+        { id: 'T3', date: '2026-10-08', kind: 'deposit', label: 'CREDIT', description: 'Example', amount: 25_00 },
+      ],
     });
   });
 
@@ -128,6 +135,11 @@ describe('ofxAccounts', () => {
         { date: '2026-09-15', balance: 350 },
         { date: '2026-09-25', balance: 300 },
         { date: '2026-10-08', balance: 300 },
+      ],
+      // The purchase is money out of the card, the payment money in.
+      transactions: [
+        { id: 'T0', date: '2026-09-15', kind: 'withdrawal', label: 'DEBIT', description: 'Example', amount: -100_00 },
+        { id: 'T1', date: '2026-09-25', kind: 'deposit', label: 'CREDIT', description: 'Example', amount: 50_00 },
       ],
     });
   });
@@ -157,3 +169,44 @@ describe('ofxAccounts', () => {
   });
 });
 
+describe('positionShares', () => {
+  it("takes the share count from a position's value to the cent, when it agrees with the rounded count shown", () => {
+    // 8.117 shown at $694.81 is $5,639.77, but the position is worth $5,639.63: 8.116795 shares.
+    expect(positionShares('8.117', 694.81, 5639.63)).toBe(8.116795);
+    // Too far from the count shown (a stale price): the count stands.
+    expect(positionShares('8.117', 600, 5639.63)).toBe(8.117);
+    // A whole number shown isn't moved by more than a rounded count would be.
+    expect(positionShares('10', 100, 999)).toBe(10);
+    // No count shown: the value over the price; no value or price: the count shown.
+    expect(positionShares(null, 694.81, 5639.63)).toBe(8.116795);
+    expect(positionShares('8.117', 694.81, null)).toBe(8.117);
+    expect(positionShares('8.117', 0, 5639.63)).toBe(8.117);
+    expect(positionShares(null, 0, null)).toBeNull();
+  });
+
+  it("reads a Quicken position's shares from its market value", () => {
+    const content = sgml(buy('B1', '20260803', '10', '12.5', '125.00')).replace('<UNITS>260.0000</UNITS><UNITPRICE>13.000000</UNITPRICE><MKTVAL>3380.00</MKTVAL>', '<UNITS>260.000</UNITS><UNITPRICE>694.810000</UNITPRICE><MKTVAL>180650.53</MKTVAL>');
+    const [account] = ofxAccounts(content);
+    if (account.file.kind !== 'holdings') throw new Error('expected holdings');
+    expect(account.file.positions.find((row) => row.security === '000000002')?.shares).toBe(259.999899);
+  });
+});
+
+describe('bankDescription', () => {
+  it('joins a description a bank split across NAME and MEMO, and marks a part cut off at the limit', () => {
+    // Made up: NAME filled to its 32 characters, MEMO going on mid-word, and cut off too.
+    expect(bankDescription('Online Transfer 12345678901 to E', 'xample savings ####1234 transfer')).toBe('Online Transfer 12345678901 to Example savings ####1234 transfer…');
+    expect(bankDescription('', 'Example Savings  1234 transferre')).toBe('Example Savings  1234 transferre…');
+    expect(bankDescription('PAYROLL', '')).toBe('PAYROLL');
+    expect(bankDescription('EXAMPLE STORE', 'Card purchase')).toBe('EXAMPLE STORE · Card purchase');
+    expect(bankDescription('Interest', 'Interest')).toBe('Interest');
+    // Written twice running by the institution: once.
+    expect(bankDescription('', 'INTEREST PAYMENTINTEREST PAYMENT')).toBe('INTEREST PAYMENT');
+    expect(bankDescription('', 'ABAB')).toBe('ABAB');
+    // Interest a bank gives no type of its own reads as income.
+    const [account] = ofxAccounts(bankSgml([['20260910', '0.13']], '100.00').replace('<NAME>Example</NAME>', '<NAME>INTEREST PAYMENT</NAME>'));
+    expect(account.file.kind === 'balances' && account.file.transactions?.[0]).toMatchObject({ kind: 'income', description: 'INTEREST PAYMENT' });
+    // NAME the start of a MEMO that has it all.
+    expect(bankDescription('Example plan contribution from e', 'Example plan contribution from employer')).toBe('Example plan contribution from employer');
+  });
+});

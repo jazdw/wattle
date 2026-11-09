@@ -104,7 +104,7 @@ describe('work budgets (2 accounts, 30 positions, 500 transactions, 2 years)', (
     expect(jobs.map((job) => job.type).sort()).toEqual(['nightly_finish', 'snapshot', 'sync']);
     expect(largest(jobs, 'outside')).toBeLessThanOrEqual(5); // 3
     expect(largest(jobs, 'dbCalls')).toBeLessThanOrEqual(33); // 26
-    expect(largest(jobs, 'statements')).toBeLessThanOrEqual(170); // 137
+    expect(largest(jobs, 'statements')).toBeLessThanOrEqual(210); // 172
     expect(total(jobs, 'rowsWritten')).toBeLessThanOrEqual(220); // 165
   });
 

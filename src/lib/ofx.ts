@@ -41,8 +41,14 @@ const day = (value: unknown) => {
   return `${digits.slice(0, 4)}-${digits.slice(4, 6)}-${digits.slice(6, 8)}` as IsoDate;
 };
 /** ofx-js decodes one level of entities; some institutions escape twice (S&amp;amp;P). */
-const decode = (value: string) =>
+const unescape = (value: string) =>
   value.replace(/&(amp|lt|gt|quot|apos|#39);/g, (_, name: string) => ({ amp: '&', lt: '<', gt: '>', quot: '"', apos: "'", '#39': "'" })[name] ?? '');
+/** Text as it's meant: unescaped, and once where an institution writes it twice running ("INTEREST PAYMENTINTEREST PAYMENT"). */
+const decode = (value: string) => {
+  const text = unescape(value);
+  const half = text.length / 2;
+  return half >= 4 && Number.isInteger(half) && text.slice(0, half) === text.slice(half) ? text.slice(0, half) : text;
+};
 /** Words some institutions put in the ticker field of a fund that has no ticker. */
 const NOT_TICKERS = new Set(['UNKNOWN', 'NULL', 'NONE', 'N/A', 'NA', 'CASH', 'LOAN', 'ALLOC']);
 /**
@@ -53,6 +59,23 @@ export const ticker = (value: unknown) => {
   const symbol = text(value).toUpperCase();
   return /^[A-Z][A-Z0-9.-]{0,9}$/.test(symbol) && !NOT_TICKERS.has(symbol) && !/^NON[E0-9]/.test(symbol) ? symbol : null;
 };
+
+/**
+ * A position's share count. Files round share counts (to three decimals,
+ * say) but give the position's value to the cent, so the value over the
+ * price is the truer count: used when it agrees with the count the file
+ * shows to within that count's rounding (else the file's stands), or alone
+ * when the file shows none. Six decimals, as institutions keep them.
+ */
+export function positionShares(shown: string | null, price: number, value: number | null): number | null {
+  const counted = shown && Number.isFinite(Number(shown.replace(/,/g, ''))) ? Number(shown.replace(/,/g, '')) : null;
+  if (value === null || !(price > 0)) return counted;
+  const derived = Math.round((value / price) * 1e6) / 1e6;
+  if (counted === null) return derived;
+  const decimals = shown!.split('.')[1]?.length ?? 0;
+  // Half the last digit shown: a whole number is taken to be shown to three decimals, so a stale price can't move it.
+  return Math.abs(derived - counted) <= 0.5 * 10 ** -Math.max(decimals, 3) + 1e-9 ? derived : counted;
+}
 
 /** Whether a file looks like OFX (either version) rather than CSV. */
 export function isOfx(content: string): boolean {
@@ -93,17 +116,57 @@ function bankStatement(response: Element, institution: string | null, card: bool
   const from = (response.BANKACCTFROM ?? response.CCACCTFROM) as Element | undefined;
   const ledger = response.LEDGERBAL as Element;
   const asOf = day(ledger.DTASOF);
-  const transactions = response.BANKTRANLIST as Element | undefined;
-  const posted = list(transactions?.STMTTRN as Element | Element[] | undefined).map((entry) => ({ date: day(entry.DTPOSTED), amount: toMinor(number(entry.TRNAMT)) }));
-  const rows = balanceRows(posted, toMinor(number(ledger.BALAMT)), asOf, text(transactions?.DTSTART) ? day(transactions?.DTSTART) : null, card);
+  const bankList = response.BANKTRANLIST as Element | undefined;
+  // A card's purchases are money out of it and its payments money in, as a bank account's are.
+  const transactions = list(bankList?.STMTTRN as Element | Element[] | undefined).map((entry) => {
+    const txn = cashTransaction(entry, text(entry.TRNTYPE).toUpperCase() || 'STMTTRN');
+    return { ...(txn.id ? { id: txn.id } : {}), date: txn.date, kind: txn.kind, label: txn.label, ...(txn.description ? { description: txn.description } : {}), amount: txn.amount };
+  });
+  const rows = balanceRows(transactions, toMinor(number(ledger.BALAMT)), asOf, text(bankList?.DTSTART) ? day(bankList?.DTSTART) : null, card);
   const type = text(from?.ACCTTYPE);
   return {
     number: text(from?.ACCTID) || null,
     institution,
     type: card || type === 'CREDITLINE' ? 'credit' : 'depository',
+    ...(card ? { subtype: 'credit card' } : BANK_SUBTYPES[type] ? { subtype: BANK_SUBTYPES[type] } : {}),
     unknownTypes: [],
-    file: { kind: 'balances', currency: text(response.CURDEF) || 'USD', rows },
+    file: { kind: 'balances', currency: text(response.CURDEF) || 'USD', rows, transactions },
   };
+}
+
+/** A bank account's ACCTTYPE as the kind of account it is (shared/accounts.ts). */
+const BANK_SUBTYPES: Record<string, string> = { CHECKING: 'checking', SAVINGS: 'savings', MONEYMRKT: 'money market', CD: 'cd' };
+
+/** OFX limits NAME to 32 characters. */
+const NAME_LENGTH = 32;
+
+/**
+ * A bank transaction's description from its NAME and MEMO. Some banks split
+ * one description across the two: NAME filled to its 32 characters, MEMO
+ * going on (mid-word); the two are joined. A part cut off at that length
+ * ends in "…", so it's plain it's cut.
+ */
+export function bankDescription(name: string, memo: string): string {
+  const [first, rest] = [decode(name), decode(memo)];
+  // Exactly the limit: cut off there (a whole one would rarely land on it).
+  const ending = (part: string) => (part.length === NAME_LENGTH ? '…' : '');
+  if (!first) return rest + ending(rest);
+  if (!rest || first.includes(rest)) return first + ending(first);
+  // A MEMO holding the whole description, NAME its start.
+  if (rest.includes(first)) return rest + ending(rest);
+  return first.length === NAME_LENGTH ? first + rest + ending(rest) : `${first} · ${rest}${ending(rest)}`;
+}
+
+/** Money in or out of an account's cash (a bank statement's STMTTRN, an investment account's INVBANKTRAN). */
+function cashTransaction(bank: Element, label: string): ReadTransaction {
+  const amount = toMinor(number(bank.TRNAMT));
+  const description = bankDescription(text(bank.NAME), text(bank.MEMO));
+  // The bank's own type says when it's interest, a dividend or a fee; otherwise in or out by its sign.
+  const trntype = text(bank.TRNTYPE).toUpperCase();
+  // Some banks give interest no type of its own: its description says so.
+  const interest = trntype === 'INT' || trntype === 'DIV' || /\binterest (payment|paid|earned|credit)\b/i.test(description);
+  const kind: ImportKind = interest && amount > 0 ? 'income' : (trntype === 'FEE' || trntype === 'SRVCHG') && amount < 0 ? 'fee' : amount < 0 ? 'withdrawal' : 'deposit';
+  return { ...(text(bank.FITID) ? { id: text(bank.FITID) } : {}), date: day(bank.DTPOSTED), kind, label, ...(description ? { description } : {}), security: null, shares: 0, price: 0, amount, value: 0, charges: 0 };
 }
 
 function statement(response: Element, securities: Map<string, ImportedHoldings['securities'][number]>, institution: string | null): FileAccount {
@@ -115,7 +178,10 @@ function statement(response: Element, securities: Map<string, ImportedHoldings['
       const security = text((position.SECID as Element).UNIQUEID);
       const date = day(position.DTPRICEASOF);
       if (!asOf || date > asOf) asOf = date;
-      if (number(position.UNITS) !== 0) positions.push({ security, shares: number(position.UNITS), price: Math.abs(number(position.UNITPRICE)) });
+      // Its value to the cent gives the truer share count than the rounded one shown (positionShares).
+      const price = Math.abs(number(position.UNITPRICE));
+      const shares = positionShares(text(position.UNITS) || null, price, text(position.MKTVAL) ? Math.abs(number(position.MKTVAL)) * Math.sign(number(position.UNITS) || 1) : null) ?? 0;
+      if (shares !== 0) positions.push({ security, shares, price });
     }
   }
 
@@ -142,7 +208,7 @@ function statement(response: Element, securities: Map<string, ImportedHoldings['
     // Its income may be more than it reinvests: a fee (an ADR's custody fee, listed on its own) comes out first.
     const earlier = closestIncome(paid, txn);
     if (earlier >= 0) paid.splice(earlier, 1);
-    else transactions.push({ ...txn, id: txn.id && `${txn.id}:income`, kind: 'income', shares: 0, price: 0, amount: txn.value, value: 0, charges: 0 });
+    else transactions.push({ ...txn, id: txn.id ? `${txn.id}:income` : undefined, kind: 'income', shares: 0, price: 0, amount: txn.value, value: 0, charges: 0 });
   }
 
   // Sweep funds are cash: moving money into or out of them is a sweep, their income is cash income.
@@ -213,16 +279,8 @@ function sweepFunds(available: number, positions: ImportedHoldings['positions'])
 }
 
 function transaction(type: string, kind: ImportKind, entry: Element): ReadTransaction {
-  if (type === 'INVBANKTRAN') {
-    // Money in or out of the account's cash.
-    const bank = entry.STMTTRN as Element;
-    const amount = toMinor(number(bank.TRNAMT));
-    const description = decode(text(bank.MEMO) || text(bank.NAME));
-    // The bank's own type says when it's interest, a dividend or a fee; otherwise in or out by its sign.
-    const trntype = text(bank.TRNTYPE).toUpperCase();
-    const cashKind: ImportKind = (trntype === 'INT' || trntype === 'DIV') && amount > 0 ? 'income' : (trntype === 'FEE' || trntype === 'SRVCHG') && amount < 0 ? 'fee' : amount < 0 ? 'withdrawal' : 'deposit';
-    return { id: text(bank.FITID), date: day(bank.DTPOSTED), kind: cashKind, label: type, ...(description ? { description } : {}), security: null, shares: 0, price: 0, amount, value: 0, charges: 0 };
-  }
+  // Money in or out of the account's cash.
+  if (type === 'INVBANKTRAN') return cashTransaction(entry.STMTTRN as Element, type);
   // Buys and sells keep their details in INVBUY / INVSELL; the others at the top.
   const detail = (entry.INVBUY ?? entry.INVSELL ?? entry) as Element;
   const core = detail.INVTRAN as Element;
@@ -234,7 +292,7 @@ function transaction(type: string, kind: ImportKind, entry: Element): ReadTransa
   const amount = kind === 'buy' ? -total : kind === 'sell' ? total : kind === 'income' ? toMinor(number(detail.TOTAL)) : 0;
   const description = decode(text(core.MEMO));
   return {
-    id: text(core.FITID),
+    ...(text(core.FITID) ? { id: text(core.FITID) } : {}),
     date: day(core.DTTRADE),
     kind,
     label: type,

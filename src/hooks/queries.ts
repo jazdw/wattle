@@ -45,11 +45,25 @@ export function useAccounts(options: Pick<UseQueryOptions<AccountsResponse, Erro
   });
 }
 
-export function useTransactions(accountId: string | null) {
+/** Which transactions to list: from and to dates (inclusive), and words or an amount to search for. */
+export interface TransactionFilters {
+  from?: string | null;
+  to?: string | null;
+  q?: string;
+}
+
+/** One account's transactions, or every account's ('all'). */
+export function useTransactions(accountId: string | null, filters: TransactionFilters = {}) {
+  const params = new URLSearchParams();
+  if (filters.from) params.set('from', filters.from);
+  if (filters.to) params.set('to', filters.to);
+  if (filters.q?.trim()) params.set('q', filters.q.trim());
   return useQuery({
-    queryKey: ['transactions', accountId],
-    queryFn: () => api<TransactionsResponse>(`/api/accounts/${accountId}/transactions`),
+    queryKey: ['transactions', accountId, params.toString()],
+    // 'all': every account's.
+    queryFn: () => api<TransactionsResponse>(`${accountId === 'all' ? '/api/transactions' : `/api/accounts/${accountId}/transactions`}${params.size ? `?${params}` : ''}`),
     enabled: accountId !== null,
+    placeholderData: keepPreviousData,
   });
 }
 

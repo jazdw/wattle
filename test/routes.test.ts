@@ -30,9 +30,12 @@ describe('accounts', () => {
     expect(owned.status).toBe(400);
 
     const id = await create({ name: 'Joint savings', type: 'depository', ownerUserId: null });
-    expect((await api(`/api/accounts/${id}`, { method: 'PATCH', json: { ownerUserId: home.userId, name: 'Mine', category: 'cash', currency: 'AUD' } })).status).toBe(200);
+    expect((await api(`/api/accounts/${id}`, { method: 'PATCH', json: { ownerUserId: home.userId, name: 'Mine', category: 'cash', currency: 'AUD', institutionName: 'Example Bank' } })).status).toBe(200);
     const [row] = await deps.db.select().from(schema.accounts).where(eq(schema.accounts.id, id));
-    expect(row).toMatchObject({ ownerUserId: home.userId, name: 'Mine', category: 'cash', currency: 'AUD' });
+    expect(row).toMatchObject({ ownerUserId: home.userId, name: 'Mine', category: 'cash', currency: 'AUD', institutionName: 'Example Bank' });
+    // Cleared, it's none.
+    expect((await api(`/api/accounts/${id}`, { method: 'PATCH', json: { institutionName: '' } })).status).toBe(200);
+    expect((await deps.db.select().from(schema.accounts).where(eq(schema.accounts.id, id)))[0].institutionName).toBeNull();
   });
 
   it('stores liabilities as negative and deletes manual accounts with their history', async () => {

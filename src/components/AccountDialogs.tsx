@@ -1,6 +1,7 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { Plus, Trash2 } from 'lucide-react';
 import { useState } from 'react';
+import { accountLabel, ACCOUNT_SUBTYPES } from '../../shared/accounts';
 import { marketDate } from '../../shared/dates';
 import { CURRENCIES, type Currency } from '../../shared/money';
 import { CATEGORIES, CATEGORY_LABELS } from '../../shared/taxonomy';
@@ -37,6 +38,25 @@ function OwnerSelect({ value, onChange }: { value: string | null; onChange: (val
 /* New manual account                                                  */
 /* ------------------------------------------------------------------ */
 
+/** The kind of account within its type (Checking, 401(k), HSA…), for a manual account; none for a type without kinds. */
+export function SubtypeSelect({ type, value, onChange, label = 'Account type' }: { type: string; value: string; onChange: (subtype: string) => void; label?: string }) {
+  const options = ACCOUNT_SUBTYPES[type] ?? [];
+  if (options.length === 0) return null;
+  return (
+    <Field label={label}>
+      <NativeSelect value={value} onChange={(event) => onChange(event.target.value)}>
+        <option value="">Not given</option>
+        {/* One it has that isn't on the list (Plaid's own) stays choosable. */}
+        {[...options, ...(value && !options.includes(value) ? [value] : [])].map((option) => (
+          <option key={option} value={option}>
+            {accountKind(type, option)}
+          </option>
+        ))}
+      </NativeSelect>
+    </Field>
+  );
+}
+
 export function NewAccountDialog({ open, onOpenChange }: { open: boolean; onOpenChange: (open: boolean) => void }) {
   const { me, currency: shown } = useAuth();
   const invalidate = useInvalidate();
@@ -46,6 +66,7 @@ export function NewAccountDialog({ open, onOpenChange }: { open: boolean; onOpen
     name: '',
     institutionName: '',
     type: 'depository',
+    subtype: '',
     currency: shown,
     category: '',
     ownerUserId: me?.user.id ?? null,
@@ -61,6 +82,7 @@ export function NewAccountDialog({ open, onOpenChange }: { open: boolean; onOpen
           name: form.name,
           institutionName: form.institutionName || null,
           type: form.type,
+          subtype: form.subtype || null,
           currency: form.currency,
           category: form.category || null,
           ownerUserId: form.ownerUserId,
@@ -70,7 +92,7 @@ export function NewAccountDialog({ open, onOpenChange }: { open: boolean; onOpen
     onSuccess: () => {
       invalidate();
       onOpenChange(false);
-      setForm({ ...form, name: '', institutionName: '', balance: '' });
+      setForm({ ...form, name: '', institutionName: '', subtype: '', balance: '' });
     },
   });
 
@@ -81,13 +103,13 @@ export function NewAccountDialog({ open, onOpenChange }: { open: boolean; onOpen
       <DialogContent title="Add a manual account" description="For accounts Plaid can't reach: Australian banks, super, property, 401(k) plans…">
         <div className="grid gap-3 sm:grid-cols-2">
           <Field label="Name">
-            <Input value={form.name} onChange={(event) => setForm({ ...form, name: event.target.value })} placeholder="Example Super" />
+            <Input value={form.name} onChange={(event) => setForm({ ...form, name: event.target.value })} placeholder="Retirement savings" />
           </Field>
           <Field label="Institution">
             <Input value={form.institutionName} onChange={(event) => setForm({ ...form, institutionName: event.target.value })} placeholder="Example Fund" />
           </Field>
           <Field label="Type">
-            <NativeSelect value={form.type} onChange={(event) => setForm({ ...form, type: event.target.value })}>
+            <NativeSelect value={form.type} onChange={(event) => setForm({ ...form, type: event.target.value, subtype: '' })}>
               {ACCOUNT_TYPE_OPTIONS.map((option) => (
                 <option key={option.value} value={option.value}>
                   {option.label}
@@ -95,6 +117,7 @@ export function NewAccountDialog({ open, onOpenChange }: { open: boolean; onOpen
               ))}
             </NativeSelect>
           </Field>
+          <SubtypeSelect type={form.type} value={form.subtype} onChange={(subtype) => setForm({ ...form, subtype })} />
           <Field label="Currency">
             <NativeSelect
               value={form.currency}
@@ -157,13 +180,15 @@ export function EditAccountDialog({
   onClose: () => void;
 }) {
   const invalidate = useInvalidate();
-  const [form, setForm] = useState<{ id: string; name: string; ownerUserId: string | null; category: string; isHidden: boolean; purge: boolean } | null>(null);
+  const [form, setForm] = useState<{ id: string; name: string; institutionName: string; subtype: string; ownerUserId: string | null; category: string; isHidden: boolean; purge: boolean } | null>(null);
   const [balance, setBalance] = useState(() => ({ amount: '', date: marketDate(new Date()) }));
 
   if (account && form?.id !== account.id) {
     setForm({
       id: account.id,
       name: account.name,
+      institutionName: account.institutionName ?? '',
+      subtype: account.subtype ?? '',
       ownerUserId: account.ownerUserId,
       category: account.category ?? '',
       isHidden: account.isHidden,
@@ -183,6 +208,8 @@ export function EditAccountDialog({
         method: 'PATCH',
         body: JSON.stringify({
           name: form!.name,
+          // A linked account's institution comes from Plaid.
+          ...(account!.source === 'manual' ? { institutionName: form!.institutionName.trim() || null, subtype: form!.subtype || null } : {}),
           ownerUserId: form!.ownerUserId,
           category: form!.category || null,
           isHidden: form!.isHidden,
@@ -217,11 +244,19 @@ export function EditAccountDialog({
 
   return (
     <Dialog open onOpenChange={(open) => !open && onClose()}>
-      <DialogContent title={account.name} description={[account.institutionName, account.mask && `··${account.mask}`, accountKind(account.type, account.subtype)].filter(Boolean).join(' · ')}>
+      <DialogContent title={accountLabel(account)} description={accountKind(account.type, account.subtype)}>
         <div className="grid gap-3 sm:grid-cols-2">
           <Field label="Name">
             <Input value={form.name} onChange={(event) => setForm({ ...form, name: event.target.value })} />
           </Field>
+          {account.source === 'manual' && (
+            <>
+              <Field label="Institution">
+                <Input value={form.institutionName} onChange={(event) => setForm({ ...form, institutionName: event.target.value })} placeholder="None" />
+              </Field>
+              <SubtypeSelect type={account.type} value={form.subtype} onChange={(subtype) => setForm({ ...form, subtype })} />
+            </>
+          )}
           <Field label="Owner">
             <OwnerSelect value={form.ownerUserId} onChange={(ownerUserId) => setForm({ ...form, ownerUserId })} />
           </Field>
@@ -399,7 +434,7 @@ export function HoldingsDialog({ account, onClose }: { account: AccountSummary |
     <Dialog open onOpenChange={(open) => !open && (setLoadedFor(null), onClose())}>
       <DialogContent
         className="max-w-2xl"
-        title={`Holdings — ${account.name}`}
+        title={`Holdings — ${accountLabel(account)}`}
         description="Public tickers are priced automatically each day. For funds without a ticker (e.g. a super option or 401(k) trust), give a code and unit price."
       >
         <div className="grid gap-2">

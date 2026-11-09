@@ -5,6 +5,7 @@
  * each dated balance with its change.
  */
 import type { ImportedFile, ImportKind } from '../../shared/schemas';
+import { KIND_WORDS } from '../../shared/transactionKinds';
 
 export interface PreviewRow {
   date: string;
@@ -25,19 +26,6 @@ export interface PreviewRow {
 }
 
 const CASH_KINDS = new Set<ImportKind>(['income', 'deposit', 'withdrawal', 'fee', 'sweep']);
-
-/** Each kind of transaction in words. */
-const KIND_WORDS: Record<ImportKind, string> = {
-  buy: 'Purchase',
-  sell: 'Sale',
-  reinvest: 'Reinvested dividend',
-  income: 'Dividend or interest',
-  deposit: 'Money in',
-  withdrawal: 'Money out',
-  fee: 'Fee',
-  transfer: 'Shares moved',
-  sweep: 'Moved within cash',
-};
 
 /** The rows, newest first. */
 export function previewRows(file: ImportedFile): PreviewRow[] {

@@ -218,7 +218,7 @@ describe('ongoing sync', () => {
       date: `2026-09-0${index + 1}`,
     }));
     const { deps } = await linked(plaid);
-    expect(await deps.db.select().from(schema.investmentTransactions)).toHaveLength(5);
+    expect(await deps.db.select().from(schema.transactions)).toHaveLength(5);
   });
 });
 
@@ -401,12 +401,15 @@ describe('history backfill', () => {
     await api('/api/accounts', { method: 'POST', json: { name: 'House', type: 'property', currency: 'USD', balance: 500000 } });
 
     const history = (await api('/api/history?range=1M&group=account&currency=USD')).body;
-    const series = (label: string) => history.series.find((row: { label: string }) => row.label === label).values as (number | null)[];
+    // By the account's name (labels are "Institution · name ··1234").
+    const accounts = (await api('/api/accounts')).body.accounts as { id: string; name: string }[];
+    const row = (name: string) => history.series.find((entry: { key: string }) => entry.key === accounts.find((account) => account.name === name)!.id);
+    const series = (name: string) => row(name).values as (number | null)[];
     const yesterday = history.dates.length - 2;
     expect(series('mtg')[0]).toBe(-200000_00); // carried back from today
     expect(series('mtg')[yesterday]).toBe(-200000_00);
     expect(series('House')[0]).toBeNull(); // manual: starts on its entry date
-    const quality = history.series.find((row: { label: string }) => row.label === 'mtg').quality;
+    const quality = row('mtg').quality;
     expect(quality[0].source).toBe('carried');
     expect(quality.at(-1).source).toBe('snapshot'); // today is reported
   });

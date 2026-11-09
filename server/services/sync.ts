@@ -3,7 +3,7 @@
  * transactions, and error states. Data for hidden accounts is dropped here —
  * it is never written.
  */
-import { eq, inArray, isNotNull, isNull, lte, ne, notInArray, or, sql } from 'drizzle-orm';
+import { eq, gte, inArray, isNotNull, isNull, lte, ne, notInArray, or, sql } from 'drizzle-orm';
 import type { AccountBase, Holding, InvestmentTransaction, Security as PlaidSecurity } from 'plaid';
 import { suggestClassification } from '../../shared/classify';
 import { addDays, lastMarketClose, marketDate } from '../../shared/dates';
@@ -11,7 +11,7 @@ import { toMinor } from '../../shared/money';
 import { itemProducts, PlaidApiError, type LinkKind, type PlaidApi } from '../adapters/plaid';
 import type { BatchItem } from 'drizzle-orm/batch';
 import { chunkRows, inChunks, runAtomic } from '../db/batch';
-import { accounts, connections, holdings, investmentTransactions, securities } from '../db/schema';
+import { accounts, connections, holdings, securities, transactions } from '../db/schema';
 import type { Tenant } from '../db/tenant';
 import type { Deps } from '../ports';
 import { closeInterruptedRuns, SyncRun, type SyncTrigger } from './activity';
@@ -20,6 +20,7 @@ import { queueDueHistory } from './backfill';
 import { BusyError, connectionLease, holdWhile, Lease, snapshotLease } from './lease';
 import { decryptToken, encryptToken, loadTokenKeys, tokenAad } from './crypto';
 import { stableId } from './ids';
+import { queueMatching } from './transfers';
 import { describeError } from '../lib/errors';
 
 export type ConnectionRow = typeof connections.$inferSelect;
@@ -349,11 +350,12 @@ async function syncPass(
     const visible = await planAccounts(deps, tenant, connection, fetched.accounts, run, writes);
     let holdingCount = 0;
     let transactionCount = 0;
+    let newTransactions = 0;
     if (fetched.investments) {
       const securityIds = await planSecurities(deps, tenant, fetched.investments.securities, writes);
       // Holdings not fetched this time are left as they are.
       if (fetched.investments.holdings) holdingCount = await planHoldings(deps, tenant, fetched.investments.holdings, fetched.investments.securities, securityIds, visible, run, writes);
-      transactionCount = await planTransactions(deps, tenant, connection, fetched.investments.transactions, securityIds, visible, run, writes);
+      ({ planned: transactionCount, added: newTransactions } = await planTransactions(deps, tenant, connection, fetched.investments.transactions, securityIds, visible, run, writes));
     }
     writes.push(
       setConnection({
@@ -368,6 +370,8 @@ async function syncPass(
     );
     await lease.renew();
     await runAtomic(tenant.db, writes);
+    // New transactions may be one side of a transfer between your accounts.
+    if (newTransactions > 0) await queueMatching(deps, tenant, `sync:${connection.id}:${fetchedAt}`);
     return { accounts: fetched.accounts.length, holdings: holdingCount, transactions: transactionCount, status: 'ok' };
   } catch (error) {
     await run.failed(error);
@@ -855,16 +859,19 @@ async function planTransactions(
   visibleAccounts: VisibleAccounts,
   run: SyncRun,
   writes: BatchItem<'sqlite'>[],
-): Promise<number> {
+): Promise<{ planned: number; added: number }> {
+  // Before the history is built, everything is new.
+  let added = plaidTransactions.filter((txn) => visibleAccounts.has(txn.account_id)).length;
   if (connection.historyAsOf) {
     const known = new Set<string>();
     for (const chunk of inChunks(plaidTransactions.map((txn) => txn.investment_transaction_id))) {
       const rows = await tenant.db
-        .select({ externalId: investmentTransactions.externalId })
-        .from(investmentTransactions)
-        .where(tenant.scope(investmentTransactions, inArray(investmentTransactions.externalId, chunk)));
+        .select({ externalId: transactions.externalId })
+        .from(transactions)
+        .where(tenant.scope(transactions, eq(transactions.source, 'plaid'), inArray(transactions.externalId, chunk)));
       for (const row of rows) if (row.externalId) known.add(row.externalId);
     }
+    added = plaidTransactions.filter((txn) => visibleAccounts.has(txn.account_id) && !known.has(txn.investment_transaction_id)).length;
     const late = plaidTransactions.filter(
       (txn) => visibleAccounts.has(txn.account_id) && !known.has(txn.investment_transaction_id) && txn.date < connection.historyAsOf!,
     );
@@ -885,10 +892,11 @@ async function planTransactions(
       id: crypto.randomUUID(),
       householdId: tenant.householdId,
       accountId: visibleAccounts.get(txn.account_id)!.id,
+      source: 'plaid' as const,
       externalId: txn.investment_transaction_id,
       securityId: txn.security_id ? (securityIds.get(txn.security_id) ?? null) : null,
       date: txn.date,
-      name: txn.name,
+      description: txn.name,
       type: txn.type,
       subtype: txn.subtype ?? null,
       quantity: txn.quantity,
@@ -896,17 +904,19 @@ async function planTransactions(
       price: txn.price,
       fees: txn.fees === null || txn.fees === undefined ? null : toMinor(txn.fees),
       currency: txn.iso_currency_code ?? 'USD',
+      createdAt: deps.now().getTime(),
     }));
   writes.push(
-    ...chunkRows(investmentTransactions, rows).map((chunk) =>
+    ...importedFrom(tenant, rows),
+    ...chunkRows(transactions, rows).map((chunk) =>
       tenant.db
-        .insert(investmentTransactions)
+        .insert(transactions)
         .values(chunk)
-        .onConflictDoNothing({ target: [investmentTransactions.accountId, investmentTransactions.externalId] }),
+        .onConflictDoNothing({ target: [transactions.accountId, transactions.source, transactions.externalId] }),
     ),
   );
   run.count('transactions', rows.length);
-  return rows.length;
+  return { planned: rows.length, added };
 }
 
 /* ------------------------------------------------------------------ */
@@ -1008,6 +1018,19 @@ export async function reconnectConnection(deps: Deps, tenant: Tenant, connection
   }
 }
 
+/**
+ * Statements deleting a file's transactions (imported into a linked account)
+ * from the day the institution's own begin: theirs are the record from there,
+ * and an import only fills in what came before.
+ */
+export function importedFrom(tenant: Tenant, rows: { accountId: string; date: string }[]): BatchItem<'sqlite'>[] {
+  const first = new Map<string, string>();
+  for (const row of rows) if (!first.has(row.accountId) || row.date < first.get(row.accountId)!) first.set(row.accountId, row.date);
+  return [...first].map(([accountId, date]) =>
+    tenant.db.delete(transactions).where(tenant.scope(transactions, eq(transactions.accountId, accountId), eq(transactions.source, 'import'), gte(transactions.date, date))),
+  );
+}
+
 /** All connections that should be synced by the daily job. */
 export async function activeConnections(tenant: Tenant): Promise<ConnectionRow[]> {
   return tenant.db
@@ -1020,6 +1043,6 @@ export async function activeConnections(tenant: Tenant): Promise<ConnectionRow[]
 export function purgeStatements(tenant: Tenant, accountId: string): BatchItem<'sqlite'>[] {
   return [
     tenant.db.delete(holdings).where(tenant.scope(holdings, eq(holdings.accountId, accountId))),
-    tenant.db.delete(investmentTransactions).where(tenant.scope(investmentTransactions, eq(investmentTransactions.accountId, accountId))),
+    tenant.db.delete(transactions).where(tenant.scope(transactions, eq(transactions.accountId, accountId), eq(transactions.source, 'plaid'))),
   ];
 }

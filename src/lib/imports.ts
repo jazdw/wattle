@@ -6,14 +6,16 @@
  * bank and card accounts; a CSV is dates and balances, or transactions
  * worked out from a balance you give (./csv, ./known).
  */
-import type { ImportedFile, ImportedHoldings } from '../../shared/schemas';
+import type { ImportedBalances, ImportedFile, ImportedHoldings } from '../../shared/schemas';
 import type { AccountType } from '../../shared/types';
 import type { Unanchored } from './known';
 import { csvAccounts, guessMapping, parseCsv, transactionsKind, type BalanceMapping } from './csv';
 import { isOfx, ofxAccounts } from './ofx';
 
 /** A transaction as read, with the institution's id for it and its description when the file has them (for the page; the server doesn't need them). */
-export type ReadTransaction = ImportedHoldings['transactions'][number] & { id?: string; description?: string };
+export type ReadTransaction = ImportedHoldings['transactions'][number];
+/** A bank or card account's transaction, as a balances file carries it. */
+export type CashTransaction = NonNullable<ImportedBalances['transactions']>[number];
 
 /** One account in the files. */
 export interface FileAccount {
@@ -24,6 +26,8 @@ export interface FileAccount {
   fileName?: string;
   /** What kind of account the file says it is (a bank or card statement), for a new one. */
   type?: AccountType;
+  /** Its kind within that, when the file says (shared/accounts.ts: checking, savings…). */
+  subtype?: string;
   file: ImportedFile;
   /** Transactions with no balance in the file: the file is worked out once one is known (./known). */
   unanchored?: Unanchored;
@@ -84,10 +88,10 @@ export function mergeAccounts(perFile: FileAccount[][]): FileAccount[] {
 }
 
 /** Transactions in several files as one: by the institution's id, else by their details, as many as the file with the most has. */
-function mergeTransactions(lists: ReadTransaction[][]): ReadTransaction[] {
-  const keep = new Map<string, ReadTransaction[]>();
+function mergeTransactions<T extends { id?: string; date: string; label: string; amount: number; security?: string | null; shares?: number }>(lists: T[][]): T[] {
+  const keep = new Map<string, T[]>();
   for (const list of lists) {
-    const here = new Map<string, ReadTransaction[]>();
+    const here = new Map<string, T[]>();
     for (const txn of list) {
       const key = txn.id ? `id:${txn.id}` : [txn.date, txn.label, txn.security, txn.shares, txn.amount].join('|');
       here.set(key, [...(here.get(key) ?? []), txn]);
@@ -110,15 +114,20 @@ export function combineAccounts(copies: FileAccount[]): FileAccount {
   const name = first.number ? `··${last4(first.number)}` : (first.fileName ?? 'the account');
   const unknownTypes = [...new Set(copies.flatMap((copy) => copy.unknownTypes))];
   if (copies.some((copy) => copy.file.kind !== first.file.kind)) throw new Error(`The files read ${name} in different ways.`);
-  const shared = { number: first.number, fileName: first.fileName, institution: copies.find((copy) => copy.institution)?.institution ?? null, type: copies.find((copy) => copy.type)?.type, unknownTypes };
+  const shared = { number: first.number, fileName: first.fileName, institution: copies.find((copy) => copy.institution)?.institution ?? null, type: copies.find((copy) => copy.type)?.type, subtype: copies.find((copy) => copy.subtype)?.subtype, unknownTypes };
   const withIds = copies.filter((copy) => (copy.unanchored?.transactions ?? (copy.file.kind === 'holdings' ? copy.file.transactions : [])).some((txn: ReadTransaction) => txn.id));
   if (withIds.length > 0 && withIds.length < copies.length && copies.some((copy) => copy.fileName)) throw new Error(`${name} is in a Quicken file and a CSV: import it from one of them, or its transactions would count twice.`);
   if (first.file.kind === 'balances') {
     const pending = copies.flatMap((copy) => (copy.unanchored?.kind === 'cash' ? [copy.unanchored.transactions] : []));
     if (pending.length === copies.length) return { ...shared, file: { kind: 'balances', rows: [] }, unanchored: { kind: 'cash', transactions: mergeTransactions(pending) } };
     if (pending.length > 0) throw new Error(`${name}: a file of balances and a file of transactions can't be combined.`);
-    const byDate = new Map(copies.flatMap((copy) => (copy.file.kind === 'balances' ? copy.file.rows : [])).map((row) => [row.date, row.balance]));
-    return { ...shared, file: { kind: 'balances', currency: first.file.currency, rows: [...byDate].map(([date, balance]) => ({ date, balance })).sort((a, b) => a.date.localeCompare(b.date)) } };
+    const balances = copies.map((copy) => copy.file as ImportedBalances);
+    const byDate = new Map(balances.flatMap((file) => file.rows).map((row) => [row.date, row.balance]));
+    const transactions = balances.some((file) => file.transactions) ? mergeTransactions(balances.map((file) => file.transactions ?? [])) : undefined;
+    return {
+      ...shared,
+      file: { kind: 'balances', currency: first.file.currency, rows: [...byDate].map(([date, balance]) => ({ date, balance })).sort((a, b) => a.date.localeCompare(b.date)), ...(transactions ? { transactions } : {}) },
+    };
   }
   const files = copies.map((copy) => copy.file as ImportedHoldings);
   if (new Set(files.map((file) => file.currency ?? '')).size > 1) throw new Error(`The files for ${name} are in different currencies.`);

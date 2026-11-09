@@ -8,7 +8,7 @@ import type { IsoDate } from '../../shared/dates';
 import { toMinor } from '../../shared/money';
 import type { ImportedFile, ImportedHoldings, ImportKind } from '../../shared/schemas';
 import type { FileAccount, ReadTransaction } from './imports';
-import { closestIncome, ticker } from './ofx';
+import { closestIncome, positionShares, ticker } from './ofx';
 
 /** RFC 4180-ish parser: quoted fields, escaped quotes, CRLF. Blank rows are dropped, or kept as [] (they separate a file's tables). */
 export function parseCsv(text: string, keepBlank = false): string[][] {
@@ -164,7 +164,9 @@ type TableKind = 'holdings' | 'investments' | 'cash' | null;
 function tableKind(header: string[]): TableKind {
   const columns = findColumns(header);
   const securities = columns.shares >= 0 && (columns.security >= 0 || columns.symbol >= 0);
-  if (securities && columns.date < 0 && columns.type < 0) return 'holdings';
+  // Holdings may give a value and a price instead of shares (positionShares).
+  const valued = columns.value >= 0 && columns.price >= 0 && (columns.security >= 0 || columns.symbol >= 0);
+  if ((securities || valued) && columns.date < 0 && columns.type < 0) return 'holdings';
   if (columns.date < 0) return null;
   if (securities) return 'investments';
   if (columns.amount >= 0 || columns.debit >= 0 || columns.credit >= 0) return 'cash';
@@ -262,9 +264,13 @@ export function csvAccounts(text: string): FileAccount[] | null {
       const name = cell(row, columns.security);
       const id = symbol ?? name;
       if (table === 'holdings') {
-        const shares = parseAmount(cell(row, columns.shares)) ?? 0;
+        // Its value to the cent gives the truer share count than the rounded one shown, if it has one.
+        const price = Math.abs(parseAmount(cell(row, columns.price)) ?? 0);
+        const value = parseAmount(cell(row, columns.value));
+        const shown = cell(row, columns.shares).replace(/[^0-9.-]/g, '') || null;
+        const shares = positionShares(shown, price, value) ?? 0;
         found.holdings ??= [];
-        found.holdings.push({ id, ticker: symbol, name: name || id, shares, price: Math.abs(parseAmount(cell(row, columns.price)) ?? 0) });
+        found.holdings.push({ id, ticker: symbol, name: name || id, shares, price });
         return;
       }
       if (/pending/i.test(cell(row, columns.status))) return;

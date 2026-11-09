@@ -358,6 +358,8 @@ function AccountList({
               {account.mask && <span className="shrink-0 font-normal text-muted-foreground">··{account.mask}</span>}
             </p>
             <p className="flex flex-wrap items-center gap-1.5 text-xs text-muted-foreground">
+              {/* A linked account's institution heads its login's card. */}
+              {account.source === 'manual' && account.institutionName && <span>{account.institutionName} ·</span>}
               {accountKind(account.type, account.subtype)}
               <Badge variant={account.ownerUserId ? 'outline' : 'gold'}>{ownerName(account.ownerUserId)}</Badge>
               {account.isHidden && <Badge variant="outline">Hidden — not synced or counted</Badge>}

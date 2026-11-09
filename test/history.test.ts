@@ -1,4 +1,5 @@
 import { eq } from 'drizzle-orm';
+import type { TransactionsResponse } from '../shared/types';
 import { describe, expect, it } from 'vitest';
 import * as schema from '../server/db/schema';
 import { Tenant } from '../server/db/tenant';
@@ -48,7 +49,7 @@ describe('transaction history arriving after the link', () => {
     plaid.state.transactions.push(buy('t-old', '2025-12-01', 3, 90));
     deps.now = () => new Date('2026-10-09T12:00:00Z');
     await syncConnection(deps, tenant, connection.id, 'manual');
-    const stored = await deps.db.select({ id: schema.investmentTransactions.externalId }).from(schema.investmentTransactions);
+    const stored = await deps.db.select({ id: schema.transactions.externalId }).from(schema.transactions).where(eq(schema.transactions.source, 'plaid'));
     expect(stored.map((row) => row.id).sort()).toEqual(['t-old', 't-recent']);
     expect(new Set(plaid.state.transactionStarts)).toEqual(new Set(['2024-10-08', '2024-10-09']));
   });
@@ -141,10 +142,10 @@ describe('bank history reports', () => {
       },
     });
     const { deps } = await link(plaid, {}, 'account');
-    const rows = await deps.db.select().from(schema.bankTransactions).orderBy(schema.bankTransactions.date);
-    expect(rows.map((row) => [row.externalId, row.date, row.amount, row.description])).toEqual([
-      ['bt-1', '2026-10-01', 100_00, 'Interest'],
-      ['bt-2', '2026-10-07', -25_50, 'Coffee refund'],
+    const rows = await deps.db.select().from(schema.transactions).orderBy(schema.transactions.date);
+    expect(rows.map((row) => [row.source, row.externalId, row.date, row.amount, row.description])).toEqual([
+      ['report', 'bt-1', '2026-10-01', 100_00, 'Interest'],
+      ['report', 'bt-2', '2026-10-07', -25_50, 'Coffee refund'],
     ]);
     const [report] = await deps.db.select().from(schema.plaidResponses).where(eq(schema.plaidResponses.endpoint, '/asset_report/get'));
     expect(JSON.parse(report.body).items[0].accounts[0].transactions).toHaveLength(3);
@@ -257,11 +258,94 @@ describe('account transactions', () => {
       ['2026-10-01', 'VTI', 1, 100_00],
       ['2026-09-01', 'VTI', 2, 200_00],
     ]);
+    expect(brokerage.transactions.map((row: { kind: string; kindByYou: boolean; source: string }) => [row.source, row.kind, row.kindByYou])).toEqual([
+      ['plaid', 'buy', false],
+      ['plaid', 'buy', false],
+    ]);
     const checking = (await api(`/api/accounts/${id('chk')}/transactions`)).body;
-    expect(checking).toMatchObject({ kind: 'bank', from: '2026-10-02', transactions: [{ date: '2026-10-02', description: 'Interest', amount: -1_50 }] });
+    expect(checking).toMatchObject({ kind: 'bank', from: '2026-10-02', transactions: [{ date: '2026-10-02', description: 'Interest', amount: -1_50, source: 'report', kind: 'income', kindByYou: false }] });
 
     // Another household's account isn't reachable.
     const other = await createHousehold(deps, 'Other', 'other@example.com');
     expect((await client(deps, other.cookie)(`/api/accounts/${id('brk')}/transactions`)).status).toBe(404);
+  });
+
+  it('filters an account’s transactions by dates, words in the description, or an amount', async () => {
+    const plaid = fakePlaid({
+      accounts: [account('chk', 'depository', 500)],
+      historicalBalances: { chk: [{ date: '2026-09-01', current: 500 }] },
+      reportTransactions: {
+        chk: [
+          { transaction_id: 'bt-1', date: '2026-09-02', amount: 12.5, original_description: 'Example Coffee 50%', pending: false },
+          { transaction_id: 'bt-2', date: '2026-09-15', amount: -250, original_description: 'Payroll', pending: false },
+          { transaction_id: 'bt-3', date: '2026-10-01', amount: 40, original_description: 'Example Grocer', pending: false },
+        ],
+      },
+      itemProducts: ['assets'],
+    });
+    const { api } = await link(plaid, {}, 'account');
+    const [checking] = (await api('/api/accounts')).body.accounts as { id: string }[];
+    const dates = async (query: string) => {
+      const body = (await api(`/api/accounts/${checking.id}/transactions?${query}`)).body as TransactionsResponse;
+      return { dates: body.transactions.map((row) => row.date), matched: body.matched, from: body.from };
+    };
+    expect(await dates('from=2026-09-10&to=2026-09-30')).toEqual({ dates: ['2026-09-15'], matched: 1, from: '2026-09-02' });
+    expect(await dates('q=example')).toMatchObject({ dates: ['2026-10-01', '2026-09-02'] });
+    // An amount, whichever way it went.
+    expect(await dates('q=250')).toMatchObject({ dates: ['2026-09-15'] });
+    expect(await dates('q=%2412.50')).toMatchObject({ dates: ['2026-09-02'] });
+    // A % searched for is a %, not "anything".
+    expect(await dates('q=50%25')).toMatchObject({ dates: ['2026-09-02'] });
+    expect(await dates('q=0%25')).toMatchObject({ dates: ['2026-09-02'] });
+    expect(await dates('q=r%25e')).toMatchObject({ dates: [] });
+  });
+
+  it("lists every visible account's transactions together, newest first, each with its account", async () => {
+    const plaid = fakePlaid({
+      accounts: [account('chk', 'depository', 500), account('sav', 'depository', 900)],
+      historicalBalances: { chk: [{ date: '2026-09-01', current: 500 }], sav: [{ date: '2026-09-01', current: 900 }] },
+      reportTransactions: {
+        chk: [{ transaction_id: 'bt-1', date: '2026-09-02', amount: 12.5, original_description: 'Example Coffee', pending: false }],
+        sav: [{ transaction_id: 'bt-2', date: '2026-09-03', amount: -1.25, original_description: 'Interest', pending: false }],
+      },
+      itemProducts: ['assets'],
+    });
+    const { deps, api } = await link(plaid, {}, 'account');
+    const accounts = (await api('/api/accounts')).body.accounts as { id: string; name: string }[];
+    const listed = async (cookieApi = api) => ((await cookieApi('/api/transactions')).body as TransactionsResponse).transactions.map((row) => [row.date, accounts.find((one) => one.id === row.accountId)?.name ?? row.accountId]);
+    expect(await listed()).toEqual([
+      ['2026-09-03', 'sav'],
+      ['2026-09-02', 'chk'],
+    ]);
+    // A hidden account's aren't listed; another household sees none of them.
+    await api(`/api/accounts/${accounts.find((one) => one.name === 'sav')!.id}`, { method: 'PATCH', json: { isHidden: true } });
+    expect(await listed()).toEqual([['2026-09-02', 'chk']]);
+    const other = await createHousehold(deps, 'Other', 'other@example.com');
+    expect(await listed(client(deps, other.cookie))).toEqual([]);
+  });
+
+  it('keeps the kind you set on a transaction, until you set it back to automatic', async () => {
+    const plaid = fakePlaid({
+      accounts: [account('chk', 'depository', 500)],
+      historicalBalances: { chk: [{ date: '2026-10-01', current: 500 }] },
+      reportTransactions: { chk: [{ transaction_id: 'bt-1', date: '2026-10-02', amount: 250, original_description: 'To savings', pending: false }] },
+      itemProducts: ['assets'],
+    });
+    const { deps, api } = await link(plaid, {}, 'account');
+    const [checking] = (await api('/api/accounts')).body.accounts as { id: string }[];
+    const listed = async () => (await api(`/api/accounts/${checking.id}/transactions`)).body.transactions[0] as { id: string; kind: string; kindByYou: boolean };
+    const transaction = await listed();
+    expect(transaction).toMatchObject({ kind: 'withdrawal', kindByYou: false });
+
+    expect((await api(`/api/transactions/${transaction.id}`, { method: 'PATCH', json: { kind: 'fee' } })).status).toBe(200);
+    expect(await listed()).toMatchObject({ kind: 'fee', kindByYou: true });
+    expect((await api(`/api/transactions/${transaction.id}`, { method: 'PATCH', json: { kind: 'nonsense' } })).status).toBe(400);
+    expect((await api(`/api/transactions/${transaction.id}`, { method: 'PATCH', json: { kind: null } })).status).toBe(200);
+    expect(await listed()).toMatchObject({ kind: 'withdrawal', kindByYou: false });
+
+    // Not another household's.
+    const other = await createHousehold(deps, 'Other', 'other@example.com');
+    expect((await client(deps, other.cookie)(`/api/transactions/${transaction.id}`, { method: 'PATCH', json: { kind: 'fee' } })).status).toBe(404);
+    expect(await listed()).toMatchObject({ kind: 'withdrawal' });
   });
 });

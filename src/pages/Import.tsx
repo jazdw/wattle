@@ -8,11 +8,13 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { ArrowLeft } from 'lucide-react';
 import { useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
+import { accountLabel } from '../../shared/accounts';
 import { dateRange } from '../../shared/dates';
 import { CURRENCIES, type Currency } from '../../shared/money';
 import type { ImportRequest } from '../../shared/schemas';
 import type { AccountSummary, AccountType, ImportCheck, ImportProblem, ImportResponse, TickerSuggestion } from '../../shared/types';
 import { api } from '../api';
+import { SubtypeSelect } from '../components/AccountDialogs';
 import { PageHeader } from '../components/Layout';
 import { Badge } from '../components/ui/badge';
 import { Button } from '../components/ui/button';
@@ -23,7 +25,7 @@ import { Switch } from '../components/ui/switch';
 import { useAccounts } from '../hooks/queries';
 import { useAuth } from '../hooks/useAuth';
 import { extractBalances, parseAmount, type BalanceMapping, type DateFormat } from '../lib/csv';
-import { ACCOUNT_TYPE_OPTIONS, longDate, money, quantity } from '../lib/format';
+import { ACCOUNT_TYPE_OPTIONS, accountKind, longDate, money, quantity } from '../lib/format';
 import { previewRows } from '../lib/importPreview';
 import { combineAccounts, fileValue, last4, readFiles, type FileAccount, type ReadFiles } from '../lib/imports';
 import { withKnown, type Known } from '../lib/known';
@@ -32,7 +34,7 @@ import { cn } from '../lib/utils';
 /** Where an account in the files goes: one of yours, a new manual account, with another file's, or nowhere. */
 type Choice =
   | { to: 'account'; accountId: string }
-  | { to: 'new'; name: string; type: AccountType; currency: Currency; ownerUserId: string | null }
+  | { to: 'new'; name: string; institutionName: string; type: AccountType; subtype: string; currency: Currency; ownerUserId: string | null }
   /** The same account as another file's (files with no account number, such as a CSV a year): imported together, where that one goes. */
   | { to: 'with'; index: number }
   | { to: 'skip' }
@@ -128,10 +130,11 @@ export function Import({ checkDelay = CHECK_DELAY_MS }: { checkDelay?: number })
 
   function defaultNew(account: FileAccount): Choice {
     const currency = isCurrency(account.file.currency) ? account.file.currency : shown;
-    // The last digits are kept as the account's mask and shown beside its name, as a linked account's are.
-    const name = account.institution ?? account.fileName?.replace(/\.[^.]+$/, '') ?? 'Imported account';
+    const type: AccountType = account.file.kind === 'holdings' ? 'investment' : (account.type ?? 'depository');
+    // Shown with its institution and last digits, so its name says what it is ("Checking"), or else what the file's called.
+    const name = account.subtype ? accountKind(type, account.subtype) : account.institution ? accountKind(type, null) : (account.fileName?.replace(/\.[^.]+$/, '') ?? 'Imported account');
     // Yours, as a manual account you add is (change it later with Edit account).
-    return { to: 'new', name, type: account.file.kind === 'holdings' ? 'investment' : (account.type ?? 'depository'), currency, ownerUserId: me?.user.id ?? null };
+    return { to: 'new', name, institutionName: account.institution ?? '', type, subtype: account.subtype ?? '', currency, ownerUserId: me?.user.id ?? null };
   }
   function choose(index: number, choice: Choice) {
     setChoices(choices.map((current, at) => (at === index ? choice : current)));
@@ -203,7 +206,7 @@ export function Import({ checkDelay = CHECK_DELAY_MS }: { checkDelay?: number })
           const target =
             choice.to === 'account'
               ? { accountId: choice.accountId }
-              : { new: { name: choice.name.trim(), type: choice.type, currency: choice.currency, institutionName: read.institution, mask: last4(read.number), ownerUserId: choice.ownerUserId } };
+              : { new: { name: choice.name.trim(), type: choice.type, subtype: choice.subtype || null, currency: choice.currency, institutionName: choice.institutionName.trim() || null, mask: last4(read.number), ownerUserId: choice.ownerUserId } };
           const file = account.file.kind === 'holdings' ? { ...account.file, securities: account.file.securities.map((security) => (security.ticker ? security : { ...security, ticker: tickerFor(security.id) || null })) } : account.file;
           return [{ label: labelOf(read), target, file }];
         }),
@@ -319,7 +322,7 @@ export function Import({ checkDelay = CHECK_DELAY_MS }: { checkDelay?: number })
             <CardHeader>
               <CardTitle>Securities without a ticker</CardTitle>
               <CardDescription>
-                Give a security its market ticker to value it at each day's close. Leave it blank for a fund with no market price (a plan's own funds): it's valued from the file's prices, on a straight line between them.
+                Each is valued at its ticker's close every day. Tickers found by name are filled in for you; change any, or leave one blank for a fund with no market price (a plan's own funds), valued from the file's prices on a straight line between them.
               </CardDescription>
             </CardHeader>
             <CardContent className="grid gap-2 text-sm">
@@ -332,7 +335,9 @@ export function Import({ checkDelay = CHECK_DELAY_MS }: { checkDelay?: number })
                       <p className="truncate">{security.name}</p>
                       <p className="text-xs text-muted-foreground">
                         {security.id}
-                        {suggestion && value.trim().toUpperCase() === suggestion.ticker && (suggestion.from === 'yours' ? ' · the same name as one of your securities' : ' · found by its name: check it')}
+                        {suggestion &&
+                          value.trim().toUpperCase() === suggestion.ticker &&
+                          (suggestion.from === 'yours' ? ' · the same name as one of your securities' : suggestion.exact ? ' · found by its name' : ' · a similar name: check it')}
                       </p>
                     </div>
                     <Input aria-label={`Ticker for ${security.name}`} value={value} placeholder={suggestions.isLoading ? 'Looking…' : 'None'} onChange={(event) => setTickers({ ...tickers, [security.id]: event.target.value })} />
@@ -457,7 +462,7 @@ function AccountSection({
                   next === 'skip' || next === 'choose'
                     ? { to: next }
                     : next === 'new'
-                      ? { to: 'new', name: '', type: 'investment', currency, ownerUserId: null }
+                      ? { to: 'new', name: '', institutionName: '', type: 'investment', subtype: '', currency, ownerUserId: null }
                       : next.startsWith('with:')
                         ? { to: 'with', index: Number(next.slice(5)) }
                         : { to: 'account', accountId: next },
@@ -467,7 +472,7 @@ function AccountSection({
               <option value="choose">Choose…</option>
               {accounts.map((candidate) => (
                 <option key={candidate.id} value={candidate.id}>
-                  {candidate.name}
+                  {accountLabel(candidate)}
                 </option>
               ))}
               <option value="new">New account</option>
@@ -484,9 +489,13 @@ function AccountSection({
               <Field label="New account's name">
                 <Input value={choice.name} onChange={(event) => onChoose({ ...choice, name: event.target.value })} />
               </Field>
+              {/* As the file names it, to correct (some files give a code rather than a name). */}
+              <Field label="Institution">
+                <Input value={choice.institutionName} placeholder="None" onChange={(event) => onChoose({ ...choice, institutionName: event.target.value })} />
+              </Field>
               {file.kind === 'balances' && (
                 <Field label="Type">
-                  <NativeSelect value={choice.type} onChange={(event) => onChoose({ ...choice, type: event.target.value as AccountType })}>
+                  <NativeSelect value={choice.type} onChange={(event) => onChoose({ ...choice, type: event.target.value as AccountType, subtype: '' })}>
                     {ACCOUNT_TYPE_OPTIONS.map((option) => (
                       <option key={option.value} value={option.value}>
                         {option.label}
@@ -495,6 +504,7 @@ function AccountSection({
                   </NativeSelect>
                 </Field>
               )}
+              <SubtypeSelect type={choice.type} value={choice.subtype} onChange={(subtype) => onChoose({ ...choice, subtype })} />
               <Field label="Currency">
                 <NativeSelect value={choice.currency} onChange={(event) => onChoose({ ...choice, currency: event.target.value as Currency })}>
                   {CURRENCIES.map((option) => (

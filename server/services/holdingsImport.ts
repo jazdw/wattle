@@ -25,7 +25,7 @@
  * over anything from the institution (shared/quality.ts). The days are
  * written as jobs, one window each (a load can be thousands of rows).
  */
-import { and, eq, gte, inArray, lte, min, sql } from 'drizzle-orm';
+import { and, eq, gte, inArray, lte, min, ne, sql } from 'drizzle-orm';
 import type { BatchItem } from 'drizzle-orm/batch';
 import { suggestClassification } from '../../shared/classify';
 import { addDays, dateRange, marketDate, type IsoDate } from '../../shared/dates';
@@ -33,7 +33,7 @@ import { leastFinal } from '../../shared/quality';
 import type { ImportedHoldings, ImportKind, ImportRequest } from '../../shared/schemas';
 import type { ImportCheck, ImportedAccount, ImportProblem, ImportResponse, TickerSuggestion } from '../../shared/types';
 import { chunkRows, inChunks, runAtomic } from '../db/batch';
-import { accountDaily, accounts, holdingDaily, holdings, householdMembers, jobs, securities } from '../db/schema';
+import { accountDaily, accounts, holdingDaily, holdings, householdMembers, jobs, securities, transactions } from '../db/schema';
 import type { Tenant } from '../db/tenant';
 import { describeError } from '../lib/errors';
 import { HttpError, notFound } from '../lib/http';
@@ -47,6 +47,7 @@ import { accountLease, connectionLease, Lease } from './lease';
 import { closeLookup, datedCloseLookup, describeTickers, ensureCloses } from './pricing';
 import { QUALITY_SET, replaceWhere } from './quality';
 import { importedEstimates, repriced, snapshotHousehold } from './snapshots';
+import { queueMatching } from './transfers';
 import { isCashSecurity, priceOn } from './valuation';
 
 /** Transactions that move shares (of a fund, or between cash and a money market fund). */
@@ -81,7 +82,11 @@ interface BlockPayload {
   prices?: Record<string, [IsoDate, number][]>;
   /** A manual account: the file replaces its snapshot days too (there's no institution feed to keep). */
   replaceSnapshots?: boolean;
+  /** The file's transactions dated in this window, stored with the account's (none written when absent: a job queued before they were kept). */
+  stored?: StoredTransaction[];
 }
+
+type StoredTransaction = typeof transactions.$inferInsert;
 
 /**
  * Share counts in files are rounded (to 3 decimals, or 4): a total may be
@@ -186,6 +191,8 @@ interface Plan {
   replacesHoldings: boolean;
   blocks: BlockPayload[];
   balances?: { date: string; balance: number }[];
+  /** A balances file's transactions, stored with the account's after its balances. */
+  stored?: StoredTransaction[];
   /** Market funds priced from the file, without closes. */
   estimated?: string[];
   /** Each trade's close (by the file's id for the security), for a preview. */
@@ -208,6 +215,9 @@ export async function importAccounts(deps: Deps, tenant: Tenant, request: Import
   if (shared.length > 0) await runAtomic(tenant.db, shared);
   const results: ImportedAccount[] = [];
   let snapshot = false;
+  // One group for the import's jobs: matching transfers waits for all of them.
+  const runId = crypto.randomUUID();
+  let queued = false;
   for (const plan of plans) {
     if (plan.statements.length > 0) {
       const lease = plan.replacesHoldings ? await Lease.acquireOrBusy(deps, tenant, accountLease(plan.account.id), 'Someone else is changing this account. Try again in a moment.') : null;
@@ -224,19 +234,28 @@ export async function importAccounts(deps: Deps, tenant: Tenant, request: Import
     }
     if (plan.balances) {
       plan.days = await writeBalances(deps, tenant, plan.account, plan.balances, 'import');
+      if (plan.stored && plan.stored.length > 0) {
+        // Its transactions, in batches: each safe to repeat (by their ids), so a re-import finishes what one cut short.
+        const dates = plan.stored.map((row) => row.date).sort();
+        const deletes = await staleTransactionDeletes(tenant, plan.account.id, dates[0], dates.at(-1)!, plan.stored);
+        if (deletes.length > 0) await runAtomic(tenant.db, deletes);
+        for (let index = 0; index < plan.stored.length; index += STORED_PER_BATCH) await runAtomic(tenant.db, transactionUpserts(tenant, plan.stored.slice(index, index + STORED_PER_BATCH)));
+      }
     } else {
-      const runId = crypto.randomUUID();
       await enqueue(
         deps,
         tenant,
-        plan.blocks.map((block) => ({ id: `import:${runId}:block:${block.from}`, type: 'import_block' as const, payload: { ...block }, groupId: `import:${runId}`, connectionId: plan.account.connectionId })),
+        plan.blocks.map((block) => ({ id: `import:${runId}:${plan.account.id}:block:${block.from}`, type: 'import_block' as const, payload: { ...block }, groupId: `import:${runId}`, connectionId: plan.account.connectionId })),
       );
+      queued ||= plan.blocks.length > 0;
       snapshot ||= plan.account.source === 'manual';
     }
     results.push({ label: plan.label, accountId: plan.account.id, created: plan.created, days: plan.days, from: plan.from, to: plan.to, estimated: plan.estimated ?? [] });
   }
   // A manual account's holdings changed: today's value follows them.
   if (snapshot) await snapshotHousehold(deps, tenant, today);
+  // The files' transfers between your accounts, once their transactions are written.
+  await queueMatching(deps, tenant, `import:${runId}`, queued ? `import:${runId}` : undefined);
   return { accounts: results };
 }
 
@@ -288,7 +307,7 @@ async function prepareImport(deps: Deps, tenant: Tenant, request: ImportRequest)
         institutionName: fresh.institutionName ?? null,
         mask: fresh.mask ?? null,
         type: fresh.type,
-        subtype: null,
+        subtype: fresh.subtype || null,
         currency: fresh.currency,
         ownerUserId: fresh.ownerUserId ?? null,
         isHidden: false,
@@ -351,7 +370,9 @@ async function prepareImport(deps: Deps, tenant: Tenant, request: ImportRequest)
     if (created) base.statements.push(tenant.db.insert(accounts).values(account));
     if (entry.file.kind === 'balances') {
       const dates = entry.file.rows.map((row) => row.date).sort();
-      plans.push({ ...base, balances: entry.file.rows, days: dateRange(dates[0], dates.at(-1)!).length, from: dates[0], to: dates.at(-1)! });
+      const until = await keptUntil(tenant, account, dates.at(-1)!);
+      const stored = entry.file.transactions ? fileTransactionRows(tenant, account, entry.file.transactions.filter((txn) => txn.date <= until), now) : undefined;
+      plans.push({ ...base, balances: entry.file.rows, stored, days: dateRange(dates[0], dates.at(-1)!).length, from: dates[0], to: dates.at(-1)! });
       continue;
     }
     const plan = await planHoldings(deps, tenant, { ...base, file: entry.file, today, now, cashIds, byTicker, hasCloses, closes, problem: (text, date) => problem(entry.label, text, date) });
@@ -592,6 +613,14 @@ async function planHoldings(deps: Deps, tenant: Tenant, context: HoldingsContext
     );
   }
 
+  // The file's transactions, stored with the account's: each window's with its days.
+  const until = await keptUntil(tenant, account, end);
+  const stored = fileTransactionRows(
+    tenant,
+    account,
+    file.transactions.filter((txn) => txn.date <= until).map((txn) => ({ ...txn, security: txn.security ? securityOf.get(txn.security)! : null, fileSecurity: txn.security })),
+    now,
+  );
   const size = daysPerBlock(deps, holdingsNow.length);
   const blocks = windows(start, end, size).map(([from, to]): BlockPayload => ({
     accountId: account.id,
@@ -604,6 +633,7 @@ async function planHoldings(deps: Deps, tenant: Tenant, context: HoldingsContext
     cashSecurityId: cashSecurityId!,
     ...(Object.keys(prices).length > 0 ? { prices } : {}),
     ...(manual ? { replaceSnapshots: true } : {}),
+    stored: stored.filter((row) => row.date >= from && row.date <= to),
   }));
   return {
     label: context.label,
@@ -619,6 +649,109 @@ async function planHoldings(deps: Deps, tenant: Tenant, context: HoldingsContext
     closes: tradeCloses,
   };
 }
+
+/** A file's transaction as importAccounts stores it: `security` is the household's id for it. */
+interface FileTransaction {
+  id?: string;
+  date: IsoDate;
+  kind: ImportKind;
+  label: string;
+  description?: string;
+  /** Cents in (+) or out (−), as the file has it. */
+  amount: number;
+  security?: string | null;
+  /** The file's own id for the security, for a row without an id of its own. */
+  fileSecurity?: string | null;
+  shares?: number;
+  price?: number;
+  charges?: number;
+}
+
+/**
+ * A file's transactions as the account's: the file's id for each (a
+ * Quicken FITID), else one from its details and its place among identical
+ * rows, so a re-import finds the same rows again (keeping a kind you set
+ * and its transfer). The file's kind is kept in `subtype`
+ * (shared/transactionKinds.ts); amounts are stored positive out.
+ */
+function fileTransactionRows(tenant: Tenant, account: Account, list: FileTransaction[], now: number): StoredTransaction[] {
+  const seen = new Map<string, number>();
+  return list.map((txn) => {
+    const details = [txn.date, txn.label, txn.amount, txn.fileSecurity ?? '', txn.shares ?? 0].join(':');
+    const place = seen.get(details) ?? 0;
+    seen.set(details, place + 1);
+    return {
+      id: crypto.randomUUID(),
+      householdId: tenant.householdId,
+      accountId: account.id,
+      source: 'import' as const,
+      externalId: txn.id ?? `row:${details}:${place}`,
+      date: txn.date,
+      amount: -txn.amount,
+      currency: account.currency,
+      type: txn.label,
+      subtype: txn.kind,
+      description: txn.description ?? null,
+      securityId: txn.security ?? null,
+      quantity: txn.shares ?? 0,
+      price: txn.price ?? null,
+      fees: txn.charges ?? null,
+      createdAt: now,
+    };
+  });
+}
+
+/**
+ * The last day a file's transactions are kept for: a linked account's come
+ * from Plaid (or its bank reports) from their first one on, so the file's
+ * stop the day before; never past the days the file is written for.
+ */
+async function keptUntil(tenant: Tenant, account: Account, end: IsoDate): Promise<IsoDate> {
+  if (account.source === 'manual') return end;
+  const [first] = await tenant.db
+    .select({ date: min(transactions.date) })
+    .from(transactions)
+    .where(tenant.scope(transactions, eq(transactions.accountId, account.id), ne(transactions.source, 'import')));
+  return first?.date && addDays(first.date, -1) < end ? addDays(first.date, -1) : end;
+}
+
+/** Statements deleting the account's imported transactions in `from`–`to` that the file no longer has. */
+async function staleTransactionDeletes(tenant: Tenant, accountId: string, from: IsoDate, to: IsoDate, rows: StoredTransaction[]): Promise<BatchItem<'sqlite'>[]> {
+  const existing = await tenant.db
+    .select({ id: transactions.id, externalId: transactions.externalId })
+    .from(transactions)
+    .where(tenant.scope(transactions, eq(transactions.accountId, accountId), eq(transactions.source, 'import'), gte(transactions.date, from), lte(transactions.date, to)));
+  const keep = new Set(rows.map((row) => row.externalId));
+  const stale = existing.filter((row) => !keep.has(row.externalId)).map((row) => row.id);
+  return inChunks(stale).map((ids) => tenant.db.delete(transactions).where(tenant.scope(transactions, inArray(transactions.id, ids))));
+}
+
+/** Statements storing a file's transactions, each upserted by its id: a kind you set is kept. */
+function transactionUpserts(tenant: Tenant, rows: StoredTransaction[]): BatchItem<'sqlite'>[] {
+  return chunkRows(transactions, rows).map((chunk) =>
+    tenant.db
+      .insert(transactions)
+      .values(chunk)
+      .onConflictDoUpdate({
+        target: [transactions.accountId, transactions.source, transactions.externalId],
+        set: {
+          date: sql`excluded.date`,
+          amount: sql`excluded.amount`,
+          currency: sql`excluded.currency`,
+          type: sql`excluded.type`,
+          subtype: sql`excluded.subtype`,
+          description: sql`excluded.description`,
+          securityId: sql`excluded.security_id`,
+          quantity: sql`excluded.quantity`,
+          price: sql`excluded.price`,
+          fees: sql`excluded.fees`,
+        },
+      }),
+  );
+}
+
+/** Rows stored per batch for a balances file's transactions (a block's are written with its days). */
+const STORED_PER_BATCH = 500;
 
 /** import_block: one window of an imported account's days, walked back and written as imported. */
 export async function importBlock({ deps, tenant, job, renew }: JobContext): Promise<Record<string, unknown>> {
@@ -687,7 +820,9 @@ export async function importBlock({ deps, tenant, job, renew }: JobContext): Pro
   try {
     await renew();
     await lease.renew();
+    const stored = block.stored ? [...(await staleTransactionDeletes(tenant, account.id, block.from, block.to, block.stored)), ...transactionUpserts(tenant, block.stored)] : [];
     await runAtomic(tenant.db, [
+      ...stored,
       // Positions rebuilt, carried or imported before for these days give way: the file says what was held.
       tenant.db
         .delete(holdingDaily)
@@ -716,7 +851,7 @@ export async function importBlock({ deps, tenant, job, renew }: JobContext): Pro
   } finally {
     await lease.forceRelease();
   }
-  return { days: accountRows.length };
+  return { days: accountRows.length, transactions: block.stored?.length ?? 0 };
 }
 
 /**
@@ -800,7 +935,7 @@ export async function suggestTickers(deps: Deps, tenant: Tenant, wanted: { id: s
     const key = nameKey(name);
     const own = yours.get(key);
     if (own) {
-      suggestions.push({ id, ticker: own, from: 'yours' });
+      suggestions.push({ id, ticker: own, from: 'yours', exact: true });
       continue;
     }
     if (!deps.prices?.search || key.length < 4) continue;
@@ -826,7 +961,7 @@ export async function suggestTickers(deps: Deps, tenant: Tenant, wanted: { id: s
       // Several listings under one name (a when-issued XYZV beside XYZ): the exact name, then the shortest ticker.
       match = named.sort((a, b) => Number(nameKey(b.name) === key) - Number(nameKey(a.name) === key) || a.ticker.length - b.ticker.length)[0];
     }
-    if (match) suggestions.push({ id, ticker: match.ticker, from: 'search' });
+    if (match) suggestions.push({ id, ticker: match.ticker, from: 'search', exact: nameKey(match.name) === key });
   }
   return suggestions;
 }

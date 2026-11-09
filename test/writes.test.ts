@@ -13,7 +13,7 @@ const REVIEWED: Record<string, Record<string, string>> = {
     connections: 'connection lease; status via statusStatement (newest wins)',
     accounts: 'connection lease, in the sync pass batch',
     holdings: 'connection lease, in the sync pass batch',
-    investmentTransactions: 'connection lease, in the sync pass batch',
+    transactions: "connection lease, in the sync pass batch; insert-or-ignore by (account, source, Plaid's id), and an import's rows from the first of Plaid's on deleted in the same batch",
     securities: 'connection lease; new ones get derived ids (shared across connections)',
   },
   'server/services/backfill.ts': {
@@ -27,12 +27,13 @@ const REVIEWED: Record<string, Record<string, string>> = {
     holdingDaily: "import jobs: as accountDaily; rebuilt and carried positions in the window are deleted in the same batch (a manual account's snapshot ones too)",
     holdings: "statements import: a manual account's holdings replaced under its lease, atomic with the version bump (like the manual holdings editor)",
     accounts: 'statements import: the holdings version bump, under the account lease, atomic with the holdings',
+    transactions: "import jobs: each window's rows upserted by (account, source, the file's id), never touching a kind you set, and the window's imported rows the file no longer has deleted, atomic with its days; a balances file's in batches after its balances, each safe to repeat",
   },
   'server/services/assetReports.ts': {
     connections: 'connection lease, atomic with the balances and log row',
     accountDaily: 'connection lease, atomic with the status and log row (each account job: its balances only, replacing carried-forward rows; safe to repeat)',
     jobs: "moving a waiting report check's run_after to now: one conditional update; the job runner's claim still decides who runs it",
-    bankTransactions: 'connection lease, atomic with the balances; insert-or-ignore by (account, Plaid transaction id), safe to repeat',
+    transactions: "connection lease, atomic with the balances; insert-or-ignore by (account, source, Plaid transaction id), and an import's rows from the report's first on deleted in the same batch; safe to repeat",
   },
   'server/routes/plaid.ts': {
     connections: 'webhooks: status via statusStatement (newest wins), consent warning and new-accounts columns; no lease needed',
@@ -45,6 +46,13 @@ const REVIEWED: Record<string, Record<string, string>> = {
     holdingDaily: 'hide/purge: connection + snapshot leases',
     holdings: 'manual holdings: account lease + version, atomic',
     securities: 'manual holdings: account lease; never modifies Plaid-owned rows; derived ids',
+  },
+  'server/routes/transactions.ts': {
+    transactions: "the kind you set: a single update of that one column (syncs and imports never write it)",
+    transfers: "yours: confirming, rejecting or linking a pair, atomic with removing other suggestions for its two sides; partial unique indexes keep each transaction in one link at most, so two at once can't both link it",
+  },
+  'server/services/transfers.ts': {
+    transfers: "matching: one atomic batch; automatic links and suggestions insert-or-ignore by the pair (a suggestion becomes automatic only while still a suggestion), so yours are never changed, and the partial unique indexes refuse a second link for a transaction",
   },
   'server/routes/portfolio.ts': {
     holdingDaily: 'CSV import: one atomic batch',
