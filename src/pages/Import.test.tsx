@@ -260,5 +260,18 @@ describe('Import page', () => {
       ],
     });
   });
-});
 
+  it('checks an account as soon as it has somewhere to go, before the others do', async () => {
+    server.use(http.post('*/api/imports/tickers', () => HttpResponse.json({ suggestions: [] })));
+    checked();
+    const { user } = await openImport();
+    upload(sgmlAccounts(['55551111', '66665678']));
+    await user.selectOptions(await screen.findByLabelText('Import ··1111 into'), 'new');
+    // Only the placed one is checked; Import waits for the other.
+    await expect.poll(() => (sent('POST /api/imports/check').at(-1)?.body as { accounts: { label: string }[] } | undefined)?.accounts.map((account) => account.label)).toEqual(['··1111']);
+    expect(await screen.findByText(/Checked so far/)).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Import' })).toBeDisabled();
+    await user.selectOptions(screen.getByLabelText('Import ··5678 into'), 'skip');
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Import' })).toBeEnabled());
+  });
+});

@@ -51,8 +51,8 @@ const isCurrency = (value: string | undefined): value is Currency => CURRENCIES.
 const TICKER = /^[A-Z][A-Z0-9.-]{0,9}$/;
 /** How the import names an account in the files: its last digits, or the file for one without a number. */
 const labelOf = (account: FileAccount) => (account.number ? `··${last4(account.number)}` : (account.fileName ?? 'The file'));
-/** Holdings go only in investment accounts; balances in any. */
-const fits = (target: AccountSummary, account: FileAccount) => account.file.kind === 'balances' || target.type === 'investment';
+/** Holdings go in investment accounts, or a bank account as its daily balance (a brokerage's cash management account); balances in any. */
+const fits = (target: AccountSummary, account: FileAccount) => account.file.kind === 'balances' || target.type === 'investment' || target.type === 'depository';
 const typed = (value: string | undefined) => (value?.trim() ? parseAmount(value) : null);
 const toKnown = (input: KnownInput): Known => ({ at: input.at, cash: typed(input.cash), shares: Object.fromEntries(Object.entries(input.shares).map(([id, value]) => [id, typed(value)])) });
 
@@ -196,22 +196,19 @@ export function Import({ checkDelay = CHECK_DELAY_MS }: { checkDelay?: number })
   const locallyReady =
     fileAccounts.length > 0 && choices.every((choice) => choice.to !== 'choose') && checks.every((check) => check.errors.length === 0) && choices.some((choice) => choice.to !== 'skip') && badTickers.length === 0;
 
-  // The request, once everything is chosen: checked as it settles, sent as it was checked.
-  const request: ImportRequest | null = locallyReady
-    ? {
-        accounts: fileAccounts.flatMap((read, index) => {
-          const choice = choices[index];
-          const account = resolved[index];
-          if (!account || !choice || choice.to === 'skip' || choice.to === 'with') return [];
-          const target =
-            choice.to === 'account'
-              ? { accountId: choice.accountId }
-              : { new: { name: choice.name.trim(), type: choice.type, subtype: choice.subtype || null, currency: choice.currency, institutionName: choice.institutionName.trim() || null, mask: last4(read.number), ownerUserId: choice.ownerUserId } };
-          const file = account.file.kind === 'holdings' ? { ...account.file, securities: account.file.securities.map((security) => (security.ticker ? security : { ...security, ticker: tickerFor(security.id) || null })) } : account.file;
-          return [{ label: labelOf(read), target, file }];
-        }),
-      }
-    : null;
+  // The accounts placed so far (somewhere to go, nothing missing): checked as they settle, before the rest are; imported once every account is.
+  const placed = fileAccounts.flatMap((read, index) => {
+    const choice = choices[index];
+    const account = resolved[index];
+    if (!account || !choice || choice.to === 'choose' || choice.to === 'skip' || choice.to === 'with' || checks[index]?.errors.length) return [];
+    const target =
+      choice.to === 'account'
+        ? { accountId: choice.accountId }
+        : { new: { name: choice.name.trim(), type: choice.type, subtype: choice.subtype || null, currency: choice.currency, institutionName: choice.institutionName.trim() || null, mask: last4(read.number), ownerUserId: choice.ownerUserId } };
+    const file = account.file.kind === 'holdings' ? { ...account.file, securities: account.file.securities.map((security) => (security.ticker ? security : { ...security, ticker: tickerFor(security.id) || null })) } : account.file;
+    return [{ label: labelOf(read), target, file }];
+  });
+  const request: ImportRequest | null = placed.length > 0 && badTickers.length === 0 ? { accounts: placed } : null;
   const body = request ? JSON.stringify(request) : null;
   const settled = useDebounced(body, checkDelay);
   const check = useQuery({
@@ -253,7 +250,9 @@ export function Import({ checkDelay = CHECK_DELAY_MS }: { checkDelay?: number })
     ? fileAccounts.length === 0
       ? null
       : 'Choose where each account goes and fill in what’s missing.'
-    : !checked
+    : !locallyReady && checked && problems.length === 0
+      ? 'Checked so far. Choose where each account goes and fill in what’s missing.'
+      : !checked
       ? check.error && settled === body
         ? null
         : 'Checking…'
@@ -378,7 +377,7 @@ export function Import({ checkDelay = CHECK_DELAY_MS }: { checkDelay?: number })
               <Button variant="outline" onClick={reset}>
                 Start again
               </Button>
-              <Button onClick={() => commit.mutate()} disabled={!checked || problems.length > 0 || commit.isPending}>
+              <Button onClick={() => commit.mutate()} disabled={!locallyReady || !checked || problems.length > 0 || commit.isPending}>
                 {commit.isPending ? 'Importing…' : 'Import'}
               </Button>
             </div>

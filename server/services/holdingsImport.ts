@@ -18,10 +18,15 @@
  * stops the whole import: no fund may go below zero shares, a fund priced
  * from the file must have totals that are its shares × price, a buy or sell
  * of a market fund must be near that day's close, and in a linked account
- * the walk must reach the share counts synced since the link. Days from a
- * linked account's first synced one on are left to the snapshots (the check
- * showed they agree); a manual account's file is written through today and
- * its positions become the account's holdings. Imported days are trusted
+ * the walk must reach the share counts synced since the link (but for the
+ * file's own transactions of the last few days, which the institution's
+ * feed can show late: shownLate). A linked account's days are written
+ * through the day the file's positions are as of, replacing the synced ones
+ * there (the institution's own records are the better source); a manual
+ * account's through today, its positions becoming the account's holdings.
+ * Into a bank account (a cash management account a brokerage's file lists
+ * with its money market fund), a file is written as each day's balance, its
+ * total, with no holdings. Imported days are trusted
  * over anything from the institution (shared/quality.ts). The days are
  * written as jobs, one window each (a load can be thousands of rows).
  */
@@ -84,6 +89,8 @@ interface BlockPayload {
   replaceSnapshots?: boolean;
   /** The file's transactions dated in this window, stored with the account's (none written when absent: a job queued before they were kept). */
   stored?: StoredTransaction[];
+  /** Into a bank account: each day's balance only, no holdings. */
+  balancesOnly?: boolean;
 }
 
 type StoredTransaction = typeof transactions.$inferInsert;
@@ -320,7 +327,7 @@ async function prepareImport(deps: Deps, tenant: Tenant, request: ImportRequest)
         createdAt: now,
       };
     }
-    if (entry.file.kind === 'holdings' && account.type !== 'investment') problem(entry.label, `holdings go in an investment account, and ${account.name} isn't one`);
+    if (entry.file.kind === 'holdings' && account.type !== 'investment' && account.type !== 'depository') problem(entry.label, `holdings go in an investment or bank account, and ${account.name} isn't one`);
     if (entry.file.currency && entry.file.currency !== account.currency) problem(entry.label, `the file is in ${entry.file.currency} but ${account.name} is in ${account.currency}`);
     targets.push({ entry, account, created });
   }
@@ -375,7 +382,7 @@ async function prepareImport(deps: Deps, tenant: Tenant, request: ImportRequest)
       plans.push({ ...base, balances: entry.file.rows, stored, days: dateRange(dates[0], dates.at(-1)!).length, from: dates[0], to: dates.at(-1)! });
       continue;
     }
-    const plan = await planHoldings(deps, tenant, { ...base, file: entry.file, today, now, cashIds, byTicker, hasCloses, closes, problem: (text, date) => problem(entry.label, text, date) });
+    const plan = await planHoldings(deps, tenant, { ...base, file: entry.file, today, now, cashIds, byTicker, hasCloses, closes, balancesOnly: account.type !== 'investment', problem: (text, date) => problem(entry.label, text, date) });
     if (plan) plans.push(plan);
   }
   return { plans, shared, problems, today };
@@ -401,6 +408,8 @@ interface HoldingsContext {
   byTicker: Map<string, string>;
   hasCloses: Set<string>;
   closes: (ticker: string, date: IsoDate) => number | null;
+  /** Into a bank account: each day's balance only, no holdings. */
+  balancesOnly: boolean;
   problem: (text: string, date?: string) => void;
 }
 
@@ -538,24 +547,26 @@ async function planHoldings(deps: Deps, tenant: Tenant, context: HoldingsContext
     if (close && TRADES.has(txn.kind) && Math.abs(txn.price - close) / close > PRICE_TOLERANCE) problem(`on ${txn.date}, ${ticker} traded at ${txn.price} but closed at ${close}`, txn.date);
   }
 
-  // Which days are written: a linked account's up to its first synced day, a manual account's through today.
+  // Which days are written: a linked account's through the day the file's positions are as of (the institution's
+  // own records are the better source for those days than the copy synced from them), a manual account's through today.
   const start = file.transactions.map((txn) => txn.date).sort()[0];
   let end = today;
   if (!manual) {
+    end = file.asOf < today ? file.asOf : today;
+    if (end < start) problem('the file has no days before the day its positions are as of');
     const [first] = await tenant.db
       .select({ date: min(accountDaily.date) })
       .from(accountDaily)
       .where(tenant.scope(accountDaily, eq(accountDaily.accountId, account.id), eq(accountDaily.source, 'snapshot')));
     const firstSynced = first?.date ?? null;
-    end = firstSynced ? addDays(firstSynced, -1) : addDays(today, -1);
-    if (end < start) problem('the file has no days before Wattle started syncing this account');
-    // Since the link: the walk reaches the share counts actually synced.
-    if (firstSynced) {
-      const walked = reconstructHistory({ start, end: today, emitFrom: firstSynced, emitTo: today, holdings: holdingsNow, transactions, cashSecurityId, allowNegativeCash: true, price: () => ({ price: 1, source: 'close' }) });
+    // Since the link, up to the file's day: the walk reaches the share counts actually synced, but for
+    // the file's own transactions of the last few days, which the institution's feed can show late.
+    if (firstSynced && firstSynced <= end) {
+      const walked = reconstructHistory({ start, end: today, emitFrom: firstSynced, emitTo: end, holdings: holdingsNow, transactions, cashSecurityId, allowNegativeCash: true, price: () => ({ price: 1, source: 'close' }) });
       const synced = await tenant.db
         .select({ date: holdingDaily.date, securityId: holdingDaily.securityId, quantity: holdingDaily.quantity })
         .from(holdingDaily)
-        .where(tenant.scope(holdingDaily, eq(holdingDaily.accountId, account.id), eq(holdingDaily.source, 'snapshot'), gte(holdingDaily.date, firstSynced)));
+        .where(tenant.scope(holdingDaily, eq(holdingDaily.accountId, account.id), eq(holdingDaily.source, 'snapshot'), gte(holdingDaily.date, firstSynced), lte(holdingDaily.date, end)));
       for (const day of walked) {
         const actual = synced.filter((row) => row.date === day.date);
         if (actual.length === 0) continue;
@@ -563,7 +574,9 @@ async function planHoldings(deps: Deps, tenant: Tenant, context: HoldingsContext
         for (const id of ids) {
           const fromFile = day.positions.find((position) => position.securityId === id)?.quantity ?? 0;
           const fromSync = actual.find((row) => row.securityId === id)?.quantity ?? 0;
-          if (Math.abs(fromFile - fromSync) > SHARES_EPSILON) problem(`on ${day.date}, ${id === cashSecurityId ? 'cash' : describe(id)} is ${fromFile} in the file but ${fromSync} synced`, day.date);
+          if (Math.abs(fromFile - fromSync) > SHARES_EPSILON && !shownLate(transactions, id === cashSecurityId ? null : id, day.date, fromFile - fromSync)) {
+            problem(`on ${day.date}, ${id === cashSecurityId ? 'cash' : describe(id)} is ${fromFile} in the file but ${fromSync} synced`, day.date);
+          }
         }
       }
     }
@@ -581,7 +594,7 @@ async function planHoldings(deps: Deps, tenant: Tenant, context: HoldingsContext
   for (const row of positions) addPrice(row.securityId, file.asOf, row.price);
   for (const points of Object.values(prices)) points.sort((a, b) => a[0].localeCompare(b[0]));
 
-  if (manual) {
+  if (manual && !context.balancesOnly) {
     // The positions are the account's holdings now; a fund without market prices carries the file's last price.
     for (const row of positions) {
       if (row.price !== undefined && filePriced.has(row.securityId) && !tickerOf.has(row.securityId)) {
@@ -632,7 +645,9 @@ async function planHoldings(deps: Deps, tenant: Tenant, context: HoldingsContext
     transactions,
     cashSecurityId: cashSecurityId!,
     ...(Object.keys(prices).length > 0 ? { prices } : {}),
-    ...(manual ? { replaceSnapshots: true } : {}),
+    // The file's days replace the synced ones it covers, a linked account's too.
+    replaceSnapshots: true,
+    ...(context.balancesOnly ? { balancesOnly: true } : {}),
     stored: stored.filter((row) => row.date >= from && row.date <= to),
   }));
   return {
@@ -648,6 +663,28 @@ async function planHoldings(deps: Deps, tenant: Tenant, context: HoldingsContext
     estimated,
     closes: tradeCloses,
   };
+}
+
+/** Days an institution's feed may take to show a transaction its own download already has (a reinvested dividend). */
+const FEED_LAG_DAYS = 5;
+
+/**
+ * Whether a difference between the file's count and the synced one on a day
+ * is the file's own latest transactions in that security (or cash, `security`
+ * null) not yet shown by the feed: the newest of those in the last few days,
+ * or the newest few together, add up to it.
+ */
+export function shownLate(transactions: BackfillTransaction[], security: string | null, date: IsoDate, difference: number): boolean {
+  const recent = transactions
+    .filter((txn) => txn.date <= date && txn.date > addDays(date, -FEED_LAG_DAYS) && (security === null ? txn.securityId === null && txn.amount !== 0 : txn.securityId === security && txn.quantity !== 0))
+    .sort((a, b) => b.date.localeCompare(a.date));
+  let total = 0;
+  for (const txn of recent) {
+    // Shares in, or cash in (amounts are positive when cash leaves).
+    total += security === null ? -txn.amount / 100 : txn.quantity;
+    if (Math.abs(total - difference) <= (security === null ? 0.005 : SHARES_EPSILON)) return true;
+  }
+  return false;
 }
 
 /** A file's transaction as importAccounts stores it: `security` is the household's id for it. */
@@ -811,7 +848,8 @@ export async function importBlock({ deps, tenant, job, renew }: JobContext): Pro
     balance: day.total,
     currency: account.currency,
     source: 'import' as const,
-    priceSource: leastFinal(day.positions.map((position) => position.priceSource)),
+    // A bank account's balance: no prices of its own.
+    priceSource: block.balancesOnly ? null : leastFinal(day.positions.map((position) => position.priceSource)),
     unmatched: day.unmatched,
   }));
 
@@ -823,11 +861,15 @@ export async function importBlock({ deps, tenant, job, renew }: JobContext): Pro
     const stored = block.stored ? [...(await staleTransactionDeletes(tenant, account.id, block.from, block.to, block.stored)), ...transactionUpserts(tenant, block.stored)] : [];
     await runAtomic(tenant.db, [
       ...stored,
-      // Positions rebuilt, carried or imported before for these days give way: the file says what was held.
-      tenant.db
-        .delete(holdingDaily)
-        .where(tenant.scope(holdingDaily, eq(holdingDaily.accountId, account.id), gte(holdingDaily.date, block.from), lte(holdingDaily.date, block.to), inArray(holdingDaily.source, block.replaceSnapshots ? ['rebuilt', 'carried', 'import', 'snapshot'] : ['rebuilt', 'carried', 'import']))),
-      ...chunkRows(holdingDaily, holdingRows).map((chunk) =>
+      // Positions rebuilt, carried or imported before for these days give way: the file says what was held (a bank account has none).
+      ...(block.balancesOnly
+        ? []
+        : [
+            tenant.db
+              .delete(holdingDaily)
+              .where(tenant.scope(holdingDaily, eq(holdingDaily.accountId, account.id), gte(holdingDaily.date, block.from), lte(holdingDaily.date, block.to), inArray(holdingDaily.source, block.replaceSnapshots ? ['rebuilt', 'carried', 'import', 'snapshot'] : ['rebuilt', 'carried', 'import']))),
+          ]),
+      ...chunkRows(holdingDaily, block.balancesOnly ? [] : holdingRows).map((chunk) =>
         tenant.db
           .insert(holdingDaily)
           .values(chunk)

@@ -147,17 +147,29 @@ describe('import into a manual account', () => {
     expect(await imported()).toBe(0);
   });
 
-  it('allows for charges and rounded share counts, and puts holdings only in investment accounts', async () => {
+  it('allows for charges and rounded share counts, and puts holdings only in investment or bank accounts', async () => {
     const { send } = await household();
     // $500 of shares plus a $5 commission.
     expect((await send(download(NOW, [{ ...HISTORY[0], value: 505, charges: 5 }, ...HISTORY.slice(1)]))).status).toBe(200);
     // A $20.46 dividend reinvested as 0.131 shares (rounded) at $156.47: $20.50 by shares × price.
     const reinvested: Txn = { date: '2026-09-25', kind: 'reinvest', fund: '000000003', shares: 0.131, price: 156.47, value: 20.46 };
     expect((await send(download([NOW[0], { ...NOW[1], shares: 50.131 }], [...HISTORY, reinvested]))).status).toBe(200);
-    const savings = await household('depository');
-    const refused = await savings.send(download(NOW, HISTORY));
+    const card = await household('credit');
+    const refused = await card.send(download(NOW, HISTORY));
     expect(refused.status).toBe(409);
-    expect(refused.body.error).toMatch(/holdings go in an investment account/);
+    expect(refused.body.error).toMatch(/holdings go in an investment or bank account/);
+  });
+
+  it("writes a file into a bank account (a brokerage's cash management account) as each day's balance, without holdings", async () => {
+    const { deps, accountId, send, day } = await household('depository');
+    expect((await send(download(NOW, HISTORY))).status).toBe(200);
+    await settle(deps);
+    // 260 × $13 and 50 × $21 today: the total, as a balance.
+    expect(await day(TODAY)).toMatchObject({ balance: 260 * 13_00 + 50 * 21_00, source: 'import', priceSource: null });
+    expect(await deps.db.select().from(schema.holdingDaily).where(eq(schema.holdingDaily.accountId, accountId))).toEqual([]);
+    expect(await deps.db.select().from(schema.holdings).where(eq(schema.holdings.accountId, accountId))).toEqual([]);
+    // Its transactions are kept.
+    expect((await deps.db.select().from(schema.transactions).where(eq(schema.transactions.accountId, accountId))).length).toBe(HISTORY.length);
   });
 
   it('a second import replaces the first, and keeps a classification you set', async () => {

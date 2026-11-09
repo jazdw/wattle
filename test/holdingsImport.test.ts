@@ -55,11 +55,11 @@ async function linked(shares = 20) {
 }
 
 describe('holdings history import', () => {
-  it('works out each day from the positions and transactions, shares and cash on the trade date, up to the first synced day', async () => {
+  it('works out each day from the positions and transactions, shares and cash on the trade date, through the day the file is as of', async () => {
     const { deps, send, day, vti } = await linked();
     const response = await send(download([{ ticker: 'VTI', shares: 20 }, { ticker: null, shares: 50 }], HISTORY));
     expect(response.status).toBe(200);
-    expect(response.body.accounts).toMatchObject([{ label: '··1234', created: false, from: '2026-05-29', to: '2026-10-07', days: 132 }]);
+    expect(response.body.accounts).toMatchObject([{ label: '··1234', created: false, from: '2026-05-29', to: TODAY, days: 133 }]);
     await settle(deps);
 
     expect(await day('2026-05-28')).toBeUndefined(); // nothing before the first transaction
@@ -75,7 +75,9 @@ describe('holdings history import', () => {
     expect(await vti('2026-08-31')).toMatchObject({ quantity: 25, source: 'import' });
     expect(await vti('2026-09-01')).toMatchObject({ quantity: 20 });
     expect(await day('2026-09-02')).toMatchObject({ balance: 2050_00 });
-    expect(await day(TODAY)).toMatchObject({ source: 'snapshot' }); // the synced day is left alone
+    // The synced day the file covers: the institution's own records replace the copy synced from them.
+    expect(await day(TODAY)).toMatchObject({ source: 'import' });
+    expect(await vti(TODAY)).toMatchObject({ quantity: 20, source: 'import' });
   });
 
   it('counts a split from the transaction that records it', async () => {
@@ -156,12 +158,23 @@ describe('holdings history import', () => {
     const { deps, send } = await linked();
     const good = await send(download([{ ticker: 'VTI', shares: 20 }, { ticker: null, shares: 50 }], HISTORY), '/api/imports/check');
     expect(good.status).toBe(200);
-    expect(good.body).toMatchObject({ problems: [], accounts: [{ label: '··1234', created: false, from: '2026-05-29', days: 132, closes: [{ date: '2026-05-29', security: 'VTI', close: 100 }, { date: '2026-09-01', security: 'VTI', close: 100 }] }] });
+    expect(good.body).toMatchObject({ problems: [], accounts: [{ label: '··1234', created: false, from: '2026-05-29', days: 133, closes: [{ date: '2026-05-29', security: 'VTI', close: 100 }, { date: '2026-09-01', security: 'VTI', close: 100 }] }] });
 
     const bad = await send(download([{ ticker: 'VTI', shares: 20 }, { ticker: null, shares: 50 }], [{ ...HISTORY[0], price: 150 }, ...HISTORY.slice(1)]), '/api/imports/check');
     expect(bad.status).toBe(200);
     expect(bad.body.problems).toEqual([{ label: '··1234', date: '2026-05-29', text: 'on 2026-05-29, VTI traded at 150 but closed at 100' }]);
     await settle(deps);
     expect((await deps.db.select().from(schema.accountDaily)).filter((row) => row.source === 'import')).toHaveLength(0);
+  });
+
+  it("allows for the institution's feed showing the file's latest transactions late, but not for a difference they don't explain", async () => {
+    // Synced: 20 VTI. The file: a dividend reinvested in 0.5 more today, which the feed hasn't shown yet.
+    const { send } = await linked();
+    const reinvested: Txn = { date: TODAY, kind: 'reinvest', ticker: 'VTI', shares: 0.5, price: 100, amount: 0 };
+    const late = await send(download([{ ticker: 'VTI', shares: 20.5 }, { ticker: null, shares: 50 }], [...HISTORY, reinvested]), '/api/imports/check');
+    expect(late.body.problems).toEqual([]);
+    // The same 0.5 more with no transaction to explain it: the file is missing one.
+    const missing = await send(download([{ ticker: 'VTI', shares: 20.5 }, { ticker: null, shares: 50 }], HISTORY), '/api/imports/check');
+    expect(missing.body.problems).toEqual([expect.objectContaining({ date: TODAY, text: `on ${TODAY}, VTI is 20.5 in the file but 20 synced` })]);
   });
 });
