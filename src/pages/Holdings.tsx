@@ -1,6 +1,7 @@
 import { ChevronDown, ChevronRight, Radio } from 'lucide-react';
 import { Fragment, useMemo, useState } from 'react';
 import { CATEGORY_LABELS, normalizeWeights, type Category } from '../../shared/taxonomy';
+import { holdingSymbol, marketTicker } from '../../shared/holdings';
 import type { AccountSummary, HoldingRow } from '../../shared/types';
 import { EditAccountDialog } from '../components/AccountDialogs';
 import { ClassificationDialog } from '../components/ClassificationDialog';
@@ -167,13 +168,7 @@ export function Holdings() {
                         <Td>
                           <p className="flex items-center gap-1.5 font-medium">
                             {/* Bonds have no ticker: their CUSIP or ISIN identifies them. */}
-                            {holding.ticker ? (
-                              holding.ticker
-                            ) : holding.cusip || holding.isin ? (
-                              <span title={holding.cusip ? 'CUSIP' : 'ISIN'}>{holding.cusip ?? holding.isin}</span>
-                            ) : (
-                              '—'
-                            )}
+                            {marketTicker(holding) ?? (holdingSymbol(holding) ? <span title={!holding.cusip && holding.isin && !holding.ticker ? 'ISIN' : 'CUSIP'}>{holdingSymbol(holding)}</span> : '—')}
                             {TYPE_LABELS[holding.type ?? ''] && (
                               <Badge variant="outline" className="px-1.5 py-0 text-[10px] font-normal">
                                 {TYPE_LABELS[holding.type ?? '']}

@@ -5,6 +5,7 @@
  */
 import { eq, inArray, isNotNull, isNull, lte, ne, notInArray, or, sql } from 'drizzle-orm';
 import type { AccountBase, Holding, InvestmentTransaction, Security as PlaidSecurity } from 'plaid';
+import { holdingLabel } from '../../shared/holdings';
 import { suggestClassification } from '../../shared/classify';
 import { addDays, lastMarketClose, marketDate } from '../../shared/dates';
 import { toMinor } from '../../shared/money';
@@ -817,12 +818,12 @@ async function recordHoldingChanges(
       .from(holdings)
       .innerJoin(securities, eq(securities.id, holdings.securityId))
       .where(tenant.scope(holdings, inArray(holdings.accountId, chunk)));
-    for (const row of stored) before.set(`${row.accountId}|${row.securityId}`, { quantity: row.quantity, label: row.ticker ?? row.name ?? 'Unknown security' });
+    for (const row of stored) before.set(`${row.accountId}|${row.securityId}`, { quantity: row.quantity, label: holdingLabel(row) });
   }
   const labels = new Map<string, string>();
   for (const security of plaidSecurities) {
     const id = securityIds.get(security.security_id);
-    if (id) labels.set(id, security.ticker_symbol ?? security.name ?? 'Unknown security');
+    if (id) labels.set(id, holdingLabel({ ticker: security.ticker_symbol, name: security.name, cusip: security.cusip, isin: security.isin }));
   }
   const accountNames = new Map([...visibleAccounts.values()].map((account) => [account.id, account.name]));
   const after = new Map(rows.map((row) => [`${row.accountId}|${row.securityId}`, row]));

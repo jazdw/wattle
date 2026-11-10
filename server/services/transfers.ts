@@ -268,16 +268,31 @@ export async function pairsWithMoves<T extends { outId: string; inId: string }>(
  */
 export function inTransit(dates: IsoDate[], linked: { out: MoneyMove; in: MoneyMove }[], convert: (minor: number, from: string, date: IsoDate) => number): number[] {
   const transit = dates.map(() => 0);
+  for (const values of inTransitByAccount(dates, linked, convert).values()) values.forEach((value, index) => (transit[index] += value));
+  return transit;
+}
+
+/**
+ * The same correction per account, so each account's line shows the money
+ * where it is on one date only: one that arrives first is left out of the
+ * account it arrived in until it leaves the other; one that leaves first
+ * stays in the account it left until it arrives. Summed, it's inTransit.
+ */
+export function inTransitByAccount(dates: IsoDate[], linked: { out: MoneyMove; in: MoneyMove }[], convert: (minor: number, from: string, date: IsoDate) => number): Map<string, number[]> {
+  const byAccount = new Map<string, number[]>();
   for (const pair of linked) {
     if (pair.in.date === pair.out.date) continue;
     const arrivesFirst = pair.in.date < pair.out.date;
     const from = arrivesFirst ? pair.in.date : pair.out.date;
     const until = arrivesFirst ? pair.out.date : pair.in.date;
+    const accountId = arrivesFirst ? pair.in.accountId : pair.out.accountId;
+    const values = byAccount.get(accountId) ?? dates.map(() => 0);
+    byAccount.set(accountId, values);
     dates.forEach((date, index) => {
-      if (date >= from && date < until) transit[index] += (arrivesFirst ? -1 : 1) * convert(pair.out.amount, pair.out.currency, date);
+      if (date >= from && date < until) values[index] += (arrivesFirst ? -1 : 1) * convert(pair.out.amount, pair.out.currency, date);
     });
   }
-  return transit;
+  return byAccount;
 }
 
 /** Whether a pair could be linked by hand: money out and the same money in, in two accounts, near enough. */

@@ -9,6 +9,7 @@ import { ArrowLeft } from 'lucide-react';
 import { useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { accountLabel } from '../../shared/accounts';
+import { holdingLabel } from '../../shared/holdings';
 import { dateRange } from '../../shared/dates';
 import { CURRENCIES, type Currency } from '../../shared/money';
 import type { ImportRequest } from '../../shared/schemas';
@@ -191,7 +192,7 @@ export function Import({ checkDelay = CHECK_DELAY_MS }: { checkDelay?: number })
   const nameOf = (id: string | null) => {
     if (!id) return null;
     const security = fileAccounts.flatMap((account) => (account.file.kind === 'holdings' ? account.file.securities : [])).find((candidate) => candidate.id === id);
-    return security?.ticker ?? (tickerFor(id) || security?.name || id);
+    return holdingLabel({ ticker: security?.ticker ?? (tickerFor(id) || null), name: security?.name, cusip: id }, 'short');
   };
   const locallyReady =
     fileAccounts.length > 0 && choices.every((choice) => choice.to !== 'choose') && checks.every((check) => check.errors.length === 0) && choices.some((choice) => choice.to !== 'skip') && badTickers.length === 0;

@@ -6,7 +6,7 @@
 import { eq } from 'drizzle-orm';
 import { describe, expect, it } from 'vitest';
 import * as schema from '../server/db/schema';
-import { candidatePairs, inTransit, names, type MoneyMove } from '../server/services/transfers';
+import { candidatePairs, inTransit, inTransitByAccount, names, type MoneyMove } from '../server/services/transfers';
 import type { ImportedFile } from '../shared/schemas';
 import type { HistoryResponse, TransactionsResponse, TransfersResponse } from '../shared/types';
 import { client, createHousehold, createTestDeps, settle } from './helpers';
@@ -44,6 +44,9 @@ describe('transfer candidates', () => {
     expect(inTransit([...dates], [{ out: move('o', 'chk', '2026-09-02', 500_00), in: move('i', 'sav', '2026-09-01', -500_00) }], same)).toEqual([0, -500_00, 0, 0]);
     // Left Aug 31, arrived Sep 2: in neither on Aug 31 and Sep 1.
     expect(inTransit([...dates], [{ out: move('o', 'chk', '2026-08-31', 500_00), in: move('i', 'sav', '2026-09-02', -500_00) }], same)).toEqual([500_00, 500_00, 0, 0]);
+    // Per account: the one it arrived in first leaves it out; the one it left first keeps it.
+    expect(inTransitByAccount([...dates], [{ out: move('o', 'chk', '2026-09-02', 500_00), in: move('i', 'sav', '2026-09-01', -500_00) }], same)).toEqual(new Map([['sav', [0, -500_00, 0, 0]]]));
+    expect(inTransitByAccount([...dates], [{ out: move('o', 'chk', '2026-08-31', 500_00), in: move('i', 'sav', '2026-09-02', -500_00) }], same)).toEqual(new Map([['chk', [500_00, 500_00, 0, 0]]]));
   });
 });
 
@@ -90,7 +93,12 @@ describe('transfers between your accounts', () => {
     const on = (date: string) => total.series[0].values[total.dates.indexOf(date)];
     expect([on('2026-08-31'), on('2026-09-01'), on('2026-09-02')]).toEqual([2000_00, 2000_00, 2000_00]);
     const byAccount = (await api('/api/history?range=ALL&group=account')).body as HistoryResponse;
-    expect(byAccount.series.find((series) => series.key === '__transit')?.values[byAccount.dates.indexOf('2026-09-01')]).toBe(-500_00);
+    // By account it's in savings from the day it leaves checking: no account holds it twice, and they add up to the total.
+    const line = (key: string) => byAccount.series.find((series) => series.key === key)!.values;
+    const sep1 = byAccount.dates.indexOf('2026-09-01');
+    expect(byAccount.series.map((series) => series.key).sort()).toEqual([checking, savings].sort());
+    expect([line(savings)[sep1], line(checking)[sep1], line(savings)[sep1 + 1], line(checking)[sep1 + 1]]).toEqual([0, 2000_00, 500_00, 1500_00]);
+    expect(byAccount.dates.map((_, position) => byAccount.series.reduce((sum, series) => sum + (series.values[position] ?? 0), 0))).toEqual(total.series[0].values.map((value) => value ?? 0));
 
     // The household's money in is the pay alone; each account still counts its side.
     const source = (await api('/api/history?range=ALL&group=source')).body as HistoryResponse;

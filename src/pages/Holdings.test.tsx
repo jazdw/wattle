@@ -80,7 +80,7 @@ describe('Holdings page', () => {
     const { user } = renderPage(<Holdings />);
     const vti = (await screen.findByText('VTI')).closest('tr') as HTMLElement;
     await user.click(within(vti).getByRole('button', { name: 'US stocks' }));
-    const dialog = await screen.findByRole('dialog', { name: 'Classify VTI' });
+    const dialog = await screen.findByRole('dialog', { name: /^Classify VTI/ });
     await user.selectOptions(within(dialog).getByRole('combobox', { name: /^Type/ }), 'Mutual fund');
     await user.click(within(dialog).getByRole('button', { name: 'Save' }));
     await expect.poll(() => (sent('PATCH /api/securities/s-vti')[0]?.body as { type?: string })?.type).toBe('mutual fund');

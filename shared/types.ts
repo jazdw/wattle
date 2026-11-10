@@ -341,6 +341,10 @@ export type HistoryGroup = 'total' | 'account' | 'category' | 'holding' | 'sourc
 export interface HistorySeries {
   key: string;
   label: string;
+  /** Where space is tight (a holding's ticker, for the legend); the label otherwise. */
+  shortLabel?: string;
+  /** What the label adds to the short one (a holding's name), for a second line under it. */
+  detail?: string;
   values: (number | null)[];
   /** Per date, where the value came from (null without a value of its own). */
   quality: (Quality | null)[];

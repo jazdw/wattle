@@ -160,7 +160,7 @@ export function Growth() {
               <TimeSeriesChart history={data} series={series} currency={currency} stacked={mode !== 'overview'} lines={mode === 'overview'} band={band} height={340} />
               {(series.length > 1 || band) && (
                 <div className="mt-3">
-                  <Legend items={[...series.map((item) => ({ key: item.key, label: item.label, color: item.color })), ...(band ? [{ key: 'band', label: band.label, color: band.color }] : [])]} />
+                  <Legend items={[...series.map((item) => ({ key: item.key, label: item.shortLabel ?? item.label, color: item.color })), ...(band ? [{ key: 'band', label: band.label, color: band.color }] : [])]} />
                 </div>
               )}
             </>
@@ -186,8 +186,11 @@ export function Growth() {
                     <tr key={row.key} className={!account && group === 'account' && !row.key.startsWith('__other') ? 'cursor-pointer hover:bg-muted/50' : undefined} onClick={() => group === 'account' && pick(row.key)}>
                       <Td>
                         <span className="flex items-center gap-2">
-                          <span className="size-2.5 rounded-sm" style={{ background: row.color }} />
-                          {row.label}
+                          <span className="size-2.5 shrink-0 rounded-sm" style={{ background: row.color }} />
+                          <span className="min-w-0">
+                            {row.shortLabel ?? row.label}
+                            {row.detail && <span className="block max-w-40 truncate text-xs text-muted-foreground sm:max-w-96">{row.detail}</span>}
+                          </span>
                         </span>
                       </Td>
                       <Td className="text-right">{money(row.first, currency)}</Td>

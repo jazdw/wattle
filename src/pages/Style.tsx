@@ -7,6 +7,7 @@ import { Badge } from '../components/ui/badge';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '../components/ui/card';
 import { EmptyState, Skeleton, Td, Th } from '../components/ui/misc';
 import { usePortfolio } from '../hooks/queries';
+import { holdingSymbol } from '../../shared/holdings';
 import { useAuth } from '../hooks/useAuth';
 import { CATEGORY_COLORS } from '../lib/colors';
 import { formatPercent, money } from '../lib/format';
@@ -171,7 +172,7 @@ export function Style() {
               return (
                 <tr key={holding.securityId} className="cursor-pointer hover:bg-muted/40" onClick={() => setEditing(holding)}>
                   <Td>
-                    <span className="font-medium">{holding.ticker ?? holding.name}</span>
+                    <span className="font-medium">{holdingSymbol(holding) ?? holding.name}</span>
                     {holding.needsReview && (
                       <Badge variant="warning" className="ml-1.5">
                         Review

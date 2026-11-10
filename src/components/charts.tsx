@@ -170,7 +170,7 @@ export function TimeSeriesChart({
             <Area
               key={item.key}
               dataKey={item.key}
-              name={item.label}
+              name={item.shortLabel ?? item.label}
               type="monotone"
               stackId={stacked ? 'stack' : undefined}
               stroke={item.color}

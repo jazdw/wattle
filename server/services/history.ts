@@ -6,6 +6,7 @@
  * (shared/quality.ts): where it came from, combined over its parts.
  */
 import { and, eq, gte, inArray, lte, min } from 'drizzle-orm';
+import { holdingLabel, holdingParts, type NamedSecurity } from '../../shared/holdings';
 import { normalizeWeights, CATEGORY_LABELS, type Category, type Classification } from '../../shared/taxonomy';
 import { addDays, dateRange, marketDate, type IsoDate } from '../../shared/dates';
 import { convertMinor, type Currency } from '../../shared/money';
@@ -18,7 +19,7 @@ import type { Tenant } from '../db/tenant';
 import type { Deps } from '../ports';
 import { accountLabel } from '../../shared/accounts';
 import { breakdown } from './breakdown';
-import { inTransit, linkedTransfers } from './transfers';
+import { inTransit, inTransitByAccount, linkedTransfers } from './transfers';
 import { defaultCategory, toCurrency } from './portfolio';
 import { fxLookup } from './pricing';
 
@@ -143,7 +144,9 @@ export async function loadHistory(deps: Deps, tenant: Tenant, options: Options):
   // The household's transfers between its accounts: counted on one date, not in both accounts (or neither) while in transit.
   const linked = options.accountId ? [] : await linkedTransfers(tenant);
   const transit = inTransit(dates, linked, convert);
-  const withTransit = (values: (number | null)[]) => values.map((value, position) => (value === null ? (transit[position] ? transit[position] : null) : value + transit[position]));
+  const withTransit = (values: (number | null)[], adjustment = transit) =>
+    values.map((value, position) => (value === null ? (adjustment[position] ? adjustment[position] : null) : value + adjustment[position]));
+  const transitByAccount = inTransitByAccount(dates, linked, convert);
   const none = dates.map(() => null);
 
   let series: HistorySeries[];
@@ -155,10 +158,10 @@ export async function loadHistory(deps: Deps, tenant: Tenant, options: Options):
       series = accountRows.map((account) => ({
         key: account.id,
         label: accountLabel(account),
-        values: perAccount.get(account.id)!,
+        // Money between two of them shown in one, on one date (it'd be in both, or neither, for a day or two).
+        values: transitByAccount.has(account.id) ? withTransit(perAccount.get(account.id)!, transitByAccount.get(account.id)) : perAccount.get(account.id)!,
         quality: perAccountQuality.get(account.id)!,
       }));
-      if (transit.some((value) => value !== 0)) series.push({ key: '__transit', label: 'In transit', values: transit, quality: none });
       break;
     case 'category': {
       series = await categorySeries(tenant, accountRows, perAccount, perAccountQuality, dates, start, end, convert);
@@ -185,6 +188,12 @@ export async function loadHistory(deps: Deps, tenant: Tenant, options: Options):
 }
 
 type QualityRow = { source: DailySource; priceSource: PriceSource | null; unmatched: boolean };
+/** A holding's labels as a series has them: long, short (the legend) and the second line under the short (the table). */
+function holdingSeriesLabels(security: NamedSecurity): Pick<HistorySeries, 'label' | 'shortLabel' | 'detail'> {
+  const { short, detail } = holdingParts(security);
+  return { label: holdingLabel(security), shortLabel: short, ...(detail ? { detail } : {}) };
+}
+
 const qualityOf = (row: QualityRow): Quality => ({ source: row.source, priceSource: row.priceSource, unmatched: row.unmatched });
 /** A stored value shown on a day it isn't for. */
 const carriedFrom = (row: QualityRow): Quality => ({ ...qualityOf(row), source: 'carried' });
@@ -241,7 +250,7 @@ async function holdingSeries(
     if (position === undefined) continue;
     let entry = bySecurity.get(row.securityId);
     if (!entry) {
-      entry = { key: row.securityId, label: row.ticker ?? row.name ?? 'Unknown', values: dates.map(() => null), quality: dates.map(() => null) };
+      entry = { key: row.securityId, ...holdingSeriesLabels(row), values: dates.map(() => null), quality: dates.map(() => null) };
       bySecurity.set(row.securityId, entry);
       parts.set(row.securityId, dates.map(() => []));
     }

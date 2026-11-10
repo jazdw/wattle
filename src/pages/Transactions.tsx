@@ -3,6 +3,7 @@ import { useEffect, useState } from 'react';
 import { useSearchParams } from 'react-router-dom';
 import { KIND_WORDS, TRANSACTION_KINDS, type TransactionKind } from '../../shared/transactionKinds';
 import { accountLabel } from '../../shared/accounts';
+import { holdingLabel } from '../../shared/holdings';
 import { fullDescription } from '../../shared/descriptions';
 import { fixedRangeStart } from '../../shared/ranges';
 import { marketDate } from '../../shared/dates';
@@ -396,7 +397,7 @@ export function Transactions() {
                       <Td>
                         {investment || (mixed && (entry.ticker || entry.security)) ? (
                           <>
-                            <span className="font-medium">{entry.ticker ?? entry.security ?? '—'}</span>
+                            <span className="font-medium">{entry.ticker || entry.security ? holdingLabel({ ticker: entry.ticker, name: entry.security }, 'short') : '—'}</span>
                             {textOf(entry) && <span className="ml-2 text-xs text-muted-foreground">{textOf(entry)}</span>}
                           </>
                         ) : (

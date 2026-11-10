@@ -1,5 +1,6 @@
 import { useMutation, useQueryClient } from '@tanstack/react-query';
 import { useState } from 'react';
+import { holdingLabel } from '../../shared/holdings';
 import {
   CATEGORIES,
   CATEGORY_LABELS,
@@ -108,7 +109,7 @@ export function ClassificationDialog({ security, onClose }: Props) {
   return (
     <Dialog open={security !== null} onOpenChange={(open) => !open && onClose()}>
       <DialogContent
-        title={`Classify ${security?.ticker ?? security?.name ?? ''}`}
+        title={`Classify ${security ? holdingLabel(security) : ''}`}
         description="Percentages; each group is normalised to 100%. Size and style describe the stock portion only."
       >
         <div className="grid gap-4">

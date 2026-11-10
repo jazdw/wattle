@@ -4,6 +4,10 @@ import { MAX_SERIES, OTHER_COLOR, OTHER_DEBTS_COLOR, seriesColor } from './color
 export interface ChartSeries {
   key: string;
   label: string;
+  /** For the legend, where space is tight. */
+  shortLabel?: string;
+  /** A second line under the short label (a holding's name). */
+  detail?: string;
   color: string;
   values: (number | null)[];
 }
@@ -32,12 +36,16 @@ function sum(history: HistoryResponse, series: HistoryResponse['series']): (numb
  */
 export function foldSeries(history: HistoryResponse, colorFor?: (key: string, index: number) => string): ChartSeries[] {
   // Largest first by size, owed or not: a large loan keeps its own series (below zero) rather than folding.
-  const sorted = [...history.series].sort((a, b) => Math.abs(b.values.at(-1) ?? 0) - Math.abs(a.values.at(-1) ?? 0));
+  // Today has no value until its snapshot: each by its latest one.
+  const size = (values: (number | null)[]) => Math.abs(values.findLast((value) => value !== null) ?? 0);
+  const sorted = [...history.series].sort((a, b) => size(b.values) - size(a.values));
   const keep = sorted.length > MAX_SERIES + 1 ? sorted.slice(0, MAX_SERIES) : sorted;
   const rest = sorted.slice(keep.length);
   const result: ChartSeries[] = keep.map((series, index) => ({
     key: series.key,
     label: series.label,
+    shortLabel: series.shortLabel,
+    detail: series.detail,
     color: colorFor ? colorFor(series.key, index) : seriesColor(index),
     values: series.values,
   }));
