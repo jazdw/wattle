@@ -453,11 +453,17 @@ export interface ImportCheck {
 }
 
 /** POST /api/imports/tickers: a ticker for a security a file names without one. */
+export interface TickerSuggestions {
+  suggestions: TickerSuggestion[];
+  /** The market data provider refused a search (its hourly limit) or is down: the rest are typed by hand. */
+  unavailable: boolean;
+}
+
 export interface TickerSuggestion {
   /** The file's id for the security. */
   id: string;
   ticker: string;
-  /** From a security you have with the same name, or the market data provider's search. */
+  /** From a security you have with the same CUSIP or name, or the market data provider's search. */
   from: 'yours' | 'search';
   /** The name is the file's exactly (letters and digits compared): used as it is; otherwise it only starts the same, to check. */
   exact: boolean;

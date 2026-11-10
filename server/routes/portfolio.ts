@@ -312,7 +312,7 @@ portfolioRoutes.get('/quotes', async (c) => {
 /** Tickers for securities a file names without one (from yours, else a search by name). */
 portfolioRoutes.post('/imports/tickers', async (c) => {
   const body = await readBody(c, tickerSuggestionsSchema);
-  return c.json({ suggestions: await suggestTickers(c.env.deps, c.get('tenant'), body.securities) });
+  return c.json(await suggestTickers(c.env.deps, c.get('tenant'), body.securities));
 });
 
 /** Every import: the accounts in one or more files, each into an account you have or a new one. */

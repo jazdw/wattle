@@ -34,6 +34,11 @@ describe('Import page', () => {
     await user.click(button);
   }
 
+  /** Marks every security the files name without a ticker as having no market price (a blank ticker isn't a choice). */
+  async function noMarketPrice(user: ReturnType<typeof renderPage>['user']) {
+    for (const toggle of await screen.findAllByLabelText(/has no market price/)) await user.click(toggle);
+  }
+
   it('finds the date and balance columns of a CSV, previews and imports daily balances, then shows what was imported', async () => {
     server.use(http.post('*/api/imports', () => HttpResponse.json(accepted)));
     checked();
@@ -93,6 +98,10 @@ describe('Import page', () => {
     await user.selectOptions(screen.getByLabelText('Import ··1234 into'), 'new');
     expect(screen.getByText(/is linked with the same last digits/)).toBeInTheDocument();
     await user.selectOptions(screen.getByLabelText('Import ··1234 into'), 'skip');
+    // The fund the file names without a ticker: left blank, it has to be marked as having no market price.
+    expect(await screen.findByText(/a ticker or mark it as having no market price/)).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Import' })).toBeDisabled();
+    await noMarketPrice(user);
     await importIt(user);
 
     await expect.poll(() => sent('POST /api/imports')[0]?.body).toMatchObject({
@@ -166,6 +175,7 @@ describe('Import page', () => {
     await user.selectOptions(screen.getByLabelText('Import ··5678 into'), 'new');
     expect(screen.getByRole('button', { name: 'Import' })).toBeDisabled();
     await user.selectOptions(screen.getByLabelText('Import ··1111 into'), 'skip');
+    await noMarketPrice(user);
     await waitFor(() => expect(screen.getByRole('button', { name: 'Import' })).toBeEnabled());
   });
 
@@ -190,6 +200,22 @@ describe('Import page', () => {
     await importIt(user);
     await expect.poll(() => (sent('POST /api/imports')[0]?.body as { accounts: { file: { securities: unknown[] } }[] })?.accounts[0].file.securities).toEqual([
       { id: '000000002', ticker: 'ABC', name: 'Example S&P Index Fund M' },
+    ]);
+  });
+
+  it("says when the ticker search isn't available, and imports once you type the ticker", async () => {
+    server.use(http.post('*/api/imports/tickers', () => HttpResponse.json({ suggestions: [], unavailable: true })));
+    server.use(http.post('*/api/imports', () => HttpResponse.json(accepted)));
+    checked();
+    const { user } = await openImport();
+    upload(sgml(buy('B1', '20260803', '10', '12.5', '125.00')));
+    expect(await screen.findByText(/ticker search isn't available right now/)).toBeInTheDocument();
+    await user.selectOptions(screen.getByLabelText('Import ··5678 into'), 'new');
+    expect(screen.getByRole('button', { name: 'Import' })).toBeDisabled();
+    await user.type(screen.getByLabelText('Ticker for Example S&P Index Fund M'), 'xyz');
+    await importIt(user);
+    await expect.poll(() => (sent('POST /api/imports')[0]?.body as { accounts: { file: { securities: unknown[] } }[] })?.accounts[0].file.securities).toEqual([
+      { id: '000000002', ticker: 'XYZ', name: 'Example S&P Index Fund M' },
     ]);
   });
 
@@ -272,6 +298,7 @@ describe('Import page', () => {
     expect(await screen.findByText(/Checked so far/)).toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Import' })).toBeDisabled();
     await user.selectOptions(screen.getByLabelText('Import ··5678 into'), 'skip');
+    await noMarketPrice(user);
     await waitFor(() => expect(screen.getByRole('button', { name: 'Import' })).toBeEnabled());
   });
 });

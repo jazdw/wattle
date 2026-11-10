@@ -15,6 +15,11 @@ export interface NamedSecurity {
 /** A CUSIP (nine letters and digits): what a fund with no market ticker (a plan's own fund) is stored under in place of one. */
 const CUSIP = /^(?=.*\d)[0-9A-Z]{9}$/;
 
+/** Whether an identifier is a CUSIP (a file's id for a security): one stored on a security matches it in later files. */
+export function isCusip(id: string): boolean {
+  return CUSIP.test(id);
+}
+
 /** Its market ticker; null for one stored under its CUSIP. */
 export function marketTicker(security: NamedSecurity): string | null {
   const ticker = security.ticker?.trim();

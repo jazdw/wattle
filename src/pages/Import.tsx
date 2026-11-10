@@ -13,7 +13,7 @@ import { holdingLabel } from '../../shared/holdings';
 import { dateRange } from '../../shared/dates';
 import { CURRENCIES, type Currency } from '../../shared/money';
 import type { ImportRequest } from '../../shared/schemas';
-import type { AccountSummary, AccountType, ImportCheck, ImportProblem, ImportResponse, TickerSuggestion } from '../../shared/types';
+import type { AccountSummary, AccountType, ImportCheck, ImportProblem, ImportResponse, TickerSuggestions } from '../../shared/types';
 import { api } from '../api';
 import { SubtypeSelect } from '../components/AccountDialogs';
 import { PageHeader } from '../components/Layout';
@@ -77,6 +77,8 @@ export function Import({ checkDelay = CHECK_DELAY_MS }: { checkDelay?: number })
   const [fileError, setFileError] = useState<string | null>(null);
   // Tickers typed for securities the files name without one (by the file's id for it).
   const [tickers, setTickers] = useState<Record<string, string>>({});
+  // Securities marked as having no market price (a plan's own funds): a blank ticker has to be one of these, not left undecided.
+  const [noPrice, setNoPrice] = useState<Record<string, boolean>>({});
   // Known balances typed for files of transactions with none (by the account's place in the files).
   const [knowns, setKnowns] = useState<Record<number, KnownInput>>({});
   const [fileKey, setFileKey] = useState(0);
@@ -182,20 +184,23 @@ export function Import({ checkDelay = CHECK_DELAY_MS }: { checkDelay?: number })
   const untickered = [...new Map(fileAccounts.flatMap((account) => (account.file.kind === 'holdings' ? account.file.securities.filter((security) => !security.ticker) : [])).map((security) => [security.id, security])).values()];
   const suggestions = useQuery({
     queryKey: ['import-tickers', untickered.map((security) => security.id)],
-    queryFn: () => api<{ suggestions: TickerSuggestion[] }>('/api/imports/tickers', { method: 'POST', body: JSON.stringify({ securities: untickered.map(({ id, name }) => ({ id, name })) }) }),
+    queryFn: () => api<TickerSuggestions>('/api/imports/tickers', { method: 'POST', body: JSON.stringify({ securities: untickered.map(({ id, name }) => ({ id, name })) }) }),
     enabled: untickered.length > 0,
     staleTime: Infinity,
   });
   const suggested = (id: string) => suggestions.data?.suggestions.find((suggestion) => suggestion.id === id);
-  const tickerFor = (id: string) => (tickers[id] ?? suggested(id)?.ticker ?? '').trim().toUpperCase();
+  const tickerFor = (id: string) => (noPrice[id] ? '' : (tickers[id] ?? suggested(id)?.ticker ?? '').trim().toUpperCase());
   const badTickers = untickered.filter((security) => tickerFor(security.id) && !TICKER.test(tickerFor(security.id)));
+  // Neither a ticker nor marked as having no market price: imported under its CUSIP, it wouldn't match the security it is.
+  const undecided = untickered.filter((security) => !noPrice[security.id] && !tickerFor(security.id));
+  const searchUnavailable = suggestions.isError || suggestions.data?.unavailable;
   const nameOf = (id: string | null) => {
     if (!id) return null;
     const security = fileAccounts.flatMap((account) => (account.file.kind === 'holdings' ? account.file.securities : [])).find((candidate) => candidate.id === id);
     return holdingLabel({ ticker: security?.ticker ?? (tickerFor(id) || null), name: security?.name, cusip: id }, 'short');
   };
   const locallyReady =
-    fileAccounts.length > 0 && choices.every((choice) => choice.to !== 'choose') && checks.every((check) => check.errors.length === 0) && choices.some((choice) => choice.to !== 'skip') && badTickers.length === 0;
+    fileAccounts.length > 0 && choices.every((choice) => choice.to !== 'choose') && checks.every((check) => check.errors.length === 0) && choices.some((choice) => choice.to !== 'skip') && badTickers.length === 0 && undecided.length === 0;
 
   // The accounts placed so far (somewhere to go, nothing missing): checked as they settle, before the rest are; imported once every account is.
   const placed = fileAccounts.flatMap((read, index) => {
@@ -322,16 +327,19 @@ export function Import({ checkDelay = CHECK_DELAY_MS }: { checkDelay?: number })
             <CardHeader>
               <CardTitle>Securities without a ticker</CardTitle>
               <CardDescription>
-                Each is valued at its ticker's close every day. Tickers found by name are filled in for you; change any, or leave one blank for a fund with no market price (a plan's own funds), valued from the file's prices on a straight line between them.
+                Each is valued at its ticker's close every day. Tickers found are filled in for you: check them, and type any that are missing. A fund with no market price (a plan's own funds) is valued from the file's prices on a straight line between them: mark it as one.
               </CardDescription>
             </CardHeader>
             <CardContent className="grid gap-2 text-sm">
+              {searchUnavailable && (
+                <Alert variant="warning">The ticker search isn't available right now (the market data provider's hourly limit, most likely). Type the tickers yourself: any prices it can't fetch now are estimated from the file and replaced with each day's close tonight.</Alert>
+              )}
               {untickered.map((security) => {
                 const suggestion = suggested(security.id);
                 const value = tickers[security.id] ?? suggestion?.ticker ?? '';
                 return (
-                  <div key={security.id} className="grid items-center gap-2 sm:grid-cols-[1fr_8rem]">
-                    <div className="min-w-0">
+                  <div key={security.id} className="grid grid-cols-[8rem_auto] items-center gap-x-3 gap-y-2 sm:grid-cols-[1fr_8rem_auto]">
+                    <div className="col-span-2 min-w-0 sm:col-span-1">
                       <p className="truncate">{security.name}</p>
                       <p className="text-xs text-muted-foreground">
                         {security.id}
@@ -340,11 +348,25 @@ export function Import({ checkDelay = CHECK_DELAY_MS }: { checkDelay?: number })
                           (suggestion.from === 'yours' ? ' · the same name as one of your securities' : suggestion.exact ? ' · found by its name' : ' · a similar name: check it')}
                       </p>
                     </div>
-                    <Input aria-label={`Ticker for ${security.name}`} value={value} placeholder={suggestions.isLoading ? 'Looking…' : 'None'} onChange={(event) => setTickers({ ...tickers, [security.id]: event.target.value })} />
+                    <Input
+                      aria-label={`Ticker for ${security.name}`}
+                      value={noPrice[security.id] ? '' : value}
+                      placeholder={noPrice[security.id] ? 'None' : suggestions.isLoading ? 'Looking…' : 'Ticker'}
+                      disabled={noPrice[security.id]}
+                      onChange={(event) => setTickers({ ...tickers, [security.id]: event.target.value })}
+                    />
+                    <label className="flex items-center gap-2 text-muted-foreground">
+                      <Switch aria-label={`${security.name} has no market price`} checked={noPrice[security.id] ?? false} onCheckedChange={(checked) => setNoPrice({ ...noPrice, [security.id]: checked })} /> No market price
+                    </label>
                   </div>
                 );
               })}
               {badTickers.length > 0 && <Alert variant="error">That isn't a ticker: {badTickers.map((security) => tickerFor(security.id)).join(', ')}.</Alert>}
+              {undecided.length > 0 && !suggestions.isLoading && (
+                <p className="text-muted-foreground">
+                  Give {undecided.length === 1 ? 'this one' : `these ${undecided.length}`} a ticker or mark {undecided.length === 1 ? 'it' : 'them'} as having no market price before importing: {undecided.map((security) => security.name).join(', ')}.
+                </p>
+              )}
             </CardContent>
           </Card>
         )}

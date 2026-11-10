@@ -280,6 +280,15 @@ describe('security identifiers', () => {
     const bill = (await api('/api/portfolio')).body.holdings.find((row: { type: string }) => row.type === 'fixed income');
     expect(bill).toMatchObject({ ticker: null, cusip: '912797GZ4', isin: 'US912797GZ43' });
   });
+
+  it("keeps a CUSIP an import's file gave a security when the institution sends none", async () => {
+    const { deps, connection, api } = await linked();
+    await deps.db.update(schema.securities).set({ cusip: '123456AB7' }).where(eq(schema.securities.ticker, 'VTI'));
+    await deps.db.update(schema.connections).set({ lastSyncedAt: null });
+    await api(`/api/connections/${connection.id}/sync`, { method: 'POST' });
+    const [vti] = await deps.db.select().from(schema.securities).where(eq(schema.securities.ticker, 'VTI'));
+    expect(vti.cusip).toBe('123456AB7');
+  });
 });
 
 describe('classification', () => {

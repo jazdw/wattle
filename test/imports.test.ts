@@ -344,4 +344,19 @@ describe('ticker suggestions', () => {
       { id: '000000004', ticker: 'EXMP', from: 'search', exact: true },
     ]);
   });
+
+  it("matches a CUSIP an earlier file gave a security, with no search, and says when the search can't be used", async () => {
+    const { deps, api, send } = await household();
+    // An earlier file named VTI with its CUSIP beside the ticker: kept on the security.
+    const file = { ...download([{ fund: '123456AB7', shares: 5 }], [{ date: '2026-06-02', kind: 'buy', fund: '123456AB7', shares: 5, price: 100, amount: 0 }]), securities: [{ id: '123456AB7', ticker: 'VTI', name: 'Vanguard Total Stock Market ETF' }] };
+    expect((await send(file)).status).toBe(200);
+    await settle(deps);
+    const [vti] = await deps.db.select().from(schema.securities).where(eq(schema.securities.ticker, 'VTI'));
+    expect(vti.cusip).toBe('123456AB7');
+
+    // The search refused (its hourly limit): the CUSIP still matches; the rest are said to be unavailable.
+    deps.prices!.search = () => Promise.reject(new ProviderHttpError('search', 429));
+    const response = await api('/api/imports/tickers', { method: 'POST', json: { securities: [{ id: '123456AB7', name: 'VANGUARD TOTAL STK MKT' }, { id: '000000009', name: 'Example Growth Fund' }] } });
+    expect(response.body).toEqual({ suggestions: [{ id: '123456AB7', ticker: 'VTI', from: 'yours', exact: true }], unavailable: true });
+  });
 });

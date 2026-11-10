@@ -668,7 +668,8 @@ async function planSecurities(
           .update(securities)
           .set({
             ticker,
-            cusip: security.cusip ?? null,
+            // Plaid rarely sends a CUSIP: keep one an import's file gave it.
+            cusip: security.cusip ? security.cusip : sql`${securities.cusip}`,
             isin: security.isin ?? null,
             name: security.name,
             type: security.type,

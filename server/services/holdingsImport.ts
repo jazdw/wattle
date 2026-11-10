@@ -30,13 +30,14 @@
  * over anything from the institution (shared/quality.ts). The days are
  * written as jobs, one window each (a load can be thousands of rows).
  */
-import { and, eq, gte, inArray, lte, min, sql } from 'drizzle-orm';
+import { and, eq, gte, inArray, isNull, lte, min, sql } from 'drizzle-orm';
 import type { BatchItem } from 'drizzle-orm/batch';
 import { suggestClassification } from '../../shared/classify';
+import { isCusip } from '../../shared/holdings';
 import { addDays, dateRange, marketDate, type IsoDate } from '../../shared/dates';
 import { leastFinal } from '../../shared/quality';
 import type { ImportedHoldings, ImportKind, ImportRequest } from '../../shared/schemas';
-import type { ImportCheck, ImportedAccount, ImportProblem, ImportResponse, TickerSuggestion } from '../../shared/types';
+import type { ImportCheck, ImportedAccount, ImportProblem, ImportResponse, TickerSuggestion, TickerSuggestions } from '../../shared/types';
 import { chunkRows, inChunks, runAtomic } from '../db/batch';
 import { accountDaily, accounts, holdingDaily, holdings, householdMembers, jobs, securities, transactions } from '../db/schema';
 import type { Tenant } from '../db/tenant';
@@ -357,6 +358,11 @@ async function prepareImport(deps: Deps, tenant: Tenant, request: ImportRequest)
     for (const [ticker, id] of found.byTicker) byTicker.set(ticker, id);
   }
   for (const row of securityRows) if (row.ticker && !byTicker.has(row.ticker.toUpperCase())) byTicker.set(row.ticker.toUpperCase(), row.id);
+  // A file's CUSIP for a market security, kept on it (where it has none), so a later file naming it only by CUSIP matches it with no search.
+  const cusips = new Map(holdingEntries.flatMap(({ entry }) => entry.file.securities.flatMap((security) => (security.ticker && isCusip(security.id) ? [[byTicker.get(security.ticker.toUpperCase()), security.id.toUpperCase()] as const] : []))));
+  for (const [securityId, cusip] of cusips) {
+    if (securityId && !privateIds.has(securityId) && !cashIds.has(securityId)) shared.push(tenant.db.update(securities).set({ cusip }).where(tenant.scope(securities, eq(securities.id, securityId), isNull(securities.cusip))));
+  }
   // Market prices for the market funds in the files, fetched once.
   const fileTickers = new Set(holdingEntries.flatMap(({ entry }) => entry.file.securities.flatMap((security) => (security.ticker ? [security.ticker.toUpperCase()] : []))));
   const marketTickers = [...fileTickers].filter((ticker) => byTicker.has(ticker) && !cashTickers.has(ticker) && !privateIds.has(byTicker.get(ticker)!));
@@ -952,20 +958,24 @@ const MAX_SEARCHES = 25;
 
 /**
  * Tickers for securities a file names without one (some institutions give a
- * security no longer held only its CUSIP): a security of yours with the same
- * name first, else the market data provider's search by name, taking a US
- * listing whose name is the file's or starts the same (the shortest ticker
- * of several). Funds with no market
- * price (a plan's trusts) get none.
+ * security no longer held only its CUSIP): a security of yours with that
+ * CUSIP (remembered from an earlier file) or the same name first, else the
+ * market data provider's search by name, taking a US listing whose name is
+ * the file's or starts the same (the shortest ticker of several). Funds with
+ * no market price (a plan's trusts) get none. `unavailable` when the search
+ * was refused or down, so the page can say why the rest are blank.
  */
-export async function suggestTickers(deps: Deps, tenant: Tenant, wanted: { id: string; name: string }[]): Promise<TickerSuggestion[]> {
-  const rows = await tenant.db.select({ ticker: securities.ticker, name: securities.name, type: securities.type, isPublic: securities.isPublic }).from(securities).where(tenant.scope(securities));
-  const yours = new Map(rows.filter((row) => row.isPublic && row.ticker && row.name && !isCashSecurity(row)).map((row) => [nameKey(row.name!), row.ticker!.toUpperCase()]));
+export async function suggestTickers(deps: Deps, tenant: Tenant, wanted: { id: string; name: string }[]): Promise<TickerSuggestions> {
+  const rows = await tenant.db.select({ ticker: securities.ticker, name: securities.name, cusip: securities.cusip, type: securities.type, isPublic: securities.isPublic }).from(securities).where(tenant.scope(securities));
+  const market = rows.filter((row) => row.isPublic && row.ticker && !isCashSecurity(row));
+  const byCusip = new Map(market.flatMap((row) => (row.cusip ? [[row.cusip.toUpperCase(), row.ticker!.toUpperCase()] as const] : [])));
+  const yours = new Map(market.flatMap((row) => (row.name ? [[nameKey(row.name), row.ticker!.toUpperCase()] as const] : [])));
   const suggestions: TickerSuggestion[] = [];
   let searches = 0;
+  let unavailable = false;
   for (const { id, name } of wanted) {
     const key = nameKey(name);
-    const own = yours.get(key);
+    const own = byCusip.get(id.toUpperCase()) ?? yours.get(key);
     if (own) {
       suggestions.push({ id, ticker: own, from: 'yours', exact: true });
       continue;
@@ -984,6 +994,7 @@ export async function suggestTickers(deps: Deps, tenant: Tenant, wanted: { id: s
         // Rate-limited or down: no more searches this time; the rest are typed by hand.
         console.warn('Ticker search failed', describeError(error));
         searches = MAX_SEARCHES;
+        unavailable = true;
         break;
       }
       const named = found.filter((listing) => {
@@ -995,7 +1006,7 @@ export async function suggestTickers(deps: Deps, tenant: Tenant, wanted: { id: s
     }
     if (match) suggestions.push({ id, ticker: match.ticker, from: 'search', exact: nameKey(match.name) === key });
   }
-  return suggestions;
+  return { suggestions, unavailable };
 }
 
 /** Imports still being written, by account: how many of their windows of days are done. */
