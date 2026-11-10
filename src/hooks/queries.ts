@@ -12,9 +12,10 @@ import type {
   TransactionsResponse,
 } from '../../shared/types';
 import { api } from '../api';
+import type { Range } from '../../shared/ranges';
 import { useAuth } from './useAuth';
 
-export type Range = '1M' | '3M' | '6M' | 'YTD' | '1Y' | '2Y' | 'ALL';
+export type { Range };
 
 export function usePortfolio() {
   const { currency } = useAuth();

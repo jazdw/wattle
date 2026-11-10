@@ -4,7 +4,8 @@ import { useSearchParams } from 'react-router-dom';
 import { KIND_WORDS, TRANSACTION_KINDS, type TransactionKind } from '../../shared/transactionKinds';
 import { accountLabel } from '../../shared/accounts';
 import { fullDescription } from '../../shared/descriptions';
-import { addDays, marketDate, type IsoDate } from '../../shared/dates';
+import { fixedRangeStart } from '../../shared/ranges';
+import { marketDate } from '../../shared/dates';
 import type { Currency } from '../../shared/money';
 import type { TransactionEntry, TransferCandidatesResponse, TransferSide, TransfersResponse } from '../../shared/types';
 import { api } from '../api';
@@ -13,7 +14,7 @@ import { Dialog, DialogContent } from '../components/ui/dialog';
 import { PageHeader } from '../components/Layout';
 import { Card, CardContent } from '../components/ui/card';
 import { Input, NativeSelect } from '../components/ui/input';
-import { Segmented } from '../components/ui/segmented';
+import { RangePicker } from '../components/RangePicker';
 import { Alert, EmptyState, Skeleton, Td, Th } from '../components/ui/misc';
 import { useAccounts, useTransactions, type Range } from '../hooks/queries';
 import { ACCOUNT_TYPE_LABELS, ACCOUNT_TYPE_ORDER, changeClass, longDate, money, quantity } from '../lib/format';
@@ -180,24 +181,6 @@ function TransfersToCheck({ transfers, onDecide }: { transfers: TransfersRespons
   );
 }
 
-const RANGES: { value: Range; label: string }[] = [
-  { value: '1M', label: '1M' },
-  { value: '3M', label: '3M' },
-  { value: '6M', label: '6M' },
-  { value: 'YTD', label: 'YTD' },
-  { value: '1Y', label: '1Y' },
-  { value: '2Y', label: '2Y' },
-  { value: 'ALL', label: 'All' },
-];
-
-/** A preset's first day, as the Growth page counts it (the server's rangeStart). */
-function presetStart(range: Range, today: IsoDate): IsoDate | null {
-  const back: Partial<Record<Range, number>> = { '1M': 30, '3M': 91, '6M': 182, '1Y': 365, '2Y': 730 };
-  if (range === 'ALL') return null;
-  if (range === 'YTD') return `${today.slice(0, 4)}-01-01` as IsoDate;
-  return addDays(today, -back[range]!);
-}
-
 /** The transactions that could be this one's other side, to link it to yourself. */
 function LinkDialog({ entry, currency, onLink, onClose }: { entry: TransactionEntry; currency: Currency; onLink: (other: string) => void; onClose: () => void }) {
   const candidates = useQuery({
@@ -245,7 +228,7 @@ export function Transactions() {
   const accountsById = new Map(selectable.map((candidate) => [candidate.id, candidate]));
   // Filters: a preset (as on the Growth page), or dates from and to; and a search.
   const [preset, setPreset] = useState<Range | null>('1M');
-  const [from, setFrom] = useState(() => presetStart('1M', marketDate(new Date())) ?? '');
+  const [from, setFrom] = useState(() => fixedRangeStart('1M', marketDate(new Date())) ?? '');
   const [to, setTo] = useState('');
   const [search, setSearch] = useState('');
   const [query, setQuery] = useState('');
@@ -255,7 +238,7 @@ export function Transactions() {
   }, [search]);
   const choosePreset = (range: Range) => {
     setPreset(range);
-    setFrom(presetStart(range, marketDate(new Date())) ?? '');
+    setFrom(fixedRangeStart(range, marketDate(new Date())) ?? '');
     setTo('');
   };
   const chooseDates = (start: string, end: string) => {
@@ -343,7 +326,7 @@ export function Transactions() {
       {(account || everything) && (
         <Card className="mb-4">
           <CardContent className="flex flex-wrap items-end gap-3 py-3">
-            <Segmented value={preset ?? ('' as Range)} options={RANGES} onChange={choosePreset} />
+            <RangePicker value={preset} onChange={choosePreset} />
             <label className="grid gap-1 text-xs text-muted-foreground">
               From
               <Input type="date" className="h-8 w-40" value={from} onChange={(event) => chooseDates(event.target.value, to)} />

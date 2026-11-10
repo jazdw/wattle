@@ -10,6 +10,7 @@ import { normalizeWeights, CATEGORY_LABELS, type Category, type Classification }
 import { addDays, dateRange, marketDate, type IsoDate } from '../../shared/dates';
 import { convertMinor, type Currency } from '../../shared/money';
 import { dayQuality, type DailySource, type PriceSource, type Quality } from '../../shared/quality';
+import { fixedRangeStart, type Range } from '../../shared/ranges';
 import type { HistoryGroup, HistoryResponse, HistorySeries } from '../../shared/types';
 import { inChunks } from '../db/batch';
 import { accountDaily, accounts, holdingDaily, securities } from '../db/schema';
@@ -21,34 +22,20 @@ import { inTransit, linkedTransfers } from './transfers';
 import { defaultCategory, toCurrency } from './portfolio';
 import { fxLookup } from './pricing';
 
-export const RANGES = ['1M', '3M', '6M', 'YTD', '1Y', '2Y', 'ALL'] as const;
-export type Range = (typeof RANGES)[number];
+export { RANGES } from '../../shared/ranges';
+export type { Range };
 
 /** Days before the range start to look back for a value to carry forward. */
 const CARRY_DAYS = 31;
 
 export async function rangeStart(tenant: Tenant, range: Range, end: IsoDate): Promise<IsoDate> {
-  switch (range) {
-    case '1M':
-      return addDays(end, -30);
-    case '3M':
-      return addDays(end, -91);
-    case '6M':
-      return addDays(end, -182);
-    case 'YTD':
-      return `${end.slice(0, 4)}-01-01`;
-    case '1Y':
-      return addDays(end, -365);
-    case '2Y':
-      return addDays(end, -730);
-    case 'ALL': {
-      const [row] = await tenant.db
-        .select({ first: min(accountDaily.date) })
-        .from(accountDaily)
-        .where(tenant.scope(accountDaily));
-      return row?.first ?? addDays(end, -30);
-    }
-  }
+  const fixed = fixedRangeStart(range, end);
+  if (fixed) return fixed;
+  const [row] = await tenant.db
+    .select({ first: min(accountDaily.date) })
+    .from(accountDaily)
+    .where(tenant.scope(accountDaily));
+  return row?.first ?? addDays(end, -30);
 }
 
 interface Options {

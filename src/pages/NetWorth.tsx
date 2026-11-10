@@ -10,18 +10,10 @@ import { Badge } from '../components/ui/badge';
 import { Button } from '../components/ui/button';
 import { Card, CardContent, CardHeader, CardTitle } from '../components/ui/card';
 import { Alert, EmptyState, Skeleton } from '../components/ui/misc';
-import { Segmented } from '../components/ui/segmented';
+import { RangePicker } from '../components/RangePicker';
 import { useAccounts, useConnections, useHistory, usePortfolio, type Range } from '../hooks/queries';
 import { useAuth, useOwnerName } from '../hooks/useAuth';
 import { ACCOUNT_TYPE_LABELS, ACCOUNT_TYPE_ORDER, changeClass, formatPercent, money, relativeTime } from '../lib/format';
-
-const RANGES: { value: Range; label: string }[] = [
-  { value: '1M', label: '1M' },
-  { value: '3M', label: '3M' },
-  { value: 'YTD', label: 'YTD' },
-  { value: '1Y', label: '1Y' },
-  { value: 'ALL', label: 'All' },
-];
 
 export function NetWorth() {
   const { currency } = useAuth();
@@ -118,7 +110,7 @@ export function NetWorth() {
                   )}
                 </div>
                 <div className="flex flex-col items-end gap-2">
-                  <Segmented value={range} options={RANGES} onChange={setRange} />
+                  <RangePicker value={range} onChange={setRange} />
                   {portfolio.data && (
                     <div className="flex gap-4 text-right text-sm">
                       <div>

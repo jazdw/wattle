@@ -10,20 +10,11 @@ import { Card, CardContent } from '../components/ui/card';
 import { NativeSelect } from '../components/ui/input';
 import { EmptyState, Skeleton, Td, Th } from '../components/ui/misc';
 import { Segmented } from '../components/ui/segmented';
+import { RangePicker } from '../components/RangePicker';
 import { useAccounts, useHistory, type Range } from '../hooks/queries';
 import { useAuth } from '../hooks/useAuth';
 import { CATEGORY_COLORS } from '../lib/colors';
 import { ACCOUNT_TYPE_LABELS, ACCOUNT_TYPE_ORDER, changeClass, formatPercent, money } from '../lib/format';
-
-const RANGES: { value: Range; label: string }[] = [
-  { value: '1M', label: '1M' },
-  { value: '3M', label: '3M' },
-  { value: '6M', label: '6M' },
-  { value: 'YTD', label: 'YTD' },
-  { value: '1Y', label: '1Y' },
-  { value: '2Y', label: '2Y' },
-  { value: 'ALL', label: 'All' },
-];
 
 /** What the chart shows: the value split up, or where it came from (money in and out, returns, or both against the balance). */
 type Mode = 'balance' | 'activity' | 'returns' | 'overview';
@@ -123,7 +114,7 @@ export function Growth() {
       <PageHeader
         title="Growth"
         description="Daily values over time, and where they came from: money in and out, dividends and interest, fees, and market gain or loss."
-        actions={<Segmented value={range} options={RANGES} onChange={setRange} />}
+        actions={<RangePicker value={range} onChange={setRange} />}
       />
       <Card>
         <CardContent className="pt-4 sm:pt-5">
