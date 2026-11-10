@@ -238,12 +238,13 @@ export interface CloseGaps {
  * backfill), fetching only the missing edges. There's no bulk history
  * endpoint, so this is one request per ticker that needs it.
  */
-export async function ensureCloses(deps: Deps, tickers: string[], start: IsoDate, end: IsoDate): Promise<CloseGaps> {
+export async function ensureCloses(deps: Deps, tickers: string[], start: IsoDate, end: IsoDate, options: { checkSplits?: boolean } = {}): Promise<CloseGaps> {
   const gaps: CloseGaps = { failed: [], rateLimited: false };
   if (!deps.prices || tickers.length === 0) return gaps;
   const unique = normalise(tickers);
   const have = await coverage(deps, unique, end);
-  const unknownSplits = await unknownSplitSpans(deps, unique, start, end);
+  // `checkSplits: false` (an import: its share counts come from the file) asks only for closes that aren't stored.
+  const unknownSplits = options.checkSplits === false ? new Map<string, { from: IsoDate; to: IsoDate }>() : await unknownSplitSpans(deps, unique, start, end);
   const unknown = await knownUnknowns(deps, unique);
   const prices = deps.prices;
   const run = new PriceRun(deps, 'history');

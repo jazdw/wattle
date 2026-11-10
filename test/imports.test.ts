@@ -229,6 +229,24 @@ describe('import while market prices can’t be fetched', () => {
     expect(await position('2026-07-03', 'VTI')).toMatchObject({ quantity: 5, priceSource: 'interpolated' });
   });
 
+  it('asks the provider only for closes it hasn’t stored, and uses those it has when it refuses', async () => {
+    const { deps, send, position } = await household('investment', true);
+    // VTI's closes stored from before, without split factors (an import doesn't need them checked), to a few days before today:
+    // only those days are asked for, and the refusal leaves the rest at their closes.
+    const stored = closes('2026-05-01', 157, 100).map((row) => ({ ticker: 'VTI', date: row.date, close: row.close, source: 'tiingo' }));
+    for (let index = 0; index < stored.length; index += 15) await deps.db.insert(schema.pricesDaily).values(stored.slice(index, index + 15));
+    const history: Txn[] = [
+      { date: '2026-06-01', kind: 'deposit', fund: null, amount: 1000 },
+      { date: '2026-06-02', kind: 'buy', fund: 'VTI', shares: 5, price: 100 },
+      { date: '2026-08-03', kind: 'buy', fund: 'VTI', shares: 5, price: 100 },
+    ];
+    const response = await send(download([{ fund: 'VTI', shares: 10, price: 100 }], history, { cash: 0 }));
+    expect(response.status).toBe(200);
+    expect(response.body.accounts[0].estimated).toEqual([]);
+    await settle(deps);
+    expect(await position('2026-07-03', 'VTI')).toMatchObject({ quantity: 5, price: 100, priceSource: 'close' });
+  });
+
   it('prices them at each day’s close overnight, once the provider answers', async () => {
     const { deps, send, day, position, recover } = await household('investment', true);
     const history: Txn[] = [{ date: '2026-06-02', kind: 'buy', fund: 'VTI', shares: 5, price: 90, amount: 0 }];

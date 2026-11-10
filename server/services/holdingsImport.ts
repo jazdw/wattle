@@ -365,11 +365,13 @@ async function prepareImport(deps: Deps, tenant: Tenant, request: ImportRequest)
   let unfetched = new Set<string>();
   if (earliest && marketTickers.length > 0) {
     // Those it couldn't fetch (the provider down or rate-limited) are priced from the file instead, as estimates.
-    unfetched = new Set((await ensureCloses(deps, marketTickers, earliest, today)).failed);
+    unfetched = new Set((await ensureCloses(deps, marketTickers, earliest, today, { checkSplits: false })).failed);
     closes = await closeLookup(deps, marketTickers, addDays(earliest, -PRICE_LOOKBACK_DAYS), today);
   }
-  // Priced at each day's close: fetched, and known to the market data provider (else from the file, like a fund with no ticker).
-  const hasCloses = new Set(marketTickers.filter((ticker) => !unfetched.has(ticker) && closes(ticker, today) !== null));
+  // Priced at each day's close: known to the market data provider, with closes for the file's days (else from the file, like a fund
+  // with no ticker). One that couldn't be fetched just now (the provider refusing for too many requests) still uses the closes already
+  // stored when they reach back to the file's first day: often only a few recent days were being checked again.
+  const hasCloses = new Set(marketTickers.filter((ticker) => closes(ticker, today) !== null && (!unfetched.has(ticker) || (earliest !== undefined && closes(ticker, earliest) !== null))));
 
   for (const target of targets) {
     const { entry, account, created } = target;
@@ -915,7 +917,8 @@ export async function importReprice({ deps, tenant, job, renew }: JobContext): P
     if (rows.length === 0) return { rows: 0 };
     const tickers = [...new Set(rows.map((row) => row.ticker))];
     const dates = rows.map((row) => row.date).sort();
-    const gaps = await ensureCloses(deps, tickers, dates[0], dates.at(-1)!);
+    // Imported days' share counts come from the file: only closes not stored are asked for.
+    const gaps = await ensureCloses(deps, tickers, dates[0], dates.at(-1)!, { checkSplits: false });
     const size = daysPerBlock(deps, tickers.length);
     await enqueue(
       deps,

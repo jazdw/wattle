@@ -26,6 +26,17 @@ describe('daily closes', () => {
     expect(lookup('ZZZ', '2026-09-10')).toBeNull();
   });
 
+  it('asks again for closes stored without a split factor, unless the caller doesn’t need splits (an import)', async () => {
+    const prices = fakePrices({ VTI: closes('2026-09-01', 40, 100) });
+    const deps = await createTestDeps({ prices });
+    // From the IEX endpoint: no split factor.
+    await saveCloses(deps, closes('2026-09-01', 20, 100).map((row) => ({ ticker: 'VTI', date: row.date, close: row.close, currency: 'USD', source: 'tiingo', splitFactor: null })), { replace: false });
+    await ensureCloses(deps, ['VTI'], '2026-09-01', '2026-09-18', { checkSplits: false });
+    expect(prices.calls).toEqual([]);
+    await ensureCloses(deps, ['VTI'], '2026-09-01', '2026-09-18');
+    expect(prices.calls).toHaveLength(1);
+  });
+
   it('remembers tickers the provider does not know', async () => {
     const prices = fakePrices({});
     const deps = await createTestDeps({ prices });
