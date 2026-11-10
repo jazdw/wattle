@@ -30,7 +30,7 @@
  * over anything from the institution (shared/quality.ts). The days are
  * written as jobs, one window each (a load can be thousands of rows).
  */
-import { and, eq, gte, inArray, lte, min, ne, sql } from 'drizzle-orm';
+import { and, eq, gte, inArray, lte, min, sql } from 'drizzle-orm';
 import type { BatchItem } from 'drizzle-orm/batch';
 import { suggestClassification } from '../../shared/classify';
 import { addDays, dateRange, marketDate, type IsoDate } from '../../shared/dates';
@@ -377,8 +377,7 @@ async function prepareImport(deps: Deps, tenant: Tenant, request: ImportRequest)
     if (created) base.statements.push(tenant.db.insert(accounts).values(account));
     if (entry.file.kind === 'balances') {
       const dates = entry.file.rows.map((row) => row.date).sort();
-      const until = await keptUntil(tenant, account, dates.at(-1)!);
-      const stored = entry.file.transactions ? fileTransactionRows(tenant, account, entry.file.transactions.filter((txn) => txn.date <= until), now) : undefined;
+      const stored = entry.file.transactions ? fileTransactionRows(tenant, account, entry.file.transactions.filter((txn) => txn.date <= dates.at(-1)!), now) : undefined;
       plans.push({ ...base, balances: entry.file.rows, stored, days: dateRange(dates[0], dates.at(-1)!).length, from: dates[0], to: dates.at(-1)! });
       continue;
     }
@@ -626,12 +625,11 @@ async function planHoldings(deps: Deps, tenant: Tenant, context: HoldingsContext
     );
   }
 
-  // The file's transactions, stored with the account's: each window's with its days.
-  const until = await keptUntil(tenant, account, end);
+  // The file's transactions, stored with the account's: each window's with its days. On a linked account they count instead of the institution's on those days (./importedRecord).
   const stored = fileTransactionRows(
     tenant,
     account,
-    file.transactions.filter((txn) => txn.date <= until).map((txn) => ({ ...txn, security: txn.security ? securityOf.get(txn.security)! : null, fileSecurity: txn.security })),
+    file.transactions.filter((txn) => txn.date <= end).map((txn) => ({ ...txn, security: txn.security ? securityOf.get(txn.security)! : null, fileSecurity: txn.security })),
     now,
   );
   const size = daysPerBlock(deps, holdingsNow.length);
@@ -694,6 +692,7 @@ interface FileTransaction {
   kind: ImportKind;
   label: string;
   description?: string;
+  memo?: string;
   /** Cents in (+) or out (−), as the file has it. */
   amount: number;
   security?: string | null;
@@ -729,6 +728,7 @@ function fileTransactionRows(tenant: Tenant, account: Account, list: FileTransac
       type: txn.label,
       subtype: txn.kind,
       description: txn.description ?? null,
+      memo: txn.memo ?? null,
       securityId: txn.security ?? null,
       quantity: txn.shares ?? 0,
       price: txn.price ?? null,
@@ -736,20 +736,6 @@ function fileTransactionRows(tenant: Tenant, account: Account, list: FileTransac
       createdAt: now,
     };
   });
-}
-
-/**
- * The last day a file's transactions are kept for: a linked account's come
- * from Plaid (or its bank reports) from their first one on, so the file's
- * stop the day before; never past the days the file is written for.
- */
-async function keptUntil(tenant: Tenant, account: Account, end: IsoDate): Promise<IsoDate> {
-  if (account.source === 'manual') return end;
-  const [first] = await tenant.db
-    .select({ date: min(transactions.date) })
-    .from(transactions)
-    .where(tenant.scope(transactions, eq(transactions.accountId, account.id), ne(transactions.source, 'import')));
-  return first?.date && addDays(first.date, -1) < end ? addDays(first.date, -1) : end;
 }
 
 /** Statements deleting the account's imported transactions in `from`–`to` that the file no longer has. */
@@ -778,6 +764,7 @@ function transactionUpserts(tenant: Tenant, rows: StoredTransaction[]): BatchIte
           type: sql`excluded.type`,
           subtype: sql`excluded.subtype`,
           description: sql`excluded.description`,
+          memo: sql`excluded.memo`,
           securityId: sql`excluded.security_id`,
           quantity: sql`excluded.quantity`,
           price: sql`excluded.price`,

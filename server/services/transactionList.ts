@@ -9,6 +9,7 @@ import { kindOf } from '../../shared/transactionKinds';
 import type { TransactionEntry, TransactionsResponse } from '../../shared/types';
 import { inChunks } from '../db/batch';
 import { accounts, securities, transactions as transactionsTable, transfers } from '../db/schema';
+import { counted } from './importedRecord';
 import type { Tenant } from '../db/tenant';
 import { isCashSecurity } from './valuation';
 
@@ -24,12 +25,15 @@ export interface TransactionQuery {
 /** `account`: one account's; null, every visible account's. */
 export async function listTransactions(tenant: Tenant, account: typeof accounts.$inferSelect | null, query: TransactionQuery): Promise<TransactionsResponse> {
   const kind: TransactionsResponse['kind'] = !account ? 'all' : account.type === 'investment' ? 'investment' : 'bank';
-  const all = account ? tenant.scope(transactionsTable, eq(transactionsTable.accountId, account.id)) : tenant.scope(transactionsTable, eq(accounts.isHidden, false));
-  // Filters: dates from and to (inclusive), and words in the description or an amount (either way).
+  // The account's record: an import's on its days, the institution's on the rest (./importedRecord).
+  const all = account ? tenant.scope(transactionsTable, eq(transactionsTable.accountId, account.id), counted()) : tenant.scope(transactionsTable, eq(accounts.isHidden, false), counted());
+  // Filters: dates from and to (inclusive), and words in the description or memo, or an amount (either way).
   const day = (value: string | undefined) => (value && /^\d{4}-\d{2}-\d{2}$/.test(value) ? value : null);
   const from = day(query.from);
   const to = day(query.to);
   const words = query.q?.trim().slice(0, 100) ?? '';
+  const pattern = `%${words.replace(/[%_\\]/g, (found) => `\\${found}`)}%`;
+  const like = (column: typeof transactionsTable.description | typeof transactionsTable.memo) => sql`${column} like ${pattern} escape '\\'`;
   const searchedAmount = /^[-$\d.,\s]+$/.test(words) && /\d/.test(words) ? Math.round(Math.abs(Number(words.replace(/[^\d.]/g, ''))) * 100) : null;
   const scope = and(
     all,
@@ -38,7 +42,7 @@ export async function listTransactions(tenant: Tenant, account: typeof accounts.
     words
       ? searchedAmount !== null && Number.isFinite(searchedAmount)
         ? or(eq(transactionsTable.amount, searchedAmount), eq(transactionsTable.amount, -searchedAmount))
-        : sql`${transactionsTable.description} like ${`%${words.replace(/[%_\\]/g, (found) => `\\${found}`)}%`} escape '\\'`
+        : or(like(transactionsTable.description), like(transactionsTable.memo))
       : undefined,
   );
   const rows = await tenant.db
@@ -52,6 +56,7 @@ export async function listTransactions(tenant: Tenant, account: typeof accounts.
       subtype: transactionsTable.subtype,
       kind: transactionsTable.kind,
       description: transactionsTable.description,
+      memo: transactionsTable.memo,
       ticker: securities.ticker,
       security: securities.name,
       securityType: securities.type,

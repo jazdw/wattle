@@ -1,7 +1,7 @@
 /**
  * An import keeps its file's transactions as the account's: found again by
- * a re-import (a kind you set stays), and in a linked account only before
- * the institution's own begin.
+ * a re-import (a kind you set stays), and in a linked account counted
+ * instead of the institution's on the file's days.
  */
 import { and, asc, eq } from 'drizzle-orm';
 import { describe, expect, it } from 'vitest';
@@ -122,13 +122,18 @@ describe('imported transactions', () => {
     ]);
   });
 
-  it("in a linked account, keeps only the file's transactions before the institution's own begin, and gives way when older ones arrive", async () => {
-    const dividend = (id: string, date: string) => ({ investment_transaction_id: id, account_id: 'brk', security_id: 's-vti', date, name: 'Dividend', type: 'cash', subtype: 'dividend', quantity: 0, amount: -50, price: 0, fees: 0, iso_currency_code: 'USD' });
+  it("in a linked account, counts the file's transactions on its days and the institution's after, each of theirs that's one of the file's paired", async () => {
+    const plaidRow = (id: string, date: string, subtype: string, security: string | null, amount: number, name = subtype) => ({ investment_transaction_id: id, account_id: 'brk', security_id: security, date, name, type: 'cash', subtype, quantity: 0, amount, price: 0, fees: 0, iso_currency_code: 'USD' });
     const plaid = fakePlaid({
       accounts: [account('brk', 'investment', 2050)],
       securities: [security('s-vti', 'VTI', 'etf', 100), security('s-cash', 'CUR:USD', 'cash', 1, 'US Dollar')],
       holdings: [holding('brk', 's-vti', 20, 100), holding('brk', 's-cash', 50, 1)],
-      transactions: [dividend('p-1', '2026-08-03')],
+      transactions: [
+        // The file's Jul 15 dividend, a day late; its Sep 2 withdrawal two days late, after the file's last day, with the full description; then one of its own.
+        plaidRow('p-1', '2026-07-16', 'dividend', 's-vti', -50),
+        plaidRow('p-2', '2026-09-04', 'withdrawal', null, 500, 'From checking to savings'),
+        plaidRow('p-3', '2026-10-01', 'dividend', 's-vti', -50),
+      ],
     });
     const deps = await createTestDeps({ plaid, prices: fakePrices({ VTI: closes('2024-09-01', 800, 100) }) });
     const home = await createHousehold(deps, 'Home', 'me@example.com');
@@ -136,32 +141,51 @@ describe('imported transactions', () => {
     await api('/api/plaid/exchange', { method: 'POST', json: { publicToken: 'p', kind: 'investments' } });
     await settle(deps);
     const [brk] = await deps.db.select().from(schema.accounts);
-    const sources = async () =>
-      (await deps.db.select().from(schema.transactions).where(eq(schema.transactions.accountId, brk.id)).orderBy(asc(schema.transactions.date))).map((row) => [row.source, row.date]);
-
-    const response = await api('/api/imports', { method: 'POST', json: { accounts: [{ label: '··1234', target: { accountId: brk.id }, file: download(20, 50, HISTORY) }] } });
-    expect(response.status).toBe(200);
+    const listed = async () =>
+      ((await api(`/api/accounts/${brk.id}/transactions`)).body.transactions as { id: string; source: string; date: string; description: string | null; kind: string; kindByYou: boolean }[])
+        .map((row) => ({ source: row.source, date: row.date, description: row.description, kind: row.kind, kindByYou: row.kindByYou }))
+        .reverse();
+    // An import from before imports kept transactions (days, none of its own): Plaid's still count on its days.
+    const daysOnly: ImportedFile = { kind: 'balances', rows: [{ date: '2026-06-01', balance: 2000 }, { date: '2026-09-30', balance: 2050 }] };
+    const first = await api('/api/imports', { method: 'POST', json: { accounts: [{ label: '··1234', target: { accountId: brk.id }, file: daysOnly }] } });
+    expect(first.status).toBe(200);
     await settle(deps);
-    // Plaid's begin on Aug 3: the file's sale and withdrawal after that are Plaid's to tell.
-    expect(await sources()).toEqual([
-      ['import', '2026-05-29'],
-      ['import', '2026-06-01'],
-      ['import', '2026-07-15'],
-      ['plaid', '2026-08-03'],
+    expect((await listed()).map((row) => [row.source, row.date])).toEqual([
+      ['plaid', '2026-07-16'],
+      ['plaid', '2026-09-04'],
+      ['plaid', '2026-10-01'],
     ]);
 
-    // Plaid pulls more history: from Jul 1, its own transactions are the record.
-    plaid.state.transactions.push(dividend('p-0', '2026-07-01'));
+    // A kind you set on Plaid's withdrawal goes with it to the file's.
+    const [p2] = await deps.db.select().from(schema.transactions).where(eq(schema.transactions.externalId, 'p-2'));
+    expect((await api(`/api/transactions/${p2.id}`, { method: 'PATCH', json: { kind: 'fee' } })).status).toBe(200);
+
+    const history = HISTORY.map((row) => (row.id === 'F5' ? { ...row, description: 'From checking to sav' } : row));
+    const file = { ...download(20, 50, history), asOf: '2026-09-03' };
+    expect((await api('/api/imports', { method: 'POST', json: { accounts: [{ label: '··1234', target: { accountId: brk.id }, file }] } })).status).toBe(200);
+    await settle(deps);
+    expect(await listed()).toEqual([
+      { source: 'import', date: '2026-05-29', description: null, kind: 'buy', kindByYou: false },
+      { source: 'import', date: '2026-06-01', description: 'From checking', kind: 'deposit', kindByYou: false },
+      { source: 'import', date: '2026-07-15', description: 'dividend', kind: 'income', kindByYou: false },
+      { source: 'import', date: '2026-09-01', description: null, kind: 'sell', kindByYou: false },
+      { source: 'import', date: '2026-09-02', description: 'From checking to savings', kind: 'fee', kindByYou: true },
+      { source: 'plaid', date: '2026-10-01', description: 'dividend', kind: 'income', kindByYou: false },
+    ]);
+    // All Plaid's are still stored.
+    expect((await deps.db.select().from(schema.transactions).where(and(eq(schema.transactions.accountId, brk.id), eq(schema.transactions.source, 'plaid')))).length).toBe(3);
+
+    // Plaid sends an older one, so the history is rebuilt: the file's days stay the file's.
+    plaid.state.transactions.push(plaidRow('p-0', '2026-05-01', 'deposit', null, -100));
     deps.now = () => new Date(new Date(TODAY).getTime() + 2 * 86400_000);
     const [connection] = await deps.db.select().from(schema.connections);
     expect((await api(`/api/connections/${connection.id}/sync`, { method: 'POST' })).status).toBe(200);
     await settle(deps);
-    expect(await sources()).toEqual([
-      ['import', '2026-05-29'],
-      ['import', '2026-06-01'],
-      ['plaid', '2026-07-01'],
-      ['plaid', '2026-08-03'],
-    ]);
-    expect((await deps.db.select().from(schema.transactions).where(and(eq(schema.transactions.accountId, brk.id), eq(schema.transactions.source, 'import')))).map((row) => row.externalId)).toEqual(['F1', 'F2']);
+    const days = await deps.db.select({ date: schema.accountDaily.date, source: schema.accountDaily.source }).from(schema.accountDaily).where(eq(schema.accountDaily.accountId, brk.id));
+    const fileDays = days.filter((day) => day.date >= '2026-05-29' && day.date <= '2026-09-03');
+    expect(fileDays.length).toBeGreaterThan(90);
+    expect(fileDays.every((day) => day.source === 'import')).toBe(true);
+    expect(days.some((day) => day.date < '2026-05-29' && day.source === 'rebuilt')).toBe(true);
+    expect((await listed()).map((row) => [row.source, row.date])[0]).toEqual(['plaid', '2026-05-01']);
   });
 });

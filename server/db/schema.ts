@@ -13,6 +13,7 @@
  */
 import { sql } from 'drizzle-orm';
 import {
+  type AnySQLiteColumn,
   index,
   integer,
   primaryKey,
@@ -318,6 +319,8 @@ export const transactions = sqliteTable(
     type: text('type'),
     subtype: text('subtype'),
     description: text('description'),
+    /** A Quicken file's MEMO beside its NAME (the description), as the file has it; shown joined (shared/descriptions.ts). */
+    memo: text('memo'),
     securityId: text('security_id').references(() => securities.id, { onDelete: 'set null' }),
     /** Units; positive for buys, negative for sells. */
     quantity: real('quantity').notNull().default(0),
@@ -325,6 +328,8 @@ export const transactions = sqliteTable(
     fees: integer('fees'),
     /** Set by you; null: worked out from the type when read. */
     kind: text('kind', { enum: TRANSACTION_KINDS }),
+    /** An imported transaction that is this one (Plaid's or a report's, shown a day or two apart): the import's counts instead (services/importedRecord.ts). */
+    replacedBy: text('replaced_by').references((): AnySQLiteColumn => transactions.id, { onDelete: 'set null' }),
     createdAt: integer('created_at').notNull(),
   },
   (table) => [

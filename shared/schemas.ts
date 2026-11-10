@@ -138,6 +138,8 @@ export const importedHoldingsSchema = z.object({
         /** The file's own name for the type, for messages. */
         label: z.string().trim().min(1).max(60),
         description: fileDescription,
+        /** A Quicken file's MEMO beside its NAME (the description), as the file has it. */
+        memo: fileDescription,
         /** Null for cash. */
         security: securityRef.nullable(),
         /** Signed: shares in positive. */
@@ -168,6 +170,7 @@ export const importedBalancesSchema = z.object({
         kind: z.enum(IMPORT_KINDS),
         label: z.string().trim().min(1).max(60),
         description: fileDescription,
+        memo: fileDescription,
         /** Cents in (+) or out (−) of the account; a card's purchases out, its payments in. */
         amount: z.number().int(),
       }),

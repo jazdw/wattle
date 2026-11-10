@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { bankSgml, buy, fee, sgml } from '../test/ofx';
-import { bankDescription, isOfx, ofxAccounts, positionShares } from './ofx';
+import { fullDescription } from '../../shared/descriptions';
+import { bankText, isOfx, ofxAccounts, positionShares } from './ofx';
 
 describe('ofxAccounts', () => {
   it("reads an investment account's securities, positions, cash and transactions", () => {
@@ -192,21 +193,30 @@ describe('positionShares', () => {
   });
 });
 
-describe('bankDescription', () => {
-  it('joins a description a bank split across NAME and MEMO, and marks a part cut off at the limit', () => {
-    // Made up: NAME filled to its 32 characters, MEMO going on mid-word, and cut off too.
-    expect(bankDescription('Online Transfer 12345678901 to E', 'xample savings ####1234 transfer')).toBe('Online Transfer 12345678901 to Example savings ####1234 transfer…');
-    expect(bankDescription('', 'Example Savings  1234 transferre')).toBe('Example Savings  1234 transferre…');
-    expect(bankDescription('PAYROLL', '')).toBe('PAYROLL');
-    expect(bankDescription('EXAMPLE STORE', 'Card purchase')).toBe('EXAMPLE STORE · Card purchase');
-    expect(bankDescription('Interest', 'Interest')).toBe('Interest');
+describe('bankText', () => {
+  it("keeps a bank's NAME and MEMO as they are, dropping only exact repeats", () => {
+    // Made up: NAME filled to its 32 characters, MEMO going on mid-word.
+    expect(bankText('Online Transfer 12345678901 to E', 'xample savings ####1234 transfer')).toEqual({ description: 'Online Transfer 12345678901 to E', memo: 'xample savings ####1234 transfer' });
+    expect(bankText('', 'Example Savings  1234 transferre')).toEqual({ description: 'Example Savings  1234 transferre' });
+    expect(bankText('PAYROLL', '')).toEqual({ description: 'PAYROLL' });
+    expect(bankText('', '')).toEqual({});
+    expect(bankText('EXAMPLE STORE', 'Card purchase')).toEqual({ description: 'EXAMPLE STORE', memo: 'Card purchase' });
+    expect(bankText('Interest', 'Interest')).toEqual({ description: 'Interest' });
     // Written twice running by the institution: once.
-    expect(bankDescription('', 'INTEREST PAYMENTINTEREST PAYMENT')).toBe('INTEREST PAYMENT');
-    expect(bankDescription('', 'ABAB')).toBe('ABAB');
+    expect(bankText('', 'INTEREST PAYMENTINTEREST PAYMENT')).toEqual({ description: 'INTEREST PAYMENT' });
+    expect(bankText('', 'ABAB')).toEqual({ description: 'ABAB' });
+    // NAME the start of a MEMO that has it all.
+    expect(bankText('Example plan contribution from e', 'Example plan contribution from employer')).toEqual({ description: 'Example plan contribution from employer' });
     // Interest a bank gives no type of its own reads as income.
     const [account] = ofxAccounts(bankSgml([['20260910', '0.13']], '100.00').replace('<NAME>Example</NAME>', '<NAME>INTEREST PAYMENT</NAME>'));
     expect(account.file.kind === 'balances' && account.file.transactions?.[0]).toMatchObject({ kind: 'income', description: 'INTEREST PAYMENT' });
-    // NAME the start of a MEMO that has it all.
-    expect(bankDescription('Example plan contribution from e', 'Example plan contribution from employer')).toBe('Example plan contribution from employer');
+  });
+
+  it('shows the two joined: straight on from a NAME cut at its limit, else with a dot', () => {
+    expect(fullDescription('Online Transfer 12345678901 to E', 'xample savings')).toBe('Online Transfer 12345678901 to Example savings');
+    expect(fullDescription('EXAMPLE STORE', 'Card purchase')).toBe('EXAMPLE STORE · Card purchase');
+    expect(fullDescription('PAYROLL', null)).toBe('PAYROLL');
+    expect(fullDescription(null, 'Card purchase')).toBe('Card purchase');
+    expect(fullDescription(null, null)).toBeNull();
   });
 });

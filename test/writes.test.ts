@@ -9,6 +9,11 @@ import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 
 const REVIEWED: Record<string, Record<string, string>> = {
+  'server/services/importedRecord.ts': {
+    transactions:
+      "the pairing, at the start of match_transfers: replacedBy, a longer description and a kind you set (only where none is) on rows it just read, by id; worked out again on every match, after each sync, report and import",
+    transfers: 'the pairing: automatic and suggested ones on transactions that no longer count deleted (matching redoes them), and ones you decided moved to the paired import row unless it has its own; in one batch',
+  },
   'server/services/sync.ts': {
     connections: 'connection lease; status via statusStatement (newest wins)',
     accounts: 'connection lease, in the sync pass batch',

@@ -109,6 +109,8 @@ export interface TransactionEntry {
   /** The transfer between your accounts it's one side of (linked automatically or by you). */
   transfer: { id: string; status: 'auto' | 'confirmed'; accountId: string; accountName: string; institutionName: string | null; mask: string | null; date: string } | null;
   description: string | null;
+  /** A Quicken file's MEMO beside its NAME: shown joined (shared/descriptions.ts fullDescription). */
+  memo: string | null;
   ticker: string | null;
   security: string | null;
   quantity: number | null;
@@ -128,6 +130,7 @@ export interface TransferSide {
   /** Cents, positive when money leaves the account (Plaid's convention). */
   amount: number;
   currency: Currency;
+  /** Its description and memo joined (shared/descriptions.ts). */
   description: string | null;
 }
 

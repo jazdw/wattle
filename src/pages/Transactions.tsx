@@ -3,6 +3,7 @@ import { useEffect, useState } from 'react';
 import { useSearchParams } from 'react-router-dom';
 import { KIND_WORDS, TRANSACTION_KINDS, type TransactionKind } from '../../shared/transactionKinds';
 import { accountLabel } from '../../shared/accounts';
+import { fullDescription } from '../../shared/descriptions';
 import { addDays, marketDate, type IsoDate } from '../../shared/dates';
 import type { Currency } from '../../shared/money';
 import type { TransactionEntry, TransferCandidatesResponse, TransferSide, TransfersResponse } from '../../shared/types';
@@ -16,6 +17,9 @@ import { Segmented } from '../components/ui/segmented';
 import { Alert, EmptyState, Skeleton, Td, Th } from '../components/ui/misc';
 import { useAccounts, useTransactions, type Range } from '../hooks/queries';
 import { ACCOUNT_TYPE_LABELS, ACCOUNT_TYPE_ORDER, changeClass, longDate, money, quantity } from '../lib/format';
+
+/** A transaction's description and memo (a Quicken file's NAME and MEMO), joined to show. */
+const textOf = (entry: TransactionEntry) => fullDescription(entry.description, entry.memo);
 
 /** The institution's own name for the type, when it says more than the kind does. */
 function ownType(entry: TransactionEntry): string | null {
@@ -33,7 +37,7 @@ function KindSelect({ entry, onChange }: { entry: TransactionEntry; onChange: (k
     <NativeSelect
       value={entry.kindByYou ? (entry.kind ?? '') : ''}
       onChange={(event) => onChange((event.target.value || null) as TransactionKind | null)}
-      aria-label={`Type of ${entry.description ?? 'transaction'} on ${longDate(entry.date)}`}
+      aria-label={`Type of ${textOf(entry) ?? 'transaction'} on ${longDate(entry.date)}`}
       className={`h-8 ${entry.kind === null ? 'border-amber-500' : ''}`}
     >
       <option value="">Automatic: {automatic}</option>
@@ -410,10 +414,10 @@ export function Transactions() {
                         {investment || (mixed && (entry.ticker || entry.security)) ? (
                           <>
                             <span className="font-medium">{entry.ticker ?? entry.security ?? '—'}</span>
-                            {entry.description && <span className="ml-2 text-xs text-muted-foreground">{entry.description}</span>}
+                            {textOf(entry) && <span className="ml-2 text-xs text-muted-foreground">{textOf(entry)}</span>}
                           </>
                         ) : (
-                          (entry.description ?? '—')
+                          (textOf(entry) ?? '—')
                         )}
                       </Td>
                       {shares && <Td className="text-right tabular-nums">{entry.quantity ? quantity(entry.quantity) : ''}</Td>}
@@ -431,7 +435,7 @@ export function Transactions() {
                             </Button>
                           </span>
                         ) : entry.kind === 'deposit' || entry.kind === 'withdrawal' ? (
-                          <Button size="sm" variant="ghost" className="h-6 px-2" onClick={() => setLinking(entry)} aria-label={`Link ${entry.description ?? 'transaction'} on ${longDate(entry.date)} to a transfer`}>
+                          <Button size="sm" variant="ghost" className="h-6 px-2" onClick={() => setLinking(entry)} aria-label={`Link ${textOf(entry) ?? 'transaction'} on ${longDate(entry.date)} to a transfer`}>
                             Link…
                           </Button>
                         ) : null}

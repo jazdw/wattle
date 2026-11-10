@@ -18,12 +18,14 @@
  */
 import { eq, inArray } from 'drizzle-orm';
 import type { BatchItem } from 'drizzle-orm/batch';
+import { fullDescription } from '../../shared/descriptions';
 import type { IsoDate } from '../../shared/dates';
 import { kindOf } from '../../shared/transactionKinds';
 import { inChunks, runAtomic } from '../db/batch';
 import { accounts, jobs, securities, transactions, transfers } from '../db/schema';
 import type { Tenant } from '../db/tenant';
 import type { Deps } from '../ports';
+import { counted, pairImported } from './importedRecord';
 import { enqueue, type JobContext } from './jobRunner';
 import { isCashSecurity } from './valuation';
 
@@ -62,6 +64,7 @@ export async function moneyMoves(tenant: Tenant): Promise<MoneyMove[]> {
       subtype: transactions.subtype,
       quantity: transactions.quantity,
       description: transactions.description,
+      memo: transactions.memo,
       institution: accounts.institutionName,
       securityType: securities.type,
       ticker: securities.ticker,
@@ -70,14 +73,15 @@ export async function moneyMoves(tenant: Tenant): Promise<MoneyMove[]> {
     .from(transactions)
     .innerJoin(accounts, eq(accounts.id, transactions.accountId))
     .leftJoin(securities, eq(securities.id, transactions.securityId))
-    .where(tenant.scope(transactions, eq(accounts.isHidden, false)));
+    .where(tenant.scope(transactions, eq(accounts.isHidden, false), counted()));
   return rows
     .filter((row) => row.amount !== 0)
     .filter((row) => {
       const kind = kindOf(row, row.hasSecurity !== null && isCashSecurity({ ticker: row.ticker, type: row.securityType }));
       return kind === 'deposit' || kind === 'withdrawal';
     })
-    .map(({ id, accountId, date, amount, currency, description, institution }) => ({ id, accountId, date, amount, currency, description, institution }));
+    // Its whole text: a reference number can run from a file's NAME on into its MEMO.
+    .map(({ id, accountId, date, amount, currency, description, memo, institution }) => ({ id, accountId, date, amount, currency, description: fullDescription(description, memo), institution }));
 }
 
 /** Each pair that could be one transfer: `out` leaves one account, `in` arrives in another. */
@@ -113,6 +117,8 @@ export function names(description: string | null | undefined, institution: strin
 
 /** Pair each transfer it can (see the top): linked when there's only one way to, suggested when there's more. */
 export async function matchTransfers(deps: Deps, tenant: Tenant): Promise<{ auto: number; suggested: number }> {
+  // Imported transactions first paired with the institution's, which then don't count (./importedRecord).
+  await pairImported(tenant);
   const existing = await tenant.db.select().from(transfers).where(tenant.scope(transfers));
   const linked = new Set(existing.filter((row) => row.status === 'auto' || row.status === 'confirmed').flatMap((row) => [row.outId, row.inId]));
   const rejected = new Set(existing.filter((row) => row.status === 'rejected').map((row) => `${row.outId}|${row.inId}`));
@@ -239,7 +245,7 @@ export async function linkedTransfers(tenant: Tenant): Promise<{ id: string; sta
   return pairsWithMoves(tenant, rows) as Promise<{ id: string; status: 'auto' | 'confirmed'; out: MoneyMove; in: MoneyMove }[]>;
 }
 
-/** Transfers with both sides' details (only those whose accounts are both visible). */
+/** Transfers with both sides' details (only those whose accounts are both visible, and both sides counted: ./importedRecord). */
 export async function pairsWithMoves<T extends { outId: string; inId: string }>(tenant: Tenant, rows: T[]): Promise<(Omit<T, 'outId' | 'inId'> & { out: MoneyMove; in: MoneyMove })[]> {
   const ids = [...new Set(rows.flatMap((row) => [row.outId, row.inId]))];
   const found = new Map<string, MoneyMove>();
@@ -248,7 +254,7 @@ export async function pairsWithMoves<T extends { outId: string; inId: string }>(
       .select({ id: transactions.id, accountId: transactions.accountId, date: transactions.date, amount: transactions.amount, currency: transactions.currency })
       .from(transactions)
       .innerJoin(accounts, eq(accounts.id, transactions.accountId))
-      .where(tenant.scope(transactions, inArray(transactions.id, chunk), eq(accounts.isHidden, false)));
+      .where(tenant.scope(transactions, inArray(transactions.id, chunk), eq(accounts.isHidden, false), counted()));
     for (const move of moves) found.set(move.id, move);
   }
   return rows.flatMap(({ outId, inId, ...rest }) => (found.has(outId) && found.has(inId) ? [{ ...rest, out: found.get(outId)!, in: found.get(inId)! }] : []));

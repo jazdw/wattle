@@ -4,6 +4,7 @@
  * (worked back from the file's positions and cash, as the server does), or
  * each dated balance with its change.
  */
+import { fullDescription } from '../../shared/descriptions';
 import type { ImportedFile, ImportKind } from '../../shared/schemas';
 import { KIND_WORDS } from '../../shared/transactionKinds';
 
@@ -61,7 +62,7 @@ export function previewRows(file: ImportedFile): PreviewRow[] {
       date: txn.date,
       label: KIND_WORDS[txn.kind],
       // The file's description, else its own name for the type when that's a word (a CSV's "Contribution", not a Quicken file's BUYMF).
-      description: (txn as { description?: string }).description ?? (/^[A-Z]+$/.test(txn.label) || txn.label === 'CSV' || txn.label.toLowerCase() === KIND_WORDS[txn.kind].toLowerCase() ? null : txn.label),
+      description: fullDescription((txn as { description?: string }).description, (txn as { memo?: string }).memo) ?? (/^[A-Z]+$/.test(txn.label) || txn.label === 'CSV' || txn.label.toLowerCase() === KIND_WORDS[txn.kind].toLowerCase() ? null : txn.label),
       kind: txn.kind,
       security: txn.security,
       shares: sharesIn(txn),

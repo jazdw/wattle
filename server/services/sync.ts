@@ -3,7 +3,7 @@
  * transactions, and error states. Data for hidden accounts is dropped here —
  * it is never written.
  */
-import { eq, gte, inArray, isNotNull, isNull, lte, ne, notInArray, or, sql } from 'drizzle-orm';
+import { eq, inArray, isNotNull, isNull, lte, ne, notInArray, or, sql } from 'drizzle-orm';
 import type { AccountBase, Holding, InvestmentTransaction, Security as PlaidSecurity } from 'plaid';
 import { suggestClassification } from '../../shared/classify';
 import { addDays, lastMarketClose, marketDate } from '../../shared/dates';
@@ -907,7 +907,6 @@ async function planTransactions(
       createdAt: deps.now().getTime(),
     }));
   writes.push(
-    ...importedFrom(tenant, rows),
     ...chunkRows(transactions, rows).map((chunk) =>
       tenant.db
         .insert(transactions)
@@ -1016,19 +1015,6 @@ export async function reconnectConnection(deps: Deps, tenant: Tenant, connection
   } finally {
     await lease.forceRelease();
   }
-}
-
-/**
- * Statements deleting a file's transactions (imported into a linked account)
- * from the day the institution's own begin: theirs are the record from there,
- * and an import only fills in what came before.
- */
-export function importedFrom(tenant: Tenant, rows: { accountId: string; date: string }[]): BatchItem<'sqlite'>[] {
-  const first = new Map<string, string>();
-  for (const row of rows) if (!first.has(row.accountId) || row.date < first.get(row.accountId)!) first.set(row.accountId, row.date);
-  return [...first].map(([accountId, date]) =>
-    tenant.db.delete(transactions).where(tenant.scope(transactions, eq(transactions.accountId, accountId), eq(transactions.source, 'import'), gte(transactions.date, date))),
-  );
 }
 
 /** All connections that should be synced by the daily job. */

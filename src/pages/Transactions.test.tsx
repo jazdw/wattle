@@ -20,6 +20,7 @@ const entry = (id: string, date: string, extra: Partial<TransactionEntry>): Tran
   automatic: null,
   transfer: null,
   description: null,
+  memo: null,
   ticker: null,
   security: null,
   quantity: null,

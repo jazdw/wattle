@@ -48,11 +48,11 @@ describe('transfer candidates', () => {
 });
 
 /** A bank account's made-up download: its balances and the transactions they came from (dollars here). */
-function bank(rows: [string, number][], transactions: { id: string; date: string; amount: number; description?: string }[]): ImportedFile {
+function bank(rows: [string, number][], transactions: { id: string; date: string; amount: number; description?: string; memo?: string }[]): ImportedFile {
   return {
     kind: 'balances',
     rows: rows.map(([date, balance]) => ({ date, balance })),
-    transactions: transactions.map((txn) => ({ id: txn.id, date: txn.date, kind: txn.amount > 0 ? 'deposit' : 'withdrawal', label: txn.amount > 0 ? 'CREDIT' : 'DEBIT', ...(txn.description ? { description: txn.description } : {}), amount: Math.round(txn.amount * 100) })),
+    transactions: transactions.map((txn) => ({ id: txn.id, date: txn.date, kind: txn.amount > 0 ? 'deposit' : 'withdrawal', label: txn.amount > 0 ? 'CREDIT' : 'DEBIT', ...(txn.description ? { description: txn.description } : {}), ...(txn.memo ? { memo: txn.memo } : {}), amount: Math.round(txn.amount * 100) })),
   };
 }
 
@@ -228,4 +228,27 @@ describe('transfers between your accounts', () => {
     expect(await linked()).toEqual([]);
     expect(await suggested()).toHaveLength(2);
   });
+
+  it("moves a transfer you confirmed to the file's transaction when an import brings one that is the institution's", async () => {
+    const { deps, home, api, create, linked, listed } = await household();
+    const checking = await create('Checking', bank([['2026-09-01', 1000], ['2026-09-10', 1000]], []));
+    const savings = await create('Savings', bank([['2026-09-01', 0], ['2026-09-10', 0]], []));
+    // The bank report's sides, after both files' days, linked by you.
+    const report = (id: string, accountId: string, amount: number, description: string) => ({ id, householdId: home.householdId, accountId, source: 'report' as const, externalId: id, date: '2026-09-12', amount, currency: 'USD', description, createdAt: 0 });
+    await deps.db.insert(schema.transactions).values([report('r-out', checking, 500_00, 'Online transfer to savings ref 1234567890'), report('r-in', savings, -500_00, 'Online transfer from checking')]);
+    await deps.db.insert(schema.transfers).values({ id: 't-1', householdId: home.householdId, outId: 'r-out', inId: 'r-in', status: 'confirmed', createdAt: 0, decidedAt: 0 });
+
+    // Checking's newer file has the transfer a day earlier, its text split across NAME (padded) and MEMO.
+    const response = await api('/api/imports', {
+      method: 'POST',
+      json: { accounts: [{ label: 'Checking', target: { accountId: checking }, file: bank([['2026-09-01', 1000], ['2026-09-11', 500], ['2026-09-12', 500]], [{ id: 'C1', date: '2026-09-11', amount: -500, description: 'Online transfer to     savings', memo: 'ref 1234567890' }]) }] },
+    });
+    expect(response.status).toBe(200);
+    await settle(deps);
+    const rows = await listed(checking);
+    expect(rows.map((row) => [row.source, row.date, row.description])).toEqual([['import', '2026-09-11', 'Online transfer to savings ref 1234567890']]);
+    const [transfer] = await linked();
+    expect(transfer).toMatchObject({ id: 't-1', status: 'confirmed', out: { transactionId: rows[0].id, date: '2026-09-11' }, in: { accountId: savings, date: '2026-09-12' } });
+  });
 });
+

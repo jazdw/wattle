@@ -8,6 +8,7 @@
  */
 import { parseStrict } from 'ofx-js';
 import { addDays, type IsoDate } from '../../shared/dates';
+import { fullDescription } from '../../shared/descriptions';
 import { toMinor } from '../../shared/money';
 import type { ImportedHoldings, ImportKind } from '../../shared/schemas';
 import type { FileAccount, ReadTransaction } from './imports';
@@ -120,7 +121,7 @@ function bankStatement(response: Element, institution: string | null, card: bool
   // A card's purchases are money out of it and its payments money in, as a bank account's are.
   const transactions = list(bankList?.STMTTRN as Element | Element[] | undefined).map((entry) => {
     const txn = cashTransaction(entry, text(entry.TRNTYPE).toUpperCase() || 'STMTTRN');
-    return { ...(txn.id ? { id: txn.id } : {}), date: txn.date, kind: txn.kind, label: txn.label, ...(txn.description ? { description: txn.description } : {}), amount: txn.amount };
+    return { ...(txn.id ? { id: txn.id } : {}), date: txn.date, kind: txn.kind, label: txn.label, ...(txn.description ? { description: txn.description } : {}), ...(txn.memo ? { memo: txn.memo } : {}), amount: txn.amount };
   });
   const rows = balanceRows(transactions, toMinor(number(ledger.BALAMT)), asOf, text(bankList?.DTSTART) ? day(bankList?.DTSTART) : null, card);
   const type = text(from?.ACCTTYPE);
@@ -137,36 +138,32 @@ function bankStatement(response: Element, institution: string | null, card: bool
 /** A bank account's ACCTTYPE as the kind of account it is (shared/accounts.ts). */
 const BANK_SUBTYPES: Record<string, string> = { CHECKING: 'checking', SAVINGS: 'savings', MONEYMRKT: 'money market', CD: 'cd' };
 
-/** OFX limits NAME to 32 characters. */
-const NAME_LENGTH = 32;
-
 /**
- * A bank transaction's description from its NAME and MEMO. Some banks split
- * one description across the two: NAME filled to its 32 characters, MEMO
- * going on (mid-word); the two are joined. A part cut off at that length
- * ends in "…", so it's plain it's cut.
+ * A bank transaction's NAME and MEMO, kept as the file has them (some banks
+ * split one description across the two: NAME filled to its 32 characters,
+ * MEMO going on). Only exact repeats are dropped: a MEMO that is the NAME, or
+ * holds all of it, and text the institution wrote twice running (decode).
  */
-export function bankDescription(name: string, memo: string): string {
+export function bankText(name: string, memo: string): { description?: string; memo?: string } {
   const [first, rest] = [decode(name), decode(memo)];
-  // Exactly the limit: cut off there (a whole one would rarely land on it).
-  const ending = (part: string) => (part.length === NAME_LENGTH ? '…' : '');
-  if (!first) return rest + ending(rest);
-  if (!rest || first.includes(rest)) return first + ending(first);
+  if (!first) return rest ? { description: rest } : {};
+  if (!rest || first.includes(rest)) return { description: first };
   // A MEMO holding the whole description, NAME its start.
-  if (rest.includes(first)) return rest + ending(rest);
-  return first.length === NAME_LENGTH ? first + rest + ending(rest) : `${first} · ${rest}${ending(rest)}`;
+  if (rest.includes(first)) return { description: rest };
+  return { description: first, memo: rest };
 }
 
 /** Money in or out of an account's cash (a bank statement's STMTTRN, an investment account's INVBANKTRAN). */
 function cashTransaction(bank: Element, label: string): ReadTransaction {
   const amount = toMinor(number(bank.TRNAMT));
-  const description = bankDescription(text(bank.NAME), text(bank.MEMO));
+  const words = bankText(text(bank.NAME), text(bank.MEMO));
+  const description = fullDescription(words.description, words.memo) ?? '';
   // The bank's own type says when it's interest, a dividend or a fee; otherwise in or out by its sign.
   const trntype = text(bank.TRNTYPE).toUpperCase();
   // Some banks give interest no type of its own: its description says so.
   const interest = trntype === 'INT' || trntype === 'DIV' || /\binterest (payment|paid|earned|credit)\b/i.test(description);
   const kind: ImportKind = interest && amount > 0 ? 'income' : (trntype === 'FEE' || trntype === 'SRVCHG') && amount < 0 ? 'fee' : amount < 0 ? 'withdrawal' : 'deposit';
-  return { ...(text(bank.FITID) ? { id: text(bank.FITID) } : {}), date: day(bank.DTPOSTED), kind, label, ...(description ? { description } : {}), security: null, shares: 0, price: 0, amount, value: 0, charges: 0 };
+  return { ...(text(bank.FITID) ? { id: text(bank.FITID) } : {}), date: day(bank.DTPOSTED), kind, label, ...words, security: null, shares: 0, price: 0, amount, value: 0, charges: 0 };
 }
 
 function statement(response: Element, securities: Map<string, ImportedHoldings['securities'][number]>, institution: string | null): FileAccount {

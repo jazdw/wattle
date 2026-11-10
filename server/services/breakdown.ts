@@ -29,6 +29,7 @@ import type { BreakdownRow, HistorySeries } from '../../shared/types';
 import { inChunks } from '../db/batch';
 import { holdingDaily, pricesDaily, securities, transactions } from '../db/schema';
 import type { Tenant } from '../db/tenant';
+import { counted } from './importedRecord';
 import { isCashSecurity } from './valuation';
 
 /** Days either side of a split that a transfer of its shares is taken to be the split. */
@@ -119,12 +120,12 @@ export async function breakdown(tenant: Tenant, input: BreakdownInput): Promise<
           securityId: transactions.securityId,
         })
         .from(transactions)
-        .where(tenant.scope(transactions, inArray(transactions.accountId, chunk), gte(transactions.date, addDays(first, 1)), lte(transactions.date, last)))),
+        .where(tenant.scope(transactions, inArray(transactions.accountId, chunk), gte(transactions.date, addDays(first, 1)), lte(transactions.date, last), counted()))),
     );
     const firsts = await tenant.db
       .select({ accountId: transactions.accountId, first: min(transactions.date) })
       .from(transactions)
-      .where(tenant.scope(transactions, inArray(transactions.accountId, chunk)))
+      .where(tenant.scope(transactions, inArray(transactions.accountId, chunk), counted()))
       .groupBy(transactions.accountId);
     for (const row of firsts) if (row.first) firstTransaction.set(row.accountId, row.first);
   }

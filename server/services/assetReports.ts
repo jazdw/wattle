@@ -27,7 +27,7 @@ import { enqueue, RetryLater, type JobContext } from './jobRunner';
 import { connectionLease, Lease } from './lease';
 import { missedRetryStatement } from './backfill';
 import { QUALITY_SET, replaceWhere } from './quality';
-import { getConnection, importedFrom, isActive, type ConnectionRow } from './sync';
+import { getConnection, isActive, type ConnectionRow } from './sync';
 import { queueMatching } from './transfers';
 
 /**
@@ -180,7 +180,6 @@ async function reportByAccount(deps: Deps, tenant: Tenant, connection: Connectio
 function reportStatements(tenant: Tenant, rows: ReportRows): BatchItem<'sqlite'>[] {
   return [
     ...balanceStatements(tenant, rows.balances),
-    ...importedFrom(tenant, rows.transactions),
     ...chunkRows(transactions, rows.transactions).map((chunk) =>
       tenant.db.insert(transactions).values(chunk).onConflictDoNothing({ target: [transactions.accountId, transactions.source, transactions.externalId] }),
     ),

@@ -4,6 +4,7 @@
  */
 import { and, eq, inArray, or } from 'drizzle-orm';
 import { Hono } from 'hono';
+import { fullDescription } from '../../shared/descriptions';
 import { transactionPatchSchema, transferCreateSchema, transferPatchSchema } from '../../shared/schemas';
 import type { Currency } from '../../shared/money';
 import type { TransferCandidatesResponse, TransferSide, TransfersResponse } from '../../shared/types';
@@ -136,11 +137,12 @@ async function sides(tenant: Tenant, moves: MoneyMove[]): Promise<TransferSide[]
         amount: transactions.amount,
         currency: transactions.currency,
         description: transactions.description,
+        memo: transactions.memo,
       })
       .from(transactions)
       .innerJoin(accounts, and(eq(accounts.id, transactions.accountId), eq(accounts.householdId, transactions.householdId)))
       .where(tenant.scope(transactions, inArray(transactions.id, chunk)));
-    found.push(...rows.map((row) => ({ ...row, currency: row.currency as Currency })));
+    found.push(...rows.map(({ memo, ...row }) => ({ ...row, description: fullDescription(row.description, memo), currency: row.currency as Currency })));
   }
   return found.sort((a, b) => a.date.localeCompare(b.date));
 }
