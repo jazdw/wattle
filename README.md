@@ -271,6 +271,9 @@ Background jobs run in the same process: the fairest due job, one at a time, swe
 - **Rate of return.** The Growth page splits market gain or loss from money in and out in dollars; a percentage, time-weighted (performance alone) and money-weighted (your actual experience), would follow from the same breakdown.
 - **Inflation adjustment.** Values in today's money, from each currency's consumer price index, applied as the currency conversion is (needs an outside data source).
 - **Currency effect.** Split growth into what came from the assets themselves and what came from USD/AUD exchange-rate moves. In a mixed USD/AUD household, net worth in one currency can rise or fall just because the other currency moved. For each account in a different currency from the one displayed, compare its value at a fixed starting rate with its value at each day's rate.
+- **Overview measured from what you put in.** The Growth page's Overview shades the gap between the balance and money in less out from the range's first day, so a dip after the range starts reads as a loss even when the account is above everything ever put in. Measuring against all money put in since the account began (where known) would make red mean below what you put in.
+- **Price history for any holding.** Clicking a fund or ticker wherever it's shown opens a graph of its stored prices (in a dialog or a page), marking estimated ones.
+- **ADR custody fees as fees.** Some brokerage files send a depositary receipt's custody fee as plain cash out, so it counts as money out instead of against returns; today each is set to Fee on the Transactions page. A rule that recognises them would do it automatically.
 - **Benchmarks.** Compare the portfolio's return with VT, the S&P 500 or a 60/40 mix over the same period.
 - **Risk checks ("X-ray").** Simple rules with pass/warn results. For example:
   - too much in one account or one stock
@@ -288,6 +291,8 @@ Background jobs run in the same process: the fairest due job, one at a time, swe
 - **A better check for dividend reinvestments.** They're skipped by the import's price check today; compare them with a range of nearby closes, or allow for the share count's rounding, instead.
 - **Rebuild history on request** for investment logins: a button that marks the history stale and rebuilds it, rather than a change in the database.
 - **History older than a download reaches.** Institution downloads can be capped (e.g. 18 months); earlier history could come from statements.
+- **Account number aliases.** Other last digits an account is also known by, for matching a file's account to one of yours and for matching transfers: an authorized user's card, for one, is numbered differently in the cardholder's downloads.
+- **Where history starts.** Charts carry a linked account's first stored balance back to the range's start so totals don't jump when its history begins later, which draws a flat line before its first known day. Keeping it for totals only, so each account starts where its history does, would be clearer.
 - **CUSIP lookups.** A security a file names only by CUSIP is matched by name today; a CUSIP-to-ticker service (e.g. OpenFIGI) would find any, at the cost of an outside service.
 
 ### Transactions phase (checking and credit cards)
@@ -296,6 +301,7 @@ Background jobs run in the same process: the fairest due job, one at a time, swe
 - **Classification model.** A small decision/classification model instead of a chat LLM, e.g. TypeSafe's [Jev](https://openrouter.ai/typesafe/jev-1.13): it returns typed choices with probabilities, so anything below a confidence threshold goes to a review queue. Could also suggest fund classifications (category, size, style) for funds without a seeded profile. It needs only merchant or fund names and amounts, never account details. Vendor-reported accuracy and cost are unverified.
 - **Transfers in cash flow.** Transfers between your accounts are matched (see How it works); cash flow and budgets should leave them out of income and spending too. Share transfers between institutions, and transfers between currencies or less a fee, aren't matched yet.
 - **Edits ripple through.** Editing or recategorising an old transaction updates every derived view (cash flow, budgets, balances).
+- **Activity by month.** The Growth page's Activity view draws money in and out cumulatively, which suits investment accounts but grows into two huge mirror images for checking; monthly bars (in above zero, out below) with a line for each month's net would show whether a month ran short.
 - **Cash flow and budgets.** Monthly income vs spending (a Sankey diagram is popular), category budgets with remaining amounts, and trends.
 - **Recurring transactions and a planner.** Upcoming bills and income, projected cash flow, and the ability to drop in a planned transaction and see its effect.
 - **Per-property pages.** Rent, mortgage and expenses for each property, with only net cash flow feeding the household budget.

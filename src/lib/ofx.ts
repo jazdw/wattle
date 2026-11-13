@@ -41,6 +41,19 @@ const day = (value: unknown) => {
   const digits = text(value).slice(0, 8);
   return `${digits.slice(0, 4)}-${digits.slice(4, 6)}-${digits.slice(6, 8)}` as IsoDate;
 };
+/**
+ * An OFX date-time as the moment it is (an ISO instant, UTC): its offset
+ * from GMT when it gives one ([-5:EST]), else GMT, as OFX reads it. Null
+ * without a time of day.
+ */
+export const instant = (value: unknown): string | null => {
+  const found = text(value).match(/^(\d{4})(\d{2})(\d{2})(\d{2})(\d{2})(\d{2})?/);
+  if (!found) return null;
+  const offset = Number(text(value).match(/\[([+-]?\d+(?:\.\d+)?)/)?.[1] ?? 0);
+  const [, year, month, day, hour, minute, second] = found;
+  const at = Date.UTC(Number(year), Number(month) - 1, Number(day), Number(hour), Number(minute), Number(second ?? 0)) - offset * 3_600_000;
+  return Number.isNaN(at) ? null : new Date(at).toISOString();
+};
 /** ofx-js decodes one level of entities; some institutions escape twice (S&amp;amp;P). */
 const unescape = (value: string) =>
   value.replace(/&(amp|lt|gt|quot|apos|#39);/g, (_, name: string) => ({ amp: '&', lt: '<', gt: '>', quot: '"', apos: "'", '#39': "'" })[name] ?? '');
@@ -119,11 +132,14 @@ function bankStatement(response: Element, institution: string | null, card: bool
   const asOf = day(ledger.DTASOF);
   const bankList = response.BANKTRANLIST as Element | undefined;
   // A card's purchases are money out of it and its payments money in, as a bank account's are.
-  const transactions = list(bankList?.STMTTRN as Element | Element[] | undefined).map((entry) => {
-    const txn = cashTransaction(entry, text(entry.TRNTYPE).toUpperCase() || 'STMTTRN');
+  const read = list(bankList?.STMTTRN as Element | Element[] | undefined).map((entry) => cashTransaction(entry, text(entry.TRNTYPE).toUpperCase() || 'STMTTRN'));
+  const transactions = read.map((txn) => {
     return { ...(txn.id ? { id: txn.id } : {}), date: txn.date, kind: txn.kind, label: txn.label, ...(txn.description ? { description: txn.description } : {}), ...(txn.memo ? { memo: txn.memo } : {}), amount: txn.amount };
   });
-  const rows = balanceRows(transactions, toMinor(number(ledger.BALAMT)), asOf, text(bankList?.DTSTART) ? day(bankList?.DTSTART) : null, card);
+  const closing = toMinor(number(ledger.BALAMT));
+  const start = text(bankList?.DTSTART) ? day(bankList?.DTSTART) : null;
+  const end = text(bankList?.DTEND) ? day(bankList?.DTEND) : null;
+  const rows = balanceRows(transactions, closing, asOf, start, card);
   const type = text(from?.ACCTTYPE);
   return {
     number: text(from?.ACCTID) || null,
@@ -132,6 +148,17 @@ function bankStatement(response: Element, institution: string | null, card: bool
     ...(card ? { subtype: 'credit card' } : BANK_SUBTYPES[type] ? { subtype: BANK_SUBTYPES[type] } : {}),
     unknownTypes: [],
     file: { kind: 'balances', currency: text(response.CURDEF) || 'USD', rows, transactions },
+    // Checked, and worked out again with any other statement of the account, by combineAccounts.
+    statement: {
+      closing,
+      asOf,
+      at: instant(ledger.DTASOF),
+      start,
+      end,
+      owed: card,
+      transactions: read,
+      files: [{ name: null, from: start ?? read[0]?.date ?? asOf, to: end ?? read.at(-1)?.date ?? asOf, count: read.length, balance: closing, asOf, at: instant(ledger.DTASOF) }],
+    },
   };
 }
 

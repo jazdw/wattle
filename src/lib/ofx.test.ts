@@ -1,7 +1,17 @@
 import { describe, expect, it } from 'vitest';
 import { bankSgml, buy, fee, sgml } from '../test/ofx';
 import { fullDescription } from '../../shared/descriptions';
-import { bankText, isOfx, ofxAccounts, positionShares } from './ofx';
+import { bankText, instant, isOfx, ofxAccounts, positionShares } from './ofx';
+
+describe('instant', () => {
+  it('reads an OFX date-time as the moment it is: GMT unless it gives its offset', () => {
+    expect(instant('20260305081500.250')).toBe('2026-03-05T08:15:00.000Z');
+    expect(instant('20260305101500.000[-5:EST]')).toBe('2026-03-05T15:15:00.000Z');
+    expect(instant('20260305120000[0:GMT]')).toBe('2026-03-05T12:00:00.000Z');
+    expect(instant('20260305093000[+5.5:IST]')).toBe('2026-03-05T04:00:00.000Z');
+    expect(instant('20260305')).toBeNull();
+  });
+});
 
 describe('ofxAccounts', () => {
   it("reads an investment account's securities, positions, cash and transactions", () => {

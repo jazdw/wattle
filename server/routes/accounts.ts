@@ -2,8 +2,9 @@
 import { and, count, desc, eq, inArray, isNotNull, isNull, lt, notInArray } from 'drizzle-orm';
 import { Hono } from 'hono';
 import { suggestClassification } from '../../shared/classify';
-import { marketDate } from '../../shared/dates';
+import { isIsoDate, marketDate } from '../../shared/dates';
 import { convertMinor } from '../../shared/money';
+import { OBSERVED_SOURCES } from '../../shared/quality';
 import {
   accountPatchSchema,
   balanceEntrySchema,
@@ -500,6 +501,16 @@ accountRoutes.get('/:id/balances', async (c) => {
   const tenant = c.get('tenant');
   const account = await getAccount(tenant, c.req.param('id'));
   if (!account) notFound('Account not found.');
+  // ?on=: its balance that day as observed (a file, the institution, you), not carried from another day: an import starts from it.
+  const on = c.req.query('on');
+  if (on !== undefined) {
+    if (!isIsoDate(on)) throw new HttpError(400, 'on: a date, YYYY-MM-DD.');
+    const rows = await tenant.db
+      .select({ date: accountDaily.date, balance: accountDaily.balance, source: accountDaily.source })
+      .from(accountDaily)
+      .where(tenant.scope(accountDaily, eq(accountDaily.accountId, account.id), eq(accountDaily.date, on), inArray(accountDaily.source, [...OBSERVED_SOURCES]), eq(accountDaily.unmatched, false)));
+    return c.json({ balances: rows });
+  }
   const rows = await tenant.db
     .select({ date: accountDaily.date, balance: accountDaily.balance, source: accountDaily.source })
     .from(accountDaily)

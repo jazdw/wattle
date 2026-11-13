@@ -6,6 +6,8 @@
  * bank and card accounts; a CSV is dates and balances, or transactions
  * worked out from a balance you give (./csv, ./known).
  */
+import { addDays, type IsoDate } from '../../shared/dates';
+import { longDate } from './format';
 import type { ImportedBalances, ImportedFile, ImportedHoldings } from '../../shared/schemas';
 import type { AccountType } from '../../shared/types';
 import type { Unanchored } from './known';
@@ -16,6 +18,42 @@ import { isOfx, ofxAccounts } from './ofx';
 export type ReadTransaction = ImportedHoldings['transactions'][number];
 /** A bank or card account's transaction, as a balances file carries it. */
 export type CashTransaction = NonNullable<ImportedBalances['transactions']>[number];
+
+/** A bank or card statement's own figures (./ofx), kept to work it out with others of its account. */
+export interface Statement {
+  /** Its balance (cents, as the file signs it: a card's owed is below zero) and when that's from. */
+  closing: number;
+  asOf: IsoDate;
+  /** The moment the balance is from (an ISO instant), for saying when, in your time zone. */
+  at: string | null;
+  /** The days its transactions cover, as it says (DTSTART, DTEND). */
+  start: IsoDate | null;
+  end: IsoDate | null;
+  owed: boolean;
+  transactions: ReadTransaction[];
+  /** Each file it came from, for the import page to show (one, until several of an account are combined). */
+  files: StatementFile[];
+}
+
+/** One file's statement of an account, as the import page shows it. */
+export interface StatementFile {
+  name: string | null;
+  from: IsoDate;
+  to: IsoDate;
+  count: number;
+  /** Cents, as the file signs it. */
+  balance: number;
+  asOf: IsoDate;
+  at: string | null;
+}
+
+/**
+ * Whether a statement's balance is its balance where its transactions end: dated
+ * their last day or the next (banks end the list on the day of the download or
+ * the day before). Any later, days in between could hold transactions it doesn't
+ * have, so it isn't used.
+ */
+export const balanceAtEnd = (asOf: IsoDate, end: IsoDate) => asOf <= addDays(end, 1);
 
 /** One account in the files. */
 export interface FileAccount {
@@ -29,6 +67,13 @@ export interface FileAccount {
   /** Its kind within that, when the file says (shared/accounts.ts: checking, savings…). */
   subtype?: string;
   file: ImportedFile;
+  /**
+   * A bank or card statement's own figures, so several of one account are
+   * worked out together (combineAccounts): its closing balance (cents, as the
+   * file signs it) and the day it's as of, the days its transactions cover,
+   * and those transactions as read.
+   */
+  statement?: Statement;
   /** Transactions with no balance in the file: the file is worked out once one is known (./known). */
   unanchored?: Unanchored;
   /** Transaction types the reader doesn't understand: the account can't be imported until they are. */
@@ -47,7 +92,8 @@ export function readFiles(contents: string[], names: string[] = []): ReadFiles {
     if (isOfx(content)) {
       const accounts = ofxAccounts(content);
       if (accounts.length === 0) throw new Error('A Quicken file has no accounts in it.');
-      perFile.push(accounts);
+      // Each statement's file, by name, for the import page.
+      perFile.push(accounts.map((account) => (account.statement ? { ...account, statement: { ...account.statement, files: account.statement.files.map((file) => ({ ...file, name: names[index] ?? null })) } } : account)));
       continue;
     }
     // Investment transactions; else a balance per row (its columns checked by hand); else cash transactions.
@@ -102,6 +148,54 @@ function mergeTransactions<T extends { id?: string; date: string; label: string;
 }
 
 /**
+ * One account's bank or card statements (one or several) as one: their
+ * transactions together, each once, the days they cover, and their newest
+ * balance, for the import page's starting and ending balance (./known), each
+ * filled in from the best there is and either one changeable. A statement's
+ * balance is the account's when it was downloaded, whatever days it covers,
+ * so it's only the ending balance when it's dated where the transactions end
+ * (balanceAtEnd). Statements that leave out days between them are refused:
+ * the transactions then are missing.
+ */
+function settleStatements(copies: FileAccount[], name: string): FileAccount {
+  const statements = copies.map((copy) => copy.statement!);
+  const newest = statements.reduce((best, statement) => (statement.asOf > best.asOf ? statement : best));
+  const covered = statements
+    .map((statement) => ({ from: statement.start ?? statement.transactions[0]?.date ?? statement.asOf, to: statement.end ?? statement.transactions.at(-1)?.date ?? statement.asOf }))
+    .sort((a, b) => a.from.localeCompare(b.from));
+  let reach = covered[0].to;
+  for (const span of covered.slice(1)) {
+    if (span.from > addDays(reach, 1)) throw new Error(`${name}: the files leave out ${longDate(addDays(reach, 1))} to ${longDate(addDays(span.from, -1))}, so its balance before then can't be worked out. Add the file for those days, or leave out the older files.`);
+    if (span.to > reach) reach = span.to;
+  }
+  const transactions = mergeTransactions(statements.map((statement) => statement.transactions));
+  const last = transactions.at(-1)?.date;
+  const end = last && last > reach ? last : reach;
+  const [shared] = copies;
+  // By the days their transactions cover, whatever order they were chosen in.
+  const files = statements.flatMap((statement) => statement.files).sort((a, b) => a.from.localeCompare(b.from) || a.to.localeCompare(b.to));
+  // Kept as one statement, so files joined to it later are worked out with it again.
+  const statement: Statement = { closing: newest.closing, asOf: newest.asOf, at: newest.at, start: covered[0].from, end, owed: newest.owed, transactions, files };
+  const atEnd = balanceAtEnd(newest.asOf, end);
+  return {
+    ...shared,
+    institution: copies.find((copy) => copy.institution)?.institution ?? null,
+    unknownTypes: [...new Set(copies.flatMap((copy) => copy.unknownTypes))],
+    statement,
+    file: { kind: 'balances', currency: shared.file.currency, rows: [] },
+    unanchored: {
+      kind: 'cash',
+      transactions,
+      owed: newest.owed,
+      from: covered[0].from,
+      // A balance dated the day after the transactions end is that day's.
+      to: atEnd && newest.asOf > end ? newest.asOf : end,
+      fileBalance: { amount: (newest.owed ? -newest.closing : newest.closing) / 100 || 0, asOf: newest.asOf, at: newest.at, atEnd },
+    },
+  };
+}
+
+/**
  * One account read from several files (the same number, or files you said
  * are the same account) as one. Holdings come from the latest file that has
  * them; with none, it still needs a balance known (./known). A Quicken file
@@ -109,9 +203,10 @@ function mergeTransactions<T extends { id?: string; date: string; label: string;
  * be matched to count each once.
  */
 export function combineAccounts(copies: FileAccount[]): FileAccount {
-  if (copies.length === 1) return copies[0];
   const [first] = copies;
   const name = first.number ? `··${last4(first.number)}` : (first.fileName ?? 'the account');
+  if (copies.every((copy) => copy.statement)) return settleStatements(copies, name);
+  if (copies.length === 1) return first;
   const unknownTypes = [...new Set(copies.flatMap((copy) => copy.unknownTypes))];
   if (copies.some((copy) => copy.file.kind !== first.file.kind)) throw new Error(`The files read ${name} in different ways.`);
   const shared = { number: first.number, fileName: first.fileName, institution: copies.find((copy) => copy.institution)?.institution ?? null, type: copies.find((copy) => copy.type)?.type, subtype: copies.find((copy) => copy.subtype)?.subtype, unknownTypes };

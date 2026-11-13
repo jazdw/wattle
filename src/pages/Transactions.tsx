@@ -1,17 +1,19 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
+import { Check, X } from 'lucide-react';
 import { useEffect, useState } from 'react';
 import { useSearchParams } from 'react-router-dom';
-import { KIND_WORDS, TRANSACTION_KINDS, type TransactionKind } from '../../shared/transactionKinds';
+import { KIND_WORDS, TRANSACTION_KINDS, TRANSFER_LINK_DAYS, type TransactionKind } from '../../shared/transactionKinds';
 import { accountLabel } from '../../shared/accounts';
 import { holdingLabel } from '../../shared/holdings';
 import { fullDescription } from '../../shared/descriptions';
 import { fixedRangeStart } from '../../shared/ranges';
-import { marketDate } from '../../shared/dates';
+import { addDays, marketDate } from '../../shared/dates';
 import type { Currency } from '../../shared/money';
 import type { TransactionEntry, TransferCandidatesResponse, TransferSide, TransfersResponse } from '../../shared/types';
 import { api } from '../api';
 import { Button } from '../components/ui/button';
 import { Dialog, DialogContent } from '../components/ui/dialog';
+import { Tooltip } from '../components/ui/tooltip';
 import { PageHeader } from '../components/Layout';
 import { Card, CardContent } from '../components/ui/card';
 import { Input, NativeSelect } from '../components/ui/input';
@@ -32,23 +34,34 @@ function ownType(entry: TransactionEntry): string | null {
   return label.charAt(0).toUpperCase() + label.slice(1);
 }
 
-/** What the transaction does: worked out from its type, or set by you. */
+/**
+ * What the transaction does: worked out from its type, or set by you. The
+ * list shows just the type; whether it's automatic is said beneath (with the
+ * institution's own word for it). The automatic one isn't listed twice.
+ */
 function KindSelect({ entry, onChange }: { entry: TransactionEntry; onChange: (kind: TransactionKind | null) => void }) {
-  const automatic = entry.automatic ? KIND_WORDS[entry.automatic] : 'needs a type';
+  const automatic = entry.automatic ? KIND_WORDS[entry.automatic] : null;
+  const own = ownType(entry);
   return (
-    <NativeSelect
-      value={entry.kindByYou ? (entry.kind ?? '') : ''}
-      onChange={(event) => onChange((event.target.value || null) as TransactionKind | null)}
-      aria-label={`Type of ${textOf(entry) ?? 'transaction'} on ${longDate(entry.date)}`}
-      className={`h-8 ${entry.kind === null ? 'border-amber-500' : ''}`}
-    >
-      <option value="">Automatic: {automatic}</option>
-      {TRANSACTION_KINDS.map((kind) => (
-        <option key={kind} value={kind}>
-          {KIND_WORDS[kind]}
-        </option>
-      ))}
-    </NativeSelect>
+    <>
+      <NativeSelect
+        value={entry.kindByYou ? (entry.kind ?? '') : ''}
+        onChange={(event) => onChange((event.target.value || null) as TransactionKind | null)}
+        aria-label={`Type of ${textOf(entry) ?? 'transaction'} on ${longDate(entry.date)}`}
+        className={`h-8 w-full ${entry.kind === null ? 'border-amber-500' : ''}`}
+      >
+        <option value="">{entry.kindByYou ? `Back to automatic${automatic ? `: ${automatic}` : ''}` : (automatic ?? 'Needs a type')}</option>
+        {TRANSACTION_KINDS.filter((kind) => entry.kindByYou || kind !== entry.automatic).map((kind) => (
+          <option key={kind} value={kind}>
+            {KIND_WORDS[kind]}
+          </option>
+        ))}
+      </NativeSelect>
+      <div className="mt-1 text-xs text-muted-foreground">
+        {entry.kindByYou ? 'Set by you' : automatic ? 'Automatic' : 'Choose what it is'}
+        {own && ` · ${own}`}
+      </div>
+    </>
   );
 }
 
@@ -83,10 +96,11 @@ function questions(transfers: TransfersResponse['transfers']): Question[] {
 function SideCell({ side }: { side: TransferSide }) {
   return (
     <>
-      <span className="whitespace-nowrap">
-        {sideName(side)}, {longDate(side.date)}
+      <span>
+        {sideName(side)}, <span className="whitespace-nowrap">{longDate(side.date)}</span>
       </span>
-      {side.description && <span className="block text-xs text-muted-foreground">{side.description}</span>}
+      {/* Long unbroken references ("XXXXXXXXXXXX1234") wrap rather than widen the table. */}
+      {side.description && <span className="block text-xs text-muted-foreground [overflow-wrap:anywhere]">{side.description}</span>}
     </>
   );
 }
@@ -100,14 +114,21 @@ const optionText = (side: TransferSide) => `${sideName(side)}, ${longDate(side.d
 function TransfersToCheck({ transfers, onDecide }: { transfers: TransfersResponse['transfers']; onDecide: (id: string, status: 'confirmed' | 'rejected') => void }) {
   const [picked, setPicked] = useState<Record<string, string>>({});
   return (
-    <Card className="relative mb-4 overflow-x-auto">
+    <Card className="relative mb-4">
       <CardContent className="py-3">
         <p className="mb-1 text-sm font-medium">Transfers to check</p>
         <p className="mb-3 text-xs text-muted-foreground">
           Money out of one of your accounts and the same money into another: is it one transfer? Where more than one could be, pick which. A transfer is neither money in nor out for the household; one that isn't stays as both.
         </p>
         {/* A table; on a phone, each row stacked, its sides labelled. */}
-        <table className="w-full text-sm">
+        {/* Fixed columns, so it fits the card: the sides share what the amount and the buttons leave. */}
+        <table className="w-full text-sm lg:table-fixed">
+          <colgroup className="hidden lg:table-column-group">
+            <col className="w-28" />
+            <col />
+            <col />
+            <col className="w-32" />
+          </colgroup>
           <thead className="hidden lg:table-header-group">
             <tr className="border-b">
               <Th className="text-right">Amount</Th>
@@ -125,7 +146,7 @@ function TransfersToCheck({ transfers, onDecide }: { transfers: TransfersRespons
               // The side in question: a list of its candidates.
               const choose = (side: 'in' | 'out') => (
                 <NativeSelect
-                  className="h-8 lg:min-w-56"
+                  className="h-8 w-full"
                   value={chosen.id}
                   onChange={(event) => setPicked({ ...picked, [question.key]: event.target.value })}
                   aria-label={`Which transaction: ${money(first.out.amount, first.out.currency)} ${side === 'out' ? `into ${sideName(first.in)}` : `out of ${sideName(first.out)}`}`}
@@ -145,7 +166,7 @@ function TransfersToCheck({ transfers, onDecide }: { transfers: TransfersRespons
                     {question.shared === 'in' ? (
                       <>
                         {choose('out')}
-                        <span className="mt-1 block text-xs text-muted-foreground">{chosen.out.description ?? 'No description'}</span>
+                        <span className="mt-1 block text-xs text-muted-foreground [overflow-wrap:anywhere]">{chosen.out.description ?? 'No description'}</span>
                       </>
                     ) : (
                       <SideCell side={first.out} />
@@ -156,20 +177,27 @@ function TransfersToCheck({ transfers, onDecide }: { transfers: TransfersRespons
                     {question.shared === 'out' ? (
                       <>
                         {choose('in')}
-                        <span className="mt-1 block text-xs text-muted-foreground">{chosen.in.description ?? 'No description'}</span>
+                        <span className="mt-1 block text-xs text-muted-foreground [overflow-wrap:anywhere]">{chosen.in.description ?? 'No description'}</span>
                       </>
                     ) : (
                       <SideCell side={first.in} />
                     )}
                   </Td>
                   <Td className={STACKED}>
-                    <span className="flex gap-2 lg:justify-end">
-                      <Button size="sm" variant="outline" onClick={() => onDecide(chosen.id, 'confirmed')}>
-                        {question.shared === null ? 'It’s a transfer' : 'Link'}
-                      </Button>
-                      <Button size="sm" variant="outline" onClick={() => question.options.forEach((option) => onDecide(option.id, 'rejected'))}>
-                        Not a transfer
-                      </Button>
+                    {/* The same two answers whether or not there was a choice; on a wide screen, icons with a tooltip. */}
+                    <span className="flex flex-wrap gap-2 lg:flex-nowrap lg:justify-end">
+                      <Tooltip content="It’s a transfer">
+                        <Button size="sm" variant="outline" aria-label="It’s a transfer" onClick={() => onDecide(chosen.id, 'confirmed')}>
+                          <Check className="text-positive" />
+                          <span className="lg:hidden">It’s a transfer</span>
+                        </Button>
+                      </Tooltip>
+                      <Tooltip content="Not a transfer">
+                        <Button size="sm" variant="outline" aria-label="Not a transfer" onClick={() => question.options.forEach((option) => onDecide(option.id, 'rejected'))}>
+                          <X className="text-negative" />
+                          <span className="lg:hidden">Not a transfer</span>
+                        </Button>
+                      </Tooltip>
                     </span>
                   </Td>
                 </tr>
@@ -182,6 +210,44 @@ function TransfersToCheck({ transfers, onDecide }: { transfers: TransfersRespons
   );
 }
 
+/** Unlinking asks first: the pair then counts as money out and in, and isn't linked again automatically. */
+function UnlinkDialog({ entry, account, onUnlink, onClose }: { entry: TransactionEntry; account: string; onUnlink: () => void; onClose: () => void }) {
+  const transfer = entry.transfer!;
+  const other = accountLabel({ name: transfer.accountName, institutionName: transfer.institutionName, mask: transfer.mask });
+  const out = entry.amount > 0;
+  // Both sides, where the money left and where it arrived, each on its own day with its own description.
+  const here = { account, date: entry.date, description: textOf(entry) };
+  const there = { account: other, date: transfer.date, description: transfer.description };
+  const [from, to] = out ? [here, there] : [there, here];
+  return (
+    <Dialog open onOpenChange={(open) => !open && onClose()}>
+      <DialogContent title="Unlink this transfer?" description={`${money(Math.abs(entry.amount), entry.currency)} between two of your accounts.`}>
+        <dl className="grid grid-cols-[auto_1fr] gap-x-3 gap-y-1 rounded-md bg-muted/60 p-3 text-sm">
+          <dt className="text-muted-foreground">From</dt>
+          <dd className="min-w-0">
+            {from.account}, <span className="whitespace-nowrap">{longDate(from.date)}</span>
+            {from.description && <span className="block text-xs text-muted-foreground [overflow-wrap:anywhere]">{from.description}</span>}
+          </dd>
+          <dt className="text-muted-foreground">To</dt>
+          <dd className="min-w-0">
+            {to.account}, <span className="whitespace-nowrap">{longDate(to.date)}</span>
+            {to.description && <span className="block text-xs text-muted-foreground [overflow-wrap:anywhere]">{to.description}</span>}
+          </dd>
+        </dl>
+        <p className="mt-3 text-sm text-muted-foreground">
+          Once unlinked, the withdrawal counts as money leaving your household and the deposit as money coming in.
+        </p>
+        <div className="mt-4 flex justify-end gap-2">
+          <Button variant="outline" onClick={onClose}>
+            Cancel
+          </Button>
+          <Button onClick={onUnlink}>Unlink</Button>
+        </div>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
 /** The transactions that could be this one's other side, to link it to yourself. */
 function LinkDialog({ entry, currency, onLink, onClose }: { entry: TransactionEntry; currency: Currency; onLink: (other: string) => void; onClose: () => void }) {
   const candidates = useQuery({
@@ -189,13 +255,21 @@ function LinkDialog({ entry, currency, onLink, onClose }: { entry: TransactionEn
     queryFn: () => api<TransferCandidatesResponse>(`/api/transactions/${entry.id}/candidates`),
   });
   const out = entry.amount > 0;
+  const amount = money(Math.abs(entry.amount), currency);
   return (
     <Dialog open onOpenChange={(open) => !open && onClose()}>
-      <DialogContent title="Link a transfer" description={`${money(Math.abs(entry.amount), currency)} ${out ? 'out' : 'in'} on ${longDate(entry.date)}: the same money ${out ? 'into' : 'out of'} another of your accounts.`}>
+      <DialogContent
+        title={out ? 'Where did it go?' : 'Where did it come from?'}
+        description={`${amount} ${out ? 'left this account' : 'came into this account'} on ${longDate(entry.date)}. If it ${out ? 'went to' : 'came from'} another of your accounts, pick the ${out ? 'deposit' : 'withdrawal'} there to link them as one transfer.`}
+      >
         {candidates.isPending ? (
           <Skeleton className="h-16 w-full" />
         ) : !candidates.data?.candidates.length ? (
-          <p className="text-sm text-muted-foreground">Nothing in your other accounts matches: the same amount the other way, within 10 days, and not in a transfer already.</p>
+          // What was looked for and found nothing: set apart from the question above.
+          <div className="rounded-md bg-muted/60 p-3 text-sm text-muted-foreground">
+            <p className="mb-1 font-medium text-foreground">No match found</p>
+            None of your other accounts has {amount} {out ? 'coming in' : 'going out'} between {longDate(addDays(entry.date, -TRANSFER_LINK_DAYS))} and {longDate(addDays(entry.date, TRANSFER_LINK_DAYS))} that isn’t already linked.
+          </div>
         ) : (
           <ul className="divide-y text-sm">
             {candidates.data.candidates.map((candidate) => (
@@ -215,6 +289,9 @@ function LinkDialog({ entry, currency, onLink, onClose }: { entry: TransactionEn
     </Dialog>
   );
 }
+
+/** Transactions shown at a time: more are added beneath on request. */
+const PAGE_SIZE = 100;
 
 export function Transactions() {
   const queryClient = useQueryClient();
@@ -250,8 +327,13 @@ export function Transactions() {
     setTo(until);
   };
   const filtered = Boolean(from || to || query.trim());
+  // Shown 100 at a time, from the first 100 again whenever the account, dates or search change.
+  const listKey = [accountId, from, to, query].join('|');
+  const [shownFor, setShownFor] = useState({ key: listKey, count: PAGE_SIZE });
+  const shown = shownFor.key === listKey ? shownFor.count : PAGE_SIZE;
   const transactions = useTransactions(everything ? 'all' : account ? account.id : null, { from, to, q: query });
   const [linking, setLinking] = useState<TransactionEntry | null>(null);
+  const [unlinking, setUnlinking] = useState<TransactionEntry | null>(null);
   const toCheck = useQuery({ queryKey: ['transfers', 'suggested'], queryFn: () => api<TransfersResponse>('/api/transfers?status=suggested') });
   // A transfer changes what the household's charts count as money in and out.
   const refresh = () => {
@@ -316,6 +398,17 @@ export function Transactions() {
         </div>
       )}
       {toCheck.data && toCheck.data.transfers.length > 0 && <TransfersToCheck transfers={toCheck.data.transfers} onDecide={(id, status) => decide.mutate({ id, status })} />}
+      {unlinking?.transfer && (
+        <UnlinkDialog
+          entry={unlinking}
+          account={accountsById.has(unlinking.accountId) ? accountLabel(accountsById.get(unlinking.accountId)!) : 'This account'}
+          onUnlink={() => {
+            decide.mutate({ id: unlinking.transfer!.id, status: 'rejected' });
+            setUnlinking(null);
+          }}
+          onClose={() => setUnlinking(null)}
+        />
+      )}
       {linking && data && (
         <LinkDialog
           entry={linking}
@@ -330,11 +423,11 @@ export function Transactions() {
             <RangePicker value={preset} onChange={choosePreset} />
             <label className="grid gap-1 text-xs text-muted-foreground">
               From
-              <Input type="date" className="h-8 w-40" value={from} onChange={(event) => chooseDates(event.target.value, to)} />
+              <Input type="date" className="h-8 w-44 sm:w-40" value={from} onChange={(event) => chooseDates(event.target.value, to)} />
             </label>
             <label className="grid gap-1 text-xs text-muted-foreground">
               To
-              <Input type="date" className="h-8 w-40" value={to} onChange={(event) => chooseDates(from, event.target.value)} />
+              <Input type="date" className="h-8 w-44 sm:w-40" value={to} onChange={(event) => chooseDates(from, event.target.value)} />
             </label>
             <label className="grid min-w-48 flex-1 gap-1 text-xs text-muted-foreground">
               Search
@@ -370,8 +463,9 @@ export function Transactions() {
             </p>
           )}
           <Card className="overflow-x-auto">
+            {/* A table on a wide screen; on a phone, each transaction stacked: its date and amount, account, description, type and transfer. */}
             <table className="w-full text-sm">
-              <thead>
+              <thead className="hidden lg:table-header-group">
                 <tr className="border-b">
                   <Th>Date</Th>
                   {mixed && <Th>Account</Th>}
@@ -384,17 +478,16 @@ export function Transactions() {
                 </tr>
               </thead>
               <tbody className="divide-y">
-                {data.transactions.map((entry) => {
-                  const own = ownType(entry);
+                {data.transactions.slice(0, shown).map((entry) => {
                   return (
-                    <tr key={entry.id}>
-                      <Td className="whitespace-nowrap">{longDate(entry.date)}</Td>
-                      {mixed && <Td className="min-w-40">{accountsById.has(entry.accountId) ? accountLabel(accountsById.get(entry.accountId)!) : '—'}</Td>}
-                      <Td className="min-w-72">
+                    <tr key={entry.id} className="grid grid-cols-[minmax(0,1fr)_auto] gap-x-3 gap-y-1.5 px-4 py-3 lg:table-row lg:p-0">
+                      <Td className={`${STACKED} order-1 whitespace-nowrap text-xs text-muted-foreground lg:text-sm lg:text-foreground`}>{longDate(entry.date)}</Td>
+                      {mixed && <Td className={`${STACKED} order-3 col-span-2 text-xs text-muted-foreground lg:min-w-32 lg:text-sm lg:text-foreground`}>{accountsById.has(entry.accountId) ? accountLabel(accountsById.get(entry.accountId)!) : '—'}</Td>}
+                      {/* Wide enough for the longest type ("Automatic: Dividend or interest"), no wider: the description has the room. */}
+                      <Td className={`${STACKED} order-5 col-span-2 lg:w-[17rem] lg:min-w-[17rem]`}>
                         <KindSelect entry={entry} onChange={(kind) => setKind.mutate({ id: entry.id, kind })} />
-                        {own && <div className="mt-1 text-xs text-muted-foreground">{own}</div>}
                       </Td>
-                      <Td>
+                      <Td className={`${STACKED} order-4 col-span-2 [overflow-wrap:anywhere] lg:min-w-36`}>
                         {investment || (mixed && (entry.ticker || entry.security)) ? (
                           <>
                             <span className="font-medium">{entry.ticker || entry.security ? holdingLabel({ ticker: entry.ticker, name: entry.security }, 'short') : '—'}</span>
@@ -403,24 +496,34 @@ export function Transactions() {
                         ) : (
                           (textOf(entry) ?? '—')
                         )}
-                      </Td>
-                      {shares && <Td className="text-right tabular-nums">{entry.quantity ? quantity(entry.quantity) : ''}</Td>}
-                      {shares && <Td className="text-right tabular-nums">{entry.price && entry.quantity ? money(Math.round(entry.price * 100), entry.currency) : ''}</Td>}
-                      {/* Money in is positive here (amounts are stored positive when money leaves), in its account's currency. */}
-                      <Td className={`text-right tabular-nums ${changeClass(-entry.amount)}`}>{entry.amount === 0 ? '' : money(-entry.amount, entry.currency)}</Td>
-                      <Td className="whitespace-nowrap text-xs">
-                        {entry.transfer ? (
-                          <span className="flex items-center gap-2">
-                            <span>
-                              {entry.amount > 0 ? 'To' : 'From'} {accountLabel({ name: entry.transfer.accountName, institutionName: entry.transfer.institutionName, mask: entry.transfer.mask })}, {longDate(entry.transfer.date)}
-                            </span>
-                            <Button size="sm" variant="ghost" className="h-6 px-2" onClick={() => decide.mutate({ id: entry.transfer!.id, status: 'rejected' })}>
-                              Unlink
-                            </Button>
+                        {/* The shares and price columns, on a phone. */}
+                        {shares && entry.quantity ? (
+                          <span className="block text-xs text-muted-foreground lg:hidden">
+                            {quantity(entry.quantity)} shares{entry.price ? ` at ${money(Math.round(entry.price * 100), entry.currency)}` : ''}
                           </span>
+                        ) : null}
+                      </Td>
+                      {shares && <Td className="hidden text-right tabular-nums lg:table-cell">{entry.quantity ? quantity(entry.quantity) : ''}</Td>}
+                      {shares && <Td className="hidden text-right tabular-nums lg:table-cell">{entry.price && entry.quantity ? money(Math.round(entry.price * 100), entry.currency) : ''}</Td>}
+                      {/* Money in is positive here (amounts are stored positive when money leaves), in its account's currency. */}
+                      <Td className={`${STACKED} order-2 text-right tabular-nums ${changeClass(-entry.amount)}`}>{entry.amount === 0 ? '' : money(-entry.amount, entry.currency)}</Td>
+                      {/* A linked one names the other side (its account wrapping, its date beneath); clicking it asks to unlink. */}
+                      <Td className={`${STACKED} order-6 col-span-2 text-xs lg:min-w-44 lg:max-w-72`}>
+                        {entry.transfer ? (
+                          <button
+                            type="button"
+                            className="grid gap-0.5 rounded-sm text-left hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                            onClick={() => setUnlinking(entry)}
+                            title="Unlink transfer"
+                          >
+                            <span>
+                              {entry.amount > 0 ? 'To' : 'From'} {accountLabel({ name: entry.transfer.accountName, institutionName: entry.transfer.institutionName, mask: entry.transfer.mask })}
+                            </span>
+                            <span className="whitespace-nowrap text-muted-foreground">{longDate(entry.transfer.date)}</span>
+                          </button>
                         ) : entry.kind === 'deposit' || entry.kind === 'withdrawal' ? (
-                          <Button size="sm" variant="ghost" className="h-6 px-2" onClick={() => setLinking(entry)} aria-label={`Link ${textOf(entry) ?? 'transaction'} on ${longDate(entry.date)} to a transfer`}>
-                            Link…
+                          <Button size="sm" variant="ghost" className="-ml-2 h-6 px-2 lg:ml-0" onClick={() => setLinking(entry)} aria-label={`Link ${textOf(entry) ?? 'transaction'} on ${longDate(entry.date)} to a transfer`}>
+                            Link transfer
                           </Button>
                         ) : null}
                       </Td>
@@ -430,6 +533,16 @@ export function Transactions() {
               </tbody>
             </table>
           </Card>
+          {data.transactions.length > shown && (
+            <div className="mt-3 flex flex-wrap items-center justify-center gap-3 text-sm text-muted-foreground">
+              <span>
+                Showing {shown.toLocaleString()} of {data.transactions.length.toLocaleString()}
+              </span>
+              <Button variant="outline" size="sm" onClick={() => setShownFor({ key: listKey, count: shown + PAGE_SIZE })}>
+                Show {Math.min(PAGE_SIZE, data.transactions.length - shown)} more
+              </Button>
+            </div>
+          )}
         </>
       )}
     </>

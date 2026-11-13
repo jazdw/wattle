@@ -28,12 +28,26 @@ export function balanceRows(posted: { date: IsoDate; amount: number }[], closing
     byDate.set(txn.date, balance);
   }
   if (!byDate.has(asOf) && (sorted.at(-1)?.date ?? asOf) <= asOf) byDate.set(asOf, closing);
-  return [...byDate].sort(([a], [b]) => a.localeCompare(b)).map(([date, cents]) => ({ date, balance: (owed ? -cents : cents) / 100 }));
+  return [...byDate].sort(([a], [b]) => a.localeCompare(b)).map(([date, cents]) => ({ date, balance: (owed ? -cents : cents) / 100 || 0 })); // a card owing nothing is 0, not -0
 }
 
 /** Transactions with no balance in the file (a CSV export): one known balance, typed in, works out every day. */
 export type Unanchored =
-  | { kind: 'cash'; transactions: ReadTransaction[] }
+  /**
+   * `owed`: a card's (its balances are what it owes). `from`, `to`: the days a
+   * statement covers, when it says (else its first and last transactions').
+   * `fileBalance`: a statement's own balance (major units, as balances show:
+   * a card's owed above zero) and when it's from; `atEnd` when it's the
+   * balance where the transactions end (./imports balanceAtEnd).
+   */
+  | {
+      kind: 'cash';
+      transactions: ReadTransaction[];
+      owed?: boolean;
+      from?: IsoDate;
+      to?: IsoDate;
+      fileBalance?: { amount: number; asOf: IsoDate; at: string | null; atEnd: boolean };
+    }
   /** `moneyMoves`: the file moves cash (deposits, income, fees…), so the account's cash is asked for too; else trades buy and sell its funds directly. */
   | { kind: 'holdings'; securities: ImportedHoldings['securities']; transactions: ReadTransaction[]; moneyMoves: boolean };
 
@@ -45,7 +59,7 @@ export interface Known {
 }
 
 /** How a transaction changes the account's cash in cents, as the server counts it. */
-const cashEffect = (txn: ReadTransaction) => (txn.kind === 'sweep' ? 0 : txn.kind === 'fee' ? -Math.abs(txn.amount) : txn.amount);
+export const cashEffect = (txn: ReadTransaction) => (txn.kind === 'sweep' ? 0 : txn.kind === 'fee' ? -Math.abs(txn.amount) : txn.amount);
 
 /** The account's file once its known balance is given; null until everything it needs is. */
 export function withKnown(account: FileAccount, known: Known | undefined): FileAccount | null {
@@ -58,10 +72,17 @@ export function withKnown(account: FileAccount, known: Known | undefined): FileA
   if (pending.kind === 'cash') {
     if (known.cash === null) return null;
     const total = transactions.reduce((sum, txn) => sum + cashEffect(txn), 0);
-    const closing = toMinor(known.cash) + (known.at === 'start' ? total : 0);
+    // A card's balance is what it owes: as its statement signs it, that's below zero.
+    const given = pending.owed ? -toMinor(known.cash) : toMinor(known.cash);
+    const closing = given + (known.at === 'start' ? total : 0);
     const posted = transactions.map((txn) => ({ date: txn.date, amount: cashEffect(txn) }));
-    const rows = balanceRows(posted, closing, asOf, known.at === 'start' ? addDays(first, -1) : null);
-    const kept = transactions.map((txn) => ({ ...(txn.id ? { id: txn.id } : {}), date: txn.date, kind: txn.kind, label: txn.label, ...(txn.description ? { description: txn.description } : {}), amount: cashEffect(txn) }));
+    // Its days: from the day it starts (the day before, when a transaction is on it) to the day it ends;
+    // starting from nothing, from the day before its first transaction (days of nothing before say nothing).
+    const from = pending.from ?? first;
+    const opening = known.at === 'start' ? given : given - total;
+    const start = opening === 0 ? addDays(first, -1) : known.at === 'start' || pending.from ? (first > from ? from : addDays(from, -1)) : null;
+    const rows = balanceRows(posted, closing, pending.to && pending.to > asOf ? pending.to : asOf, start, pending.owed);
+    const kept = transactions.map((txn) => ({ ...(txn.id ? { id: txn.id } : {}), date: txn.date, kind: txn.kind, label: txn.label, ...(txn.description ? { description: txn.description } : {}), ...(txn.memo ? { memo: txn.memo } : {}), amount: cashEffect(txn) }));
     return { ...account, file: { kind: 'balances', currency: account.file.currency, rows, transactions: kept } };
   }
   if (pending.moneyMoves && known.cash === null) return null;

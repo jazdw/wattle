@@ -272,6 +272,30 @@ describe('imports', () => {
 
     await api(`/api/accounts/${id}/balances`, { method: 'POST', json: { date: '2026-10-01', balance: 100 } });
     expect(await day('2026-10-01')).toMatchObject({ balance: 100_00, source: 'manual' }); // an entry after the import replaces it
+
+    // One day's stored balance, whatever wrote it; none for a day it has none; a date is required.
+    expect((await api(`/api/accounts/${id}/balances?on=2026-09-30`)).body).toEqual({ balances: [{ date: '2026-09-30', balance: 90_00, source: 'import' }] });
+    expect((await api(`/api/accounts/${id}/balances?on=2026-01-01`)).body).toEqual({ balances: [] });
+    expect((await api(`/api/accounts/${id}/balances?on=yesterday`)).status).toBe(400);
+  });
+
+  it("says where a file's balances differ from the ones Wattle has for the same days, without stopping the import", async () => {
+    const { api, create } = await household();
+    // A card with $300 owed entered on Oct 1 and Oct 5.
+    const id = await create({ name: 'Card', type: 'credit', balance: 300, date: '2026-10-01' });
+    await api(`/api/accounts/${id}/balances`, { method: 'POST', json: { date: '2026-10-05', balance: 300 } });
+    const check = async (rows: { date: string; balance: number }[]) =>
+      (await api('/api/imports/check', { method: 'POST', json: { accounts: [{ label: 'File', target: { accountId: id }, file: { kind: 'balances', rows } }] } })).body;
+    // The same: nothing to say.
+    expect((await check([{ date: '2026-09-30', balance: 100 }, { date: '2026-10-01', balance: 300 }])).warnings).toEqual([]);
+    // $250 from Oct 1, carried to Oct 5: both days differ, said once at the first.
+    const differing = await check([{ date: '2026-09-30', balance: 100 }, { date: '2026-10-01', balance: 250 }, { date: '2026-10-06', balance: 250 }]);
+    expect(differing.problems).toEqual([]);
+    expect(differing.warnings).toEqual([
+      { label: 'File', date: '2026-10-01', text: 'On 2026-10-01, this works out $250.00 where Wattle has $300.00 from you (and 1 more day): transactions may be missing, or the starting or ending balance is wrong.' },
+    ]);
+    // A new account has nothing to differ from.
+    expect((await api('/api/imports/check', { method: 'POST', json: { accounts: [{ label: 'File', target: { new: { name: 'New', type: 'credit', currency: 'USD' } }, file: { kind: 'balances', rows: [{ date: '2026-10-01', balance: 1 }] } }] } })).body.warnings).toEqual([]);
   });
 
   it("makes a manual account's latest imported day its current balance", async () => {

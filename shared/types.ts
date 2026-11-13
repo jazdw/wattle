@@ -107,7 +107,7 @@ export interface TransactionEntry {
   /** The kind worked out from its type, without yours. */
   automatic: TransactionKind | null;
   /** The transfer between your accounts it's one side of (linked automatically or by you). */
-  transfer: { id: string; status: 'auto' | 'confirmed'; accountId: string; accountName: string; institutionName: string | null; mask: string | null; date: string } | null;
+  transfer: { id: string; status: 'auto' | 'confirmed'; accountId: string; accountName: string; institutionName: string | null; mask: string | null; date: string; /** The other side's own description, its MEMO joined. */ description: string | null } | null;
   description: string | null;
   /** A Quicken file's MEMO beside its NAME: shown joined (shared/descriptions.ts fullDescription). */
   memo: string | null;
@@ -450,6 +450,8 @@ export interface ImportProblem {
 export interface ImportCheck {
   accounts: (Omit<ImportedAccount, 'accountId'> & { closes: { date: string; security: string; close: number }[] })[];
   problems: ImportProblem[];
+  /** Worth knowing, not stopping the import: a file's balances differing from what Wattle already has on the same days. */
+  warnings: ImportProblem[];
 }
 
 /** POST /api/imports/tickers: a ticker for a security a file names without one. */

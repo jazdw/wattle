@@ -10,7 +10,7 @@ import { useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { accountLabel } from '../../shared/accounts';
 import { holdingLabel } from '../../shared/holdings';
-import { dateRange } from '../../shared/dates';
+import { addDays, dateRange } from '../../shared/dates';
 import { CURRENCIES, type Currency } from '../../shared/money';
 import type { ImportRequest } from '../../shared/schemas';
 import type { AccountSummary, AccountType, ImportCheck, ImportProblem, ImportResponse, TickerSuggestions } from '../../shared/types';
@@ -26,10 +26,10 @@ import { Switch } from '../components/ui/switch';
 import { useAccounts } from '../hooks/queries';
 import { useAuth } from '../hooks/useAuth';
 import { extractBalances, parseAmount, type BalanceMapping, type DateFormat } from '../lib/csv';
-import { ACCOUNT_TYPE_OPTIONS, accountKind, longDate, money, quantity } from '../lib/format';
+import { ACCOUNT_TYPE_OPTIONS, accountKind, localDateTime, longDate, money, quantity } from '../lib/format';
 import { previewRows } from '../lib/importPreview';
-import { combineAccounts, fileValue, last4, readFiles, type FileAccount, type ReadFiles } from '../lib/imports';
-import { withKnown, type Known } from '../lib/known';
+import { balanceAtEnd, combineAccounts, fileValue, last4, readFiles, type FileAccount, type ReadFiles, type StatementFile } from '../lib/imports';
+import { cashEffect, withKnown, type Known } from '../lib/known';
 import { cn } from '../lib/utils';
 
 /** Where an account in the files goes: one of yours, a new manual account, with another file's, or nowhere. */
@@ -41,7 +41,15 @@ type Choice =
   | { to: 'skip' }
   | { to: 'choose' };
 /** A known balance as typed: before the file's first transaction or after its last, amounts as text. */
-type KnownInput = { at: 'start' | 'end'; cash: string; shares: Record<string, string> };
+type KnownInput = {
+  at: 'start' | 'end';
+  cash: string;
+  shares: Record<string, string>;
+  /** Where a cash balance came from: the file, Wattle's balance on `date` (from the source `from`), assumed none, or you. */
+  source?: 'file' | 'stored' | 'assumed' | 'you';
+  date?: string;
+  from?: string;
+};
 
 const DEFAULT_MAPPING: BalanceMapping = { dateColumn: 0, balanceColumn: 1, dateFormat: 'YYYY-MM-DD', hasHeader: true };
 const NO_KNOWN: KnownInput = { at: 'end', cash: '', shares: {} };
@@ -226,6 +234,8 @@ export function Import({ checkDelay = CHECK_DELAY_MS }: { checkDelay?: number })
   });
   const checked = settled === body && check.data !== undefined && !check.isFetching;
   const problems = checked ? check.data!.problems : [];
+  // Balances differing from Wattle's on the same days: said, not stopping the import.
+  const warnings = checked ? (check.data!.warnings ?? []) : [];
 
   const commit = useMutation({
     mutationFn: () => api<ImportResponse>('/api/imports', { method: 'POST', body: body! }),
@@ -284,7 +294,7 @@ export function Import({ checkDelay = CHECK_DELAY_MS }: { checkDelay?: number })
           <CardHeader>
             <CardTitle>Files</CardTitle>
             <CardDescription>
-              Choose one or more at a time. Each account in them gets its own section below, matched to one of yours by its last digits. A CSV of transactions has no balance in it: you give one, at its start or end, and every day is worked out from there.
+              Choose one or more at a time. Each account in them gets its own section below, matched to one of yours by its last digits. A bank or card account shows its starting and ending balance, one filled in from the file or from what Wattle already has and the other worked out through the transactions: change either if it's wrong.
             </CardDescription>
           </CardHeader>
           <CardContent className="grid gap-3">
@@ -381,9 +391,10 @@ export function Import({ checkDelay = CHECK_DELAY_MS }: { checkDelay?: number })
             accounts={visible.filter((candidate) => fits(candidate, account))}
             onChoose={(choice) => choose(index, choice.to === 'new' && choices[index]?.to !== 'new' ? defaultNew(account) : choice)}
             known={knowns[index] ?? NO_KNOWN}
-            onKnown={(known) => setKnowns({ ...knowns, [index]: known })}
+            onKnown={(known) => setKnowns((all) => ({ ...all, [index]: known }))}
             check={checks[index]}
             problems={problems.filter((found) => found.label === labelOf(account))}
+            warnings={warnings.filter((found) => found.label === labelOf(account))}
             closes={checked ? (check.data!.accounts.find((found) => found.label === labelOf(account))?.closes ?? []) : []}
             nameOf={nameOf}
             skipped={preview?.skipped ?? 0}
@@ -433,6 +444,7 @@ function AccountSection({
   onKnown,
   check,
   problems,
+  warnings,
   closes,
   nameOf,
   skipped,
@@ -448,6 +460,7 @@ function AccountSection({
   onKnown: (known: KnownInput) => void;
   check: { errors: string[]; warnings: string[] };
   problems: ImportProblem[];
+  warnings: ImportProblem[];
   closes: ImportCheck['accounts'][number]['closes'];
   nameOf: (id: string | null) => string | null;
   skipped: number;
@@ -538,7 +551,8 @@ function AccountSection({
           )}
         </div>
         {joined && <p className="text-muted-foreground">Imported together with that file, where it goes; its preview shows them both.</p>}
-        {read.unanchored && choice.to !== 'skip' && !joined && <KnownFields pending={read.unanchored} known={known} onKnown={onKnown} />}
+        {read.unanchored?.kind === 'holdings' && choice.to !== 'skip' && !joined && <KnownFields pending={read.unanchored} known={known} onKnown={onKnown} />}
+        {read.unanchored?.kind === 'cash' && choice.to !== 'skip' && !joined && <BalanceFields pending={read.unanchored} files={read.statement?.files ?? []} known={known} onKnown={onKnown} accountId={target?.id} currency={currency} />}
         {check.errors.map((error) => (
           <Alert key={error} variant="error">
             {error}
@@ -552,6 +566,11 @@ function AccountSection({
         {problems.map((found) => (
           <Alert key={`${found.date}:${found.text}`} variant="error">
             {found.text.charAt(0).toUpperCase() + found.text.slice(1)}.
+          </Alert>
+        ))}
+        {warnings.map((found) => (
+          <Alert key={`${found.date}:${found.text}`} variant="warning">
+            {found.text}
           </Alert>
         ))}
         {choice.to !== 'skip' && !joined && worked && <PreviewTable file={file} currency={currency} problemDates={new Set(problems.flatMap((found) => (found.date ? [found.date] : [])))} closes={closes} nameOf={nameOf} />}
@@ -612,7 +631,7 @@ function PreviewTable({
                 {holdings && <Td className="text-right tabular-nums">{row.shares ? quantity(row.shares) : ''}</Td>}
                 {holdings && <Td className="text-right tabular-nums">{row.price ? row.price.toFixed(2) : ''}</Td>}
                 {holdings && <Td className="text-right tabular-nums text-muted-foreground">{close ? close.toFixed(2) : ''}</Td>}
-                {cash && <Td className="text-right tabular-nums">{row.amount ? money(row.amount, currency) : ''}</Td>}
+                {cash && <Td className="text-right tabular-nums">{row.amount ? money(row.amount, currency) : !holdings && row.label !== 'Change' ? <span className="text-xs text-muted-foreground">{row.label}</span> : ''}</Td>}
                 {/* Cash below zero is owed for a moment (bought before the money arrived), not a problem. */}
                 {cash && <Td className={cn('text-right tabular-nums', row.balance < 0 && holdings && 'text-muted-foreground')}>{money(row.balance, currency)}</Td>}
                 {holdings && <Td className={cn('text-right tabular-nums', row.held !== null && row.held < -1e-6 && 'text-negative')}>{row.held === null ? '' : quantity(row.held)}</Td>}
@@ -629,16 +648,13 @@ function PreviewTable({
  * A file of transactions has no balance in it: one known at its start or end
  * (cash, and each security's shares) works out every day.
  */
-function KnownFields({ pending, known, onKnown }: { pending: NonNullable<FileAccount['unanchored']>; known: KnownInput; onKnown: (known: KnownInput) => void }) {
+function KnownFields({ pending, known, onKnown }: { pending: Extract<NonNullable<FileAccount['unanchored']>, { kind: 'holdings' }>; known: KnownInput; onKnown: (known: KnownInput) => void }) {
   const first = pending.transactions[0]?.date;
   const last = pending.transactions.at(-1)?.date;
   if (!first || !last) return null;
-  const holdings = pending.kind === 'holdings';
   return (
     <div className="grid gap-2 rounded-md bg-muted/40 p-3">
-      <p className="text-muted-foreground">
-        The file has transactions but no {holdings ? 'holdings' : 'balance'}: give {holdings ? 'what the account held' : 'its balance'} before the first or after the last, and every day is worked out from the transactions.
-      </p>
+      <p className="text-muted-foreground">The file has transactions but no holdings: give what the account held before the first or after the last, and every day is worked out from the transactions.</p>
       <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-4">
         <Field label="Known">
           <NativeSelect value={known.at} onChange={(event) => onKnown({ ...known, at: event.target.value as KnownInput['at'] })}>
@@ -646,17 +662,134 @@ function KnownFields({ pending, known, onKnown }: { pending: NonNullable<FileAcc
             <option value="start">Before the first transaction ({longDate(first)})</option>
           </NativeSelect>
         </Field>
-        {(!holdings || pending.moneyMoves) && (
-          <Field label={holdings ? 'Cash' : 'Balance'}>
+        {pending.moneyMoves && (
+          <Field label="Cash">
             <Input inputMode="decimal" value={known.cash} onChange={(event) => onKnown({ ...known, cash: event.target.value })} />
           </Field>
         )}
-        {holdings &&
-          pending.securities.map((security) => (
-            <Field key={security.id} label={`Shares of ${security.name}`}>
-              <Input inputMode="decimal" value={known.shares[security.id] ?? ''} onChange={(event) => onKnown({ ...known, shares: { ...known.shares, [security.id]: event.target.value } })} />
-            </Field>
+        {pending.securities.map((security) => (
+          <Field key={security.id} label={`Shares of ${security.name}`}>
+            <Input inputMode="decimal" value={known.shares[security.id] ?? ''} onChange={(event) => onKnown({ ...known, shares: { ...known.shares, [security.id]: event.target.value } })} />
+          </Field>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+/** Where an account's observed balance came from, in words (shared/quality OBSERVED_SOURCES). */
+const SOURCE_WORDS: Record<string, string> = { rebuilt: 'the institution', snapshot: 'the institution', import: 'an earlier import', manual: 'you' };
+
+/**
+ * A bank or card account's (or a CSV of its transactions') starting and
+ * ending balance: each file's days and balance shown, and the two balances,
+ * one filled in from the best there is and the other worked out through the
+ * transactions; either can be changed. Best first: the file's balance where
+ * it's dated where its transactions end; the account's balance Wattle has on
+ * its last day; the account's on the day before its first; else none, assumed.
+ */
+function BalanceFields({
+  pending,
+  files,
+  known,
+  onKnown,
+  accountId,
+  currency,
+}: {
+  pending: Extract<NonNullable<FileAccount['unanchored']>, { kind: 'cash' }>;
+  files: StatementFile[];
+  known: KnownInput;
+  onKnown: (known: KnownInput) => void;
+  /** The account it goes into, when it's one you have. */
+  accountId?: string;
+  currency: Currency;
+}) {
+  const first = pending.transactions[0]?.date;
+  const from = pending.from ?? first;
+  const to = pending.to ?? pending.transactions.at(-1)?.date;
+  const onDay = (on: string | undefined) => ({
+    queryKey: ['balance-on', accountId, on],
+    queryFn: () => api<{ balances: { date: string; balance: number; source: string }[] }>(`/api/accounts/${accountId}/balances?on=${on}`),
+    enabled: Boolean(accountId && on),
+  });
+  // Wattle's balance on its last day, and on the day before its first.
+  const atEnd = useQuery(onDay(to));
+  const beforeStart = useQuery(onDay(from && addDays(from, -1)));
+  // Balances as they're shown (a card's owed above zero), in major units.
+  const shown = (minor: number) => (pending.owed ? -minor : minor) / 100 || 0;
+  const total = shown(pending.transactions.reduce((sum, txn) => sum + cashEffect(txn), 0));
+  const looked = !accountId || (!atEnd.isPending && !beforeStart.isPending);
+  const endFound = atEnd.data?.balances[0];
+  const startFound = beforeStart.data?.balances[0];
+  const best: Partial<KnownInput> | null = !looked
+    ? null
+    : pending.fileBalance?.atEnd
+      ? { at: 'end', cash: pending.fileBalance.amount.toFixed(2), source: 'file', date: pending.fileBalance.asOf }
+      : endFound
+        ? { at: 'end', cash: shown(endFound.balance).toFixed(2), source: 'stored', date: endFound.date, from: endFound.source }
+        : startFound
+          ? { at: 'start', cash: shown(startFound.balance).toFixed(2), source: 'stored', date: startFound.date, from: startFound.source }
+          : { at: 'start', cash: '0.00', source: 'assumed' };
+  const bestKey = best && JSON.stringify(best);
+  useEffect(() => {
+    // Filled in, and filled in again when the account it goes into changes, until you change it.
+    if (!bestKey || known.source === 'you') return;
+    const next: KnownInput = { ...known, date: undefined, from: undefined, ...(JSON.parse(bestKey) as Partial<KnownInput>) };
+    const same = (input: KnownInput) => JSON.stringify([input.at, input.cash, input.source, input.date, input.from]);
+    if (same(next) !== same(known)) onKnown(next);
+  }, [bestKey, known, onKnown]);
+  if (!from || !to) return null;
+  const given = typed(known.cash);
+  const other = (sign: 1 | -1) => (given === null ? '' : (given + sign * total).toFixed(2));
+  const start = known.at === 'start' ? known.cash : other(-1);
+  const end = known.at === 'end' ? known.cash : other(1);
+  // Starting from nothing, it starts the day before its first transaction (./known).
+  const fromNothing = start !== '' && typed(start) === 0 && Boolean(first);
+  const startsOn = fromNothing ? addDays(first!, -1) : from;
+  const count = pending.transactions.length;
+  const worked = `Worked out through its ${count === 1 ? 'transaction' : `${count.toLocaleString()} transactions`}.`;
+  const whence =
+    known.source === 'file'
+      ? `The file’s balance, as of ${pending.fileBalance?.at ? localDateTime(pending.fileBalance.at) : longDate(known.date!)}.`
+      : known.source === 'stored'
+        ? `Wattle’s balance on ${longDate(known.date!)}, from ${SOURCE_WORDS[known.from ?? ''] ?? 'the account'}.`
+        : known.source === 'assumed'
+          ? `Assumed: Wattle has no balance for this account before ${longDate(from)}.`
+          : 'Entered by you.';
+  const set = (at: KnownInput['at']) => (event: { target: { value: string } }) => onKnown({ ...known, at, cash: event.target.value, source: 'you' });
+  return (
+    <div className="grid gap-3 rounded-md bg-muted/40 p-3">
+      {files.length > 0 && (
+        <ul className="grid gap-1.5">
+          {files.map((file, index) => (
+            <li key={index}>
+              <span className="font-medium">{file.name ?? 'The file'}</span>
+              <span className="block text-muted-foreground">
+                Transactions {longDate(file.from)} – {longDate(file.to)} · {file.count === 1 ? '1 transaction' : `${file.count.toLocaleString()} transactions`}
+              </span>
+              <span className="block text-muted-foreground">
+                Its balance {money(Math.round(shown(file.balance) * 100), currency)} as of {file.at ? localDateTime(file.at) : longDate(file.asOf)}
+                {!balanceAtEnd(file.asOf, file.to) && ', after its transactions end, so not used'}
+              </span>
+            </li>
           ))}
+        </ul>
+      )}
+      <div className="grid gap-3 sm:grid-cols-2">
+        <div className="grid gap-1.5">
+          <Field label={`Starting balance, ${longDate(startsOn)}`}>
+            <Input inputMode="decimal" value={start} onChange={set('start')} />
+          </Field>
+          <span className="text-xs text-muted-foreground">
+            {fromNothing ? 'Nothing before its first transaction, so it starts the day before.' : 'Before its transactions.'} {known.at === 'start' ? whence : worked}
+          </span>
+        </div>
+        <div className="grid gap-1.5">
+          <Field label={`Ending balance, ${longDate(to)}`}>
+            <Input inputMode="decimal" value={end} onChange={set('end')} />
+          </Field>
+          <span className="text-xs text-muted-foreground">{known.at === 'end' ? whence : worked}</span>
+        </div>
       </div>
     </div>
   );

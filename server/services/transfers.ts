@@ -13,14 +13,22 @@
  * one names the other's institution, whatever else is near; and identical ones that can't be told apart (two of the
  * same amount out of one account and into another on the same days) are
  * paired in order, as is one whose candidates are all alike (any would be
- * the same). Otherwise each pair is suggested for you to check.
+ * the same). Otherwise each pair is suggested for you to check. Money out
+ * of a credit card is never paired on its own: a purchase isn't a transfer,
+ * though one the same amount as a deposit elsewhere (or a refund on another
+ * card) looks like one; a cash advance into your checking is rare enough to
+ * link by hand. A card's money in (a payment, from checking) is. A pair
+ * where a description names another account (last digits, or another of
+ * your institutions) is only suggested: different banks number one account
+ * differently, and a card keeps its account under a new number. A link
+ * made automatically that these rules no longer allow is undone or suggested.
  * Pairs you confirmed or rejected are never changed.
  */
 import { eq, inArray } from 'drizzle-orm';
 import type { BatchItem } from 'drizzle-orm/batch';
 import { fullDescription } from '../../shared/descriptions';
 import type { IsoDate } from '../../shared/dates';
-import { kindOf } from '../../shared/transactionKinds';
+import { kindOf, TRANSFER_LINK_DAYS } from '../../shared/transactionKinds';
 import { inChunks, runAtomic } from '../db/batch';
 import { accounts, jobs, securities, transactions, transfers } from '../db/schema';
 import type { Tenant } from '../db/tenant';
@@ -32,7 +40,7 @@ import { isCashSecurity } from './valuation';
 /** Days apart that a transfer's two sides may be dated. */
 export const MATCH_DAYS = 5;
 /** Days apart that a transfer you link by hand may be. */
-export const CANDIDATE_DAYS = 10;
+export const CANDIDATE_DAYS = TRANSFER_LINK_DAYS;
 
 const DAY_MS = 86_400_000;
 const daysApart = (a: string, b: string) => Math.abs(Date.parse(a) - Date.parse(b)) / DAY_MS;
@@ -47,6 +55,10 @@ export interface MoneyMove {
   description?: string | null;
   /** The account's institution, which the other side's description may name. */
   institution?: string | null;
+  /** The account's type: two credit cards aren't matched automatically. */
+  accountType?: string;
+  /** The account's last digits, which the other side's description may quote. */
+  mask?: string | null;
 }
 
 /** The household's money in and out (by kind) in visible accounts. */
@@ -66,6 +78,8 @@ export async function moneyMoves(tenant: Tenant): Promise<MoneyMove[]> {
       description: transactions.description,
       memo: transactions.memo,
       institution: accounts.institutionName,
+      accountType: accounts.type,
+      mask: accounts.mask,
       securityType: securities.type,
       ticker: securities.ticker,
       hasSecurity: securities.id,
@@ -81,10 +95,10 @@ export async function moneyMoves(tenant: Tenant): Promise<MoneyMove[]> {
       return kind === 'deposit' || kind === 'withdrawal';
     })
     // Its whole text: a reference number can run from a file's NAME on into its MEMO.
-    .map(({ id, accountId, date, amount, currency, description, memo, institution }) => ({ id, accountId, date, amount, currency, description: fullDescription(description, memo), institution }));
+    .map(({ id, accountId, date, amount, currency, description, memo, institution, accountType, mask }) => ({ id, accountId, date, amount, currency, description: fullDescription(description, memo), institution, accountType, mask }));
 }
 
-/** Each pair that could be one transfer: `out` leaves one account, `in` arrives in another. */
+/** Each pair that could be one transfer: `out` leaves one account (not a credit card's purchase), `in` arrives in another. */
 export function candidatePairs(moves: MoneyMove[], days = MATCH_DAYS): { outId: string; inId: string }[] {
   const arrivals = new Map<string, MoneyMove[]>();
   for (const move of moves) {
@@ -93,7 +107,7 @@ export function candidatePairs(moves: MoneyMove[], days = MATCH_DAYS): { outId: 
     arrivals.set(key, [...(arrivals.get(key) ?? []), move]);
   }
   return moves.flatMap((out) =>
-    out.amount > 0 ? (arrivals.get(`${out.currency}:${out.amount}`) ?? []).filter((arrival) => arrival.accountId !== out.accountId && daysApart(arrival.date, out.date) <= days).map((arrival) => ({ outId: out.id, inId: arrival.id })) : [],
+    out.amount > 0 ? (arrivals.get(`${out.currency}:${out.amount}`) ?? []).filter((arrival) => arrival.accountId !== out.accountId && daysApart(arrival.date, out.date) <= days && out.accountType !== 'credit').map((arrival) => ({ outId: out.id, inId: arrival.id })) : [],
   );
 }
 
@@ -115,14 +129,46 @@ export function names(description: string | null | undefined, institution: strin
   return Boolean(word && description && new RegExp(`\\b${word}\\b`, 'i').test(description));
 }
 
+/**
+ * An account's last digits quoted in a description: after masking
+ * ("XXXXXXX1234", "#######1234", "****1234") or an account word ("checking
+ * 1234", "ending in 1234"), so not a year in a date or part of a reference.
+ */
+export function quotedMasks(description: string | null | undefined): string[] {
+  return [...(description ?? '').matchAll(/(?:[x*#•]{2,}|\b(?:checking|savings|account|acct|card|ending(?: in)?)\s*(?:no\.?|number|#)?\s*)(\d{4})\b/gi)].map((match) => match[1]);
+}
+
+/**
+ * Whether `move`'s description names an account that isn't `other`'s (nor its
+ * own): last digits that are neither's, or one of the household's other
+ * institutions, without naming `other`'s ("Transfer to Example Bank checking
+ * 5555" is money to that account, whatever else has the same amount).
+ */
+export function namesAnother(move: MoneyMove, other: MoneyMove, institutions: string[]): boolean {
+  const digits = quotedMasks(move.description);
+  if (digits.length > 0 && !digits.some((mask) => mask === other.mask || mask === move.mask)) return true;
+  if (names(move.description, other.institution)) return false;
+  return institutions.some((institution) => institution !== other.institution && institution !== move.institution && names(move.description, institution));
+}
+
 /** Pair each transfer it can (see the top): linked when there's only one way to, suggested when there's more. */
 export async function matchTransfers(deps: Deps, tenant: Tenant): Promise<{ auto: number; suggested: number }> {
   // Imported transactions first paired with the institution's, which then don't count (./importedRecord).
   await pairImported(tenant);
   const existing = await tenant.db.select().from(transfers).where(tenant.scope(transfers));
-  const linked = new Set(existing.filter((row) => row.status === 'auto' || row.status === 'confirmed').flatMap((row) => [row.outId, row.inId]));
+  const all = await moneyMoves(tenant);
+  const everyId = new Map(all.map((move) => [move.id, move]));
+  const institutions = [...new Set(all.flatMap((move) => (move.institution ? [move.institution] : [])))];
+  const doubtful = (pair: { outId: string; inId: string }) => {
+    const [out, arrival] = [everyId.get(pair.outId), everyId.get(pair.inId)];
+    return Boolean(out && arrival && (namesAnother(out, arrival, institutions) || namesAnother(arrival, out, institutions)));
+  };
+  // Links made automatically that the rules no longer allow: money out of a credit card (undone), or a pair a description doubts (suggested instead).
+  const undone = existing.filter((row) => row.status === 'auto' && (everyId.get(row.outId)?.accountType === 'credit' || doubtful(row)));
+  const undoneIds = new Set(undone.map((row) => row.id));
+  const linked = new Set(existing.filter((row) => (row.status === 'auto' && !undoneIds.has(row.id)) || row.status === 'confirmed').flatMap((row) => [row.outId, row.inId]));
   const rejected = new Set(existing.filter((row) => row.status === 'rejected').map((row) => `${row.outId}|${row.inId}`));
-  const moves = (await moneyMoves(tenant)).filter((move) => !linked.has(move.id));
+  const moves = all.filter((move) => !linked.has(move.id));
   const pairs = candidatePairs(moves).filter((pair) => !rejected.has(`${pair.outId}|${pair.inId}`));
 
   const count = (list: { outId: string; inId: string }[], side: 'outId' | 'inId') => list.reduce((map, pair) => map.set(pair[side], (map.get(pair[side]) ?? 0) + 1), new Map<string, number>());
@@ -145,13 +191,17 @@ export async function matchTransfers(deps: Deps, tenant: Tenant): Promise<{ auto
   const unique = only(rest);
   const twins = interchangeable(rest.filter((pair) => !unique.includes(pair)), byId);
   const alike = indistinguishable(rest.filter((pair) => !unique.includes(pair) && !twins.some((twin) => twin.outId === pair.outId || twin.inId === pair.inId)), byId);
-  const auto = [...referenced, ...unique, ...twins, ...alike];
+  // A pair a description doubts is never linked on its own; it's left to suggest.
+  const auto = [...referenced, ...unique, ...twins, ...alike].filter((pair) => !doubtful(pair));
   const paired = new Set(auto.flatMap((pair) => [pair.outId, pair.inId]));
   const suggested = rest.filter((pair) => !paired.has(pair.outId) && !paired.has(pair.inId));
   const wanted = new Set(suggested.map((pair) => `${pair.outId}|${pair.inId}`));
   const now = deps.now().getTime();
 
   const statements: BatchItem<'sqlite'>[] = [
+    // Undone links still wanted become suggestions; the rest go.
+    ...inChunks(undone.filter((row) => wanted.has(`${row.outId}|${row.inId}`)).map((row) => row.id)).map((ids) => tenant.db.update(transfers).set({ status: 'suggested', decidedAt: null }).where(tenant.scope(transfers, inArray(transfers.id, ids)))),
+    ...inChunks(undone.filter((row) => !wanted.has(`${row.outId}|${row.inId}`)).map((row) => row.id)).map((ids) => tenant.db.delete(transfers).where(tenant.scope(transfers, inArray(transfers.id, ids)))),
     // Suggestions no longer wanted (a side linked elsewhere, or gone).
     ...inChunks(existing.filter((row) => row.status === 'suggested' && !wanted.has(`${row.outId}|${row.inId}`)).map((row) => row.id)).map((ids) => tenant.db.delete(transfers).where(tenant.scope(transfers, inArray(transfers.id, ids)))),
     ...auto.map((pair) =>

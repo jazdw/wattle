@@ -198,7 +198,7 @@ export function Layout() {
         </div>
         <NavPanel sidebar />
       </aside>
-      <main className="mx-auto w-full min-w-0 max-w-6xl px-4 py-5 sm:px-6 sm:py-8">
+      <main className="mx-auto w-full min-w-0 max-w-screen-2xl px-4 py-5 sm:px-6 sm:py-8">
         <StatusBanner />
         <Outlet />
       </main>

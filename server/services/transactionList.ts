@@ -4,6 +4,7 @@
  * accounts it's one side of, filtered by dates and a search.
  */
 import { and, count, desc, eq, gte, inArray, lte, max, min, or, sql } from 'drizzle-orm';
+import { fullDescription } from '../../shared/descriptions';
 import type { Currency } from '../../shared/money';
 import { kindOf } from '../../shared/transactionKinds';
 import type { TransactionEntry, TransactionsResponse } from '../../shared/types';
@@ -83,14 +84,15 @@ export async function listTransactions(tenant: Tenant, account: typeof accounts.
     );
   }
   const otherIds = [...new Set(links.flatMap((link) => [link.outId, link.inId]))];
-  const others = new Map<string, { accountId: string; accountName: string; institutionName: string | null; mask: string | null; date: string }>();
+  const others = new Map<string, { accountId: string; accountName: string; institutionName: string | null; mask: string | null; date: string; description: string | null }>();
   for (const chunk of inChunks(otherIds)) {
     const found = await tenant.db
-      .select({ id: transactionsTable.id, accountId: transactionsTable.accountId, accountName: accounts.name, institutionName: accounts.institutionName, mask: accounts.mask, date: transactionsTable.date })
+      .select({ id: transactionsTable.id, accountId: transactionsTable.accountId, accountName: accounts.name, institutionName: accounts.institutionName, mask: accounts.mask, date: transactionsTable.date, description: transactionsTable.description, memo: transactionsTable.memo })
       .from(transactionsTable)
       .innerJoin(accounts, eq(accounts.id, transactionsTable.accountId))
       .where(tenant.scope(transactionsTable, inArray(transactionsTable.id, chunk)));
-    for (const row of found) others.set(row.id, row);
+    // Keyed by its id, kept apart from the details: the transfer's own id is the one Unlink sends.
+    for (const { id, memo, ...row } of found) others.set(id, { ...row, description: fullDescription(row.description, memo) });
   }
   const transferOf = (id: string): TransactionEntry['transfer'] => {
     const link = links.find((candidate) => candidate.outId === id || candidate.inId === id);

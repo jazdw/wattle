@@ -30,12 +30,13 @@
  * over anything from the institution (shared/quality.ts). The days are
  * written as jobs, one window each (a load can be thousands of rows).
  */
-import { and, eq, gte, inArray, isNull, lte, min, sql } from 'drizzle-orm';
+import { and, asc, eq, gte, inArray, isNull, lte, min, sql } from 'drizzle-orm';
 import type { BatchItem } from 'drizzle-orm/batch';
 import { suggestClassification } from '../../shared/classify';
 import { isCusip } from '../../shared/holdings';
 import { addDays, dateRange, marketDate, type IsoDate } from '../../shared/dates';
-import { leastFinal } from '../../shared/quality';
+import { formatMoney, type Currency } from '../../shared/money';
+import { leastFinal, OBSERVED_SOURCES } from '../../shared/quality';
 import type { ImportedHoldings, ImportKind, ImportRequest } from '../../shared/schemas';
 import type { ImportCheck, ImportedAccount, ImportProblem, ImportResponse, TickerSuggestion, TickerSuggestions } from '../../shared/types';
 import { chunkRows, inChunks, runAtomic } from '../db/batch';
@@ -46,7 +47,7 @@ import { HttpError, notFound } from '../lib/http';
 import type { Deps } from '../ports';
 import { reconstructHistory, type BackfillHolding, type BackfillTransaction, type PriceResult } from './backfillCore';
 import { BUSY_RETRY_SECONDS, daysPerBlock, PRICE_LOOKBACK_DAYS, windows } from './backfill';
-import { writeBalances } from './balances';
+import { signedBalance, writeBalances } from './balances';
 import { stableId } from './ids';
 import { enqueue, RetryLater, type JobContext } from './jobRunner';
 import { accountLease, connectionLease, Lease } from './lease';
@@ -274,10 +275,50 @@ export async function importAccounts(deps: Deps, tenant: Tenant, request: Import
  */
 export async function checkImport(deps: Deps, tenant: Tenant, request: ImportRequest): Promise<ImportCheck> {
   const { plans, problems } = await prepareImport(deps, tenant, request);
+  const warnings = (await Promise.all(plans.map((plan) => (plan.balances && !plan.created ? balanceDifferences(tenant, plan.account, plan.label, plan.balances) : [])))).flat();
   return {
     accounts: plans.map((plan) => ({ label: plan.label, created: plan.created, days: plan.days, from: plan.from, to: plan.to, estimated: plan.estimated ?? [], closes: plan.closes ?? [] })),
     problems,
+    warnings,
   };
+}
+
+/** What a balance's source is, in words, for saying where Wattle's differing balance came from. */
+const SOURCE_WORDS: Record<(typeof OBSERVED_SOURCES)[number], string> = { rebuilt: 'the institution', snapshot: 'the institution', import: 'an earlier import', manual: 'you' };
+
+/**
+ * A balances file against the balances Wattle has observed for the account
+ * on the same days (a file's, the institution's, yours), each file day's
+ * balance carried to the next as the import writes them: a difference means
+ * transactions missing on one side, or a starting or ending balance that's
+ * wrong. Said once, at the first day it differs, with how many do.
+ */
+async function balanceDifferences(tenant: Tenant, account: Account, label: string, rows: { date: string; balance: number }[]): Promise<ImportProblem[]> {
+  const sorted = [...rows].sort((a, b) => a.date.localeCompare(b.date));
+  if (sorted.length === 0) return [];
+  const stored = await tenant.db
+    .select({ date: accountDaily.date, balance: accountDaily.balance, source: accountDaily.source })
+    .from(accountDaily)
+    .where(tenant.scope(accountDaily, eq(accountDaily.accountId, account.id), gte(accountDaily.date, sorted[0].date), lte(accountDaily.date, sorted.at(-1)!.date), inArray(accountDaily.source, [...OBSERVED_SOURCES]), eq(accountDaily.unmatched, false)))
+    .orderBy(asc(accountDaily.date));
+  const differing: { date: string; ours: number; theirs: number; source: (typeof OBSERVED_SOURCES)[number] }[] = [];
+  let index = 0;
+  for (const day of stored) {
+    while (index + 1 < sorted.length && sorted[index + 1].date <= day.date) index++;
+    const ours = signedBalance(account.type, sorted[index].balance);
+    if (Math.abs(ours - day.balance) > 1) differing.push({ date: day.date, ours, theirs: day.balance, source: day.source as (typeof OBSERVED_SOURCES)[number] });
+  }
+  const [first] = differing;
+  if (!first) return [];
+  const amount = (minor: number) => formatMoney(Math.abs(minor), account.currency as Currency);
+  const others = differing.length - 1;
+  return [
+    {
+      label,
+      date: first.date,
+      text: `On ${first.date}, this works out ${amount(first.ours)} where Wattle has ${amount(first.theirs)} from ${SOURCE_WORDS[first.source]}${others > 0 ? ` (and ${others} more ${others === 1 ? 'day' : 'days'})` : ''}: transactions may be missing, or the starting or ending balance is wrong.`,
+    },
+  ];
 }
 
 /** Phase 1: every account checked and its writes planned; nothing written. */

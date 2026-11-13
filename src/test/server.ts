@@ -20,6 +20,8 @@ export const handlers = [
   http.get('*/api/auth/dev-users', json({ users: [] })),
   http.post('*/api/auth/logout', json({ ok: true })),
   http.get('*/api/accounts', json({ accounts: ACCOUNTS })),
+  // No balance stored on the day asked (the import page's starting and ending balances).
+  http.get('*/api/accounts/:id/balances', json({ balances: [] })),
   http.get('*/api/connections', json(CONNECTIONS)),
   http.get('*/api/portfolio', () => HttpResponse.json(portfolio())),
   http.get('*/api/history', ({ request }) => HttpResponse.json(history(new URL(request.url).searchParams.get('group') ?? 'total'))),

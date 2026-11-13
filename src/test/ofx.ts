@@ -48,8 +48,8 @@ export function sgmlAccounts(numbers: string[], extra: Record<string, string> = 
 }
 
 /** A made-up bank (or card) download: a closing balance on `asOf` and transactions as [date, amount]. */
-export function bankSgml(transactions: [string, string][], closing: string, { card = false, asOf = '20261008', start = '20260901', number = '99990001' } = {}) {
-  const rows = transactions.map(([date, amount], index) => `<STMTTRN><TRNTYPE>${amount.startsWith('-') ? 'DEBIT' : 'CREDIT'}</TRNTYPE><DTPOSTED>${date}</DTPOSTED><TRNAMT>${amount}</TRNAMT><FITID>T${index}</FITID><NAME>Example</NAME></STMTTRN>`).join('\n');
+export function bankSgml(transactions: [string, string][], closing: string, { card = false, asOf = '20261008', start = '20260901', end, ids = 'T', number = '99990001' }: { card?: boolean; asOf?: string; start?: string; end?: string; ids?: string; number?: string } = {}) {
+  const rows = transactions.map(([date, amount], index) => `<STMTTRN><TRNTYPE>${amount.startsWith('-') ? 'DEBIT' : 'CREDIT'}</TRNTYPE><DTPOSTED>${date}</DTPOSTED><TRNAMT>${amount}</TRNAMT><FITID>${ids}${index}</FITID><NAME>Example</NAME></STMTTRN>`).join('\n');
   const [messages, wrapper, statement, from] = card ? ['CREDITCARDMSGSRSV1', 'CCSTMTTRNRS', 'CCSTMTRS', `<CCACCTFROM><ACCTID>${number}</ACCTID></CCACCTFROM>`] : ['BANKMSGSRSV1', 'STMTTRNRS', 'STMTRS', `<BANKACCTFROM><BANKID>000000000</BANKID><ACCTID>${number}</ACCTID><ACCTTYPE>CHECKING</ACCTTYPE></BANKACCTFROM>`];
   return `OFXHEADER:100
 DATA:OFXSGML
@@ -65,7 +65,7 @@ NEWFILEUID:NONE
 <SIGNONMSGSRSV1><SONRS><STATUS><CODE>0</CODE><SEVERITY>INFO</SEVERITY></STATUS><DTSERVER>${asOf}190000</DTSERVER><LANGUAGE>ENG</LANGUAGE><FI><ORG>Example Bank</ORG><FID>1</FID></FI></SONRS></SIGNONMSGSRSV1>
 <${messages}><${wrapper}><TRNUID>0</TRNUID><STATUS><CODE>0</CODE><SEVERITY>INFO</SEVERITY></STATUS>
 <${statement}><CURDEF>USD</CURDEF>${from}
-<BANKTRANLIST><DTSTART>${start}</DTSTART><DTEND>${asOf}</DTEND>
+<BANKTRANLIST><DTSTART>${start}</DTSTART><DTEND>${end ?? asOf}</DTEND>
 ${rows}
 </BANKTRANLIST>
 <LEDGERBAL><BALAMT>${closing}</BALAMT><DTASOF>${asOf}120000</DTASOF></LEDGERBAL>

@@ -6,12 +6,13 @@
 import { eq } from 'drizzle-orm';
 import { describe, expect, it } from 'vitest';
 import * as schema from '../server/db/schema';
-import { candidatePairs, inTransit, inTransitByAccount, names, type MoneyMove } from '../server/services/transfers';
+import { Tenant } from '../server/db/tenant';
+import { candidatePairs, inTransit, inTransitByAccount, matchTransfers, names, namesAnother, quotedMasks, type MoneyMove } from '../server/services/transfers';
 import type { ImportedFile } from '../shared/schemas';
 import type { HistoryResponse, TransactionsResponse, TransfersResponse } from '../shared/types';
 import { client, createHousehold, createTestDeps, settle } from './helpers';
 
-const move = (id: string, accountId: string, date: string, amount: number, currency = 'USD'): MoneyMove => ({ id, accountId, date, amount, currency });
+const move = (id: string, accountId: string, date: string, amount: number, currency = 'USD', accountType?: string): MoneyMove => ({ id, accountId, date, amount, currency, accountType });
 
 describe('institution names in descriptions', () => {
   it('recognises an institution by the first distinctive word of its name', () => {
@@ -21,6 +22,29 @@ describe('institution names in descriptions', () => {
     expect(names('ONLINE BANK TRANSFER', 'Bank of Contoso')).toBe(false);
     expect(names('Exampleville Hardware', 'Example Brokerage')).toBe(false);
     expect(names(null, 'Example Brokerage')).toBe(false);
+  });
+});
+
+describe('accounts named in descriptions', () => {
+  it("reads an account's last digits after masking or an account word, not a year or a reference", () => {
+    expect(quotedMasks('Withdrawal to Example Savings XXXXXXX1234')).toEqual(['1234']);
+    expect(quotedMasks('Online Transfer 30000000001 to Example Savings #######1234')).toEqual(['1234']);
+    expect(quotedMasks('Transfer to Example Bank checking 5555 transaction#: 123456')).toEqual(['5555']);
+    expect(quotedMasks('Payment from card ending in 9876')).toEqual(['9876']);
+    expect(quotedMasks('Offer credit for order on 04/27/2026')).toEqual([]);
+    expect(quotedMasks('Deposit from Example Co PAYROLL 2026')).toEqual([]);
+  });
+
+  it('doubts a pairing whose description names an account that is neither side, by its digits or institution', () => {
+    const out = (description: string): MoneyMove => ({ ...move('o', 'chk', '2026-03-10', 250_00), description, mask: '1111', institution: 'Example Bank' });
+    const savings: MoneyMove = { ...move('i', 'sav', '2026-03-12', -250_00), mask: '2222', institution: 'Contoso Bank' };
+    const institutions = ['Example Bank', 'Contoso Bank', 'Northwind Brokerage'];
+    expect(namesAnother(out('Transfer to Other Bank checking 5555'), savings, institutions)).toBe(true);
+    expect(namesAnother(out('Transfer to Contoso Savings XXXX2222'), savings, institutions)).toBe(false);
+    expect(namesAnother(out('Transfer from checking 1111'), savings, institutions)).toBe(false); // its own
+    expect(namesAnother(out('Transfer to Northwind'), savings, institutions)).toBe(true);
+    expect(namesAnother(out('Transfer to Contoso, not Northwind'), savings, institutions)).toBe(false);
+    expect(namesAnother(out('Online transfer'), savings, institutions)).toBe(false);
   });
 });
 
@@ -35,6 +59,19 @@ describe('transfer candidates', () => {
       move('different', 'sav', '2026-09-02', -499_99),
     ];
     expect(candidatePairs(moves)).toEqual([{ outId: 'out', inId: 'in' }]);
+  });
+
+  it("never pairs a credit card's purchase (with a refund on another card, or a deposit in checking), but pairs a payment into a card", () => {
+    const moves = [
+      move('charge', 'card-a', '2026-09-02', 10_00, 'USD', 'credit'),
+      move('refund', 'card-b', '2026-09-03', -10_00, 'USD', 'credit'),
+      move('deposit', 'sav', '2026-09-03', -10_00, 'USD', 'depository'),
+      move('payment', 'chk', '2026-09-04', 10_00, 'USD', 'depository'),
+    ];
+    expect(candidatePairs(moves)).toEqual([
+      { outId: 'payment', inId: 'refund' },
+      { outId: 'payment', inId: 'deposit' },
+    ]);
   });
 
   it('takes a transfer off once while it’s in both accounts, and adds it while it’s in neither', () => {
@@ -64,8 +101,8 @@ async function household() {
   const home = await createHousehold(deps, 'Home', 'me@example.com');
   const api = client(deps, home.cookie);
   /** New accounts from their files, in one import. */
-  const createAll = async (files: [string, ImportedFile][]) => {
-    const response = await api('/api/imports', { method: 'POST', json: { accounts: files.map(([name, file]) => ({ label: name, target: { new: { name, type: 'depository', currency: 'USD' } }, file })) } });
+  const createAll = async (files: [string, ImportedFile][], type = 'depository') => {
+    const response = await api('/api/imports', { method: 'POST', json: { accounts: files.map(([name, file]) => ({ label: name, target: { new: { name, type, currency: 'USD' } }, file })) } });
     expect(response.status).toBe(200);
     await settle(deps);
     return (response.body.accounts as { accountId: string }[]).map((row) => row.accountId);
@@ -82,11 +119,12 @@ describe('transfers between your accounts', () => {
     const { api, create, linked, listed } = await household();
     // $500 arrives in savings on Sep 1, a day before checking shows it leaving; $2,000 of pay arrives on Aug 1.
     const checking = await create('Checking', bank([['2026-07-31', 0], ['2026-08-01', 2000], ['2026-09-02', 1500]], [{ id: 'C1', date: '2026-08-01', amount: 2000 }, { id: 'C2', date: '2026-09-02', amount: -500 }]));
-    const savings = await create('Savings', bank([['2026-07-31', 0], ['2026-09-01', 500]], [{ id: 'S1', date: '2026-09-01', amount: 500 }]));
+    const savings = await create('Savings', bank([['2026-07-31', 0], ['2026-09-01', 500]], [{ id: 'S1', date: '2026-09-01', amount: 500, description: 'Deposit from checking', memo: 'ref 42' }]));
 
     const [transfer] = await linked();
     expect(transfer).toMatchObject({ status: 'auto', out: { accountName: 'Checking', date: '2026-09-02', amount: 500_00 }, in: { accountName: 'Savings', date: '2026-09-01', amount: -500_00 } });
-    expect((await listed(checking)).find((row) => row.date === '2026-09-02')?.transfer).toMatchObject({ status: 'auto', accountId: savings, accountName: 'Savings', date: '2026-09-01' });
+    // The transfer's own id (what Unlink sends), not the other side's transaction's.
+    expect((await listed(checking)).find((row) => row.date === '2026-09-02')?.transfer).toMatchObject({ id: transfer.id, status: 'auto', accountId: savings, accountName: 'Savings', date: '2026-09-01', description: 'Deposit from checking · ref 42' });
 
     // Net worth: counted once on Sep 1 (in savings, still in checking until Sep 2), not twice.
     const total = (await api('/api/history?range=ALL&group=total')).body as HistoryResponse;
@@ -159,6 +197,54 @@ describe('transfers between your accounts', () => {
     expect((await other('/api/transfers', { method: 'POST', json: { outId: out.id, inId: arrival.id } })).status).toBe(400);
     const [row] = await deps.db.select().from(schema.transfers).where(eq(schema.transfers.outId, out.id));
     expect((await other(`/api/transfers/${row.id}`, { method: 'PATCH', json: { status: 'rejected' } })).status).toBe(404);
+  });
+
+  it("leaves a card's purchase unmatched, undoes such a link made before, but links one when you choose", async () => {
+    const { deps, home, api, createAll, suggested, linked, listed } = await household();
+    const [first, second] = await createAll(
+      [
+        ['Card A', bank([['2026-08-31', 0], ['2026-09-02', -10]], [{ id: 'A1', date: '2026-09-02', amount: -10 }])],
+        ['Card B', bank([['2026-08-31', -10], ['2026-09-03', 0]], [{ id: 'B1', date: '2026-09-03', amount: 10 }])],
+      ],
+      'credit',
+    );
+    expect(await linked()).toEqual([]);
+    expect(await suggested()).toEqual([]);
+    const [charge] = await listed(first);
+    const [refund] = await listed(second);
+    // As if matching had linked it before the rule: undone the next time it runs.
+    await deps.db.insert(schema.transfers).values({ id: 'old', householdId: home.householdId, outId: charge.id, inId: refund.id, status: 'auto', createdAt: 0 });
+    expect(await linked()).toHaveLength(1);
+    await matchTransfers(deps, new Tenant(deps.db, home.householdId));
+    expect(await linked()).toEqual([]);
+    expect(await suggested()).toEqual([]);
+    const candidates = (await api(`/api/transactions/${charge.id}/candidates`)).body.candidates as { transactionId: string }[];
+    expect(candidates.map((row) => row.transactionId)).toEqual([refund.id]);
+    expect((await api('/api/transfers', { method: 'POST', json: { outId: charge.id, inId: refund.id } })).status).toBe(200);
+    expect(await linked()).toMatchObject([{ status: 'confirmed', out: { transactionId: charge.id }, in: { transactionId: refund.id } }]);
+  });
+
+  it('only suggests money to an account its description names, and turns such a link made before into a suggestion', async () => {
+    const { deps, home, createAll, suggested, linked, api } = await household();
+    await createAll([
+      ['Checking', bank([['2026-03-09', 1000], ['2026-03-10', 750]], [{ id: 'C1', date: '2026-03-10', amount: -250, description: 'Online Transfer to Other Bank checking 5555' }])],
+      ['Savings', bank([['2026-03-09', 0], ['2026-03-12', 250]], [{ id: 'S1', date: '2026-03-12', amount: 250, description: 'Deposit from Example Co PAYROLL' }])],
+    ]);
+    expect(await linked()).toEqual([]);
+    const [suggestion] = await suggested();
+    expect(suggestion).toBeDefined();
+
+    // As if matching had linked it before the rule: it's suggested again the next time matching runs.
+    await deps.db.update(schema.transfers).set({ status: 'auto' }).where(eq(schema.transfers.id, suggestion.id));
+    expect(await linked()).toHaveLength(1);
+    await matchTransfers(deps, new Tenant(deps.db, home.householdId));
+    expect(await linked()).toEqual([]);
+    expect((await suggested()).map((row) => row.id)).toEqual([suggestion.id]);
+    // And once you say it isn't one, it stays that way.
+    expect((await api(`/api/transfers/${suggestion.id}`, { method: 'PATCH', json: { status: 'rejected' } })).status).toBe(200);
+    await matchTransfers(deps, new Tenant(deps.db, home.householdId));
+    expect(await suggested()).toEqual([]);
+    expect(await linked()).toEqual([]);
   });
 
   it('refuses a second link for a transaction in the database itself', async () => {

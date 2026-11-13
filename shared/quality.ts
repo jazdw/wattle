@@ -21,6 +21,9 @@ export const DAILY_SOURCES = [
 ] as const;
 export type DailySource = (typeof DAILY_SOURCES)[number];
 
+/** Sources of a day's balance that were observed (a file, the institution, you), not filled in by Wattle from another day. */
+export const OBSERVED_SOURCES = ['rebuilt', 'snapshot', 'import', 'manual'] as const satisfies readonly DailySource[];
+
 export const PRICE_SOURCES = [
   /** The market's close (or a fund's NAV) for the day. */
   'close',

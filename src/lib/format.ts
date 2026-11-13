@@ -10,6 +10,11 @@ export function shortDate(date: string): string {
   return new Date(`${date}T00:00:00Z`).toLocaleDateString(undefined, { month: 'short', day: 'numeric', timeZone: 'UTC' });
 }
 
+/** A moment (an ISO instant) as a date and time in your time zone: Nov 11, 2026, 9:32 AM. */
+export function localDateTime(at: string): string {
+  return new Date(at).toLocaleString(undefined, { year: 'numeric', month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' });
+}
+
 export function longDate(date: string): string {
   return new Date(`${date}T00:00:00Z`).toLocaleDateString(undefined, {
     year: 'numeric',

@@ -75,6 +75,22 @@
   * {
     border-color: var(--color-border);
   }
+  /* Anything you can click or choose shows the pointer (Tailwind's reset leaves buttons with the arrow); not while disabled. */
+  button:not(:disabled),
+  [role='button']:not([aria-disabled='true']),
+  [role='tab'],
+  [role='option'],
+  [role='menuitem'],
+  [role='switch'],
+  select:not(:disabled),
+  summary,
+  label:has(> input[type='checkbox'], > input[type='radio']),
+  input[type='checkbox']:not(:disabled),
+  input[type='radio']:not(:disabled),
+  input[type='file']:not(:disabled),
+  input[type='date']::-webkit-calendar-picker-indicator {
+    cursor: pointer;
+  }
   html {
     color-scheme: light dark;
     background: var(--color-background);

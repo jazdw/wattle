@@ -61,36 +61,46 @@ describe('Transactions', () => {
     renderPage(<Transactions />, { route: '/?account=brk' });
     expect(await screen.findByText('Funds Received')).toBeInTheDocument();
     const rows = screen.getAllByRole('row').slice(1);
-    expect(within(rows[0]).getByLabelText(/^Type of Buy/)).toHaveDisplayValue('Automatic: Purchase');
+    // The type it works out, said to be automatic beneath.
+    expect(within(rows[0]).getByLabelText(/^Type of Buy/)).toHaveDisplayValue('Purchase');
+    expect(rows[0]).toHaveTextContent('Automatic');
     expect(rows[0]).toHaveTextContent('-$6,025.00');
     // Plaid's own word for it, under the kind.
-    expect(within(rows[1]).getByLabelText(/^Type of Funds Received/)).toHaveDisplayValue('Automatic: Money in');
-    expect(rows[1]).toHaveTextContent('Contribution');
+    expect(within(rows[1]).getByLabelText(/^Type of Funds Received/)).toHaveDisplayValue('Money in');
+    expect(rows[1]).toHaveTextContent('Automatic · Contribution');
     expect(rows[1]).toHaveTextContent('$10,000.00');
 
     // A bank account: its report's transactions.
     await userEvent.selectOptions(screen.getByLabelText('Account'), 'chk');
     expect(await screen.findByText('Interest')).toBeInTheDocument();
-    expect(screen.getByLabelText(/^Type of Interest/)).toHaveDisplayValue('Automatic: Dividend or interest');
+    expect(screen.getByLabelText(/^Type of Interest/)).toHaveDisplayValue('Dividend or interest');
   });
 
   it('sets a type you choose, and back to automatic', async () => {
+    // The server keeps what's chosen.
+    let chosen: string | null = null;
     server.use(
-      http.get('*/api/accounts/brk/transactions', () => HttpResponse.json(BROKERAGE)),
-      http.patch('*/api/transactions/:id', () => HttpResponse.json({ ok: true })),
+      http.get('*/api/accounts/brk/transactions', () => HttpResponse.json({ ...BROKERAGE, transactions: BROKERAGE.transactions.map((row) => (row.id === 't1' && chosen ? { ...row, kind: chosen, kindByYou: true } : row)) })),
+      http.patch('*/api/transactions/:id', async ({ request }) => {
+        chosen = ((await request.json()) as { kind: string | null }).kind;
+        return HttpResponse.json({ ok: true });
+      }),
     );
     renderPage(<Transactions />, { route: '/?account=brk' });
     const select = await screen.findByLabelText(/^Type of Funds Received/);
+    // The automatic type isn't listed again among the others.
+    expect(within(select).getAllByRole('option').filter((option) => option.textContent === 'Money in')).toHaveLength(1);
     await userEvent.selectOptions(select, 'Fee');
     await expect.poll(() => sent('PATCH /api/transactions/t1')[0]?.body).toEqual({ kind: 'fee' });
-    await userEvent.selectOptions(select, 'Automatic: Money in');
+    expect(await screen.findByText('Set by you · Contribution')).toBeInTheDocument();
+    await userEvent.selectOptions(select, 'Back to automatic: Money in');
     await expect.poll(() => sent('PATCH /api/transactions/t1')[1]?.body).toEqual({ kind: null });
   });
 
   it('asks about transfers it could pair more than one way, and links, unlinks and links by hand', async () => {
     const side = (transactionId: string, accountName: string, date: string, amount: number) => ({ transactionId, accountId: accountName.toLowerCase(), accountName, institutionName: null, mask: '1234', date, amount, currency: 'USD' as const, description: null });
     const suggested: TransfersResponse = { transfers: [{ id: 'x1', status: 'suggested', out: { ...side('o1', 'Checking', '2026-09-02', 500_00), description: 'Online transfer 123456789' }, in: side('i1', 'Savings', '2026-09-01', -500_00) }] };
-    const linked = { ...BROKERAGE, transactions: [{ ...BROKERAGE.transactions[1], transfer: { id: 'x2', status: 'auto' as const, accountId: 'chk', accountName: 'Checking', institutionName: null, mask: '1234', date: '2026-08-31' } }, { ...BROKERAGE.transactions[1], id: 't3', description: 'Second deposit', transfer: null }] };
+    const linked = { ...BROKERAGE, transactions: [{ ...BROKERAGE.transactions[1], transfer: { id: 'x2', status: 'auto' as const, accountId: 'chk', accountName: 'Checking', institutionName: null, mask: '1234', date: '2026-08-31', description: 'Transfer to brokerage' } }, { ...BROKERAGE.transactions[1], id: 't3', description: 'Second deposit', transfer: null }] };
     server.use(
       http.get('*/api/transfers', () => HttpResponse.json(suggested)),
       http.get('*/api/accounts/brk/transactions', () => HttpResponse.json(linked)),
@@ -100,17 +110,28 @@ describe('Transactions', () => {
     expect(await screen.findByText('Transfers to check')).toBeInTheDocument();
     // From and to, each with its description to recognise it by.
     const pair = screen.getByRole('row', { name: /\$500\.00/ });
-    expect(within(pair).getAllByRole('cell').map((cell) => cell.textContent)).toEqual(['$500.00', 'FromChecking ··1234, Sep 2, 2026Online transfer 123456789', 'ToSavings ··1234, Sep 1, 2026', 'It’s a transferNot a transfer']);
+    expect(within(pair).getAllByRole('cell').map((cell) => cell.textContent)).toEqual(['$500.00', 'FromChecking ··1234, Sep 2, 2026Online transfer 123456789', 'ToSavings ··1234, Sep 1, 2026', 'It’s a transferNot a transfer']); // words on a phone; on a wide screen icons, named the same
     await userEvent.click(screen.getByRole('button', { name: 'It’s a transfer' }));
     await expect.poll(() => sent('PATCH /api/transfers/x1')[0]?.body).toEqual({ status: 'confirmed' });
 
     // Linked: where the money came from, and a way to unlink it.
-    expect(await screen.findByText('From Checking ··1234, Aug 31, 2026')).toBeInTheDocument();
-    await userEvent.click(screen.getByRole('button', { name: 'Unlink' }));
+    expect(await screen.findByText('From Checking ··1234')).toBeInTheDocument();
+    expect(screen.getByText('From Checking ··1234').parentElement).toHaveTextContent('Aug 31, 2026');
+    // Clicking the other side asks to unlink.
+    await userEvent.click(screen.getByText('From Checking ··1234'));
+    // It asks first.
+    const confirm = await screen.findByRole('dialog', { name: 'Unlink this transfer?' });
+    // Both sides: where it left and where it arrived.
+    expect(confirm).toHaveTextContent(/From.*Checking ··1234, Aug 31, 2026.*Transfer to brokerage.*To.*Brokerage.*Funds Received/);
+    expect(confirm).toHaveTextContent('Once unlinked, the withdrawal counts as money leaving your household and the deposit as money coming in.');
+    expect(sent('PATCH /api/transfers/x2')).toEqual([]);
+    await userEvent.click(within(confirm).getByRole('button', { name: 'Unlink' }));
     await expect.poll(() => sent('PATCH /api/transfers/x2')[0]?.body).toEqual({ status: 'rejected' });
 
     // Not linked: pick its other side.
     await userEvent.click(screen.getByRole('button', { name: /^Link Second deposit/ }));
+    // Money in: where it came from, as a withdrawal from another of your accounts.
+    expect(await screen.findByRole('dialog', { name: 'Where did it come from?' })).toHaveTextContent(/came into this account on .*pick the withdrawal there/);
     expect(await screen.findByText(/Checking ··1234, Sep 1, 2026/)).toBeInTheDocument();
     await userEvent.click(screen.getByRole('button', { name: 'Link' }));
     await expect.poll(() => sent('POST /api/transfers')[0]?.body).toEqual({ outId: 'c1', inId: 't3' });
@@ -142,7 +163,8 @@ describe('Transactions', () => {
     expect(within(row).getAllByRole('cell')[1]).toHaveTextContent(/PPD ID: 1111111111$/);
     await userEvent.selectOptions(which, 'p2');
     expect(within(row).getAllByRole('cell')[1]).toHaveTextContent(/PPD ID: 2222222222$/);
-    await userEvent.click(screen.getByRole('button', { name: 'Link' }));
+    // The same answers as a pair with no choice.
+    await userEvent.click(screen.getByRole('button', { name: 'It’s a transfer' }));
     await expect.poll(() => sent('PATCH /api/transfers/p2')[0]?.body).toEqual({ status: 'confirmed' });
     await userEvent.click(screen.getByRole('button', { name: 'Not a transfer' }));
     await expect.poll(() => [sent('PATCH /api/transfers/p1')[0]?.body, sent('PATCH /api/transfers/p2')[1]?.body]).toEqual([{ status: 'rejected' }, { status: 'rejected' }]);
@@ -195,5 +217,28 @@ describe('Transactions', () => {
     expect(grocer).toHaveTextContent('Example Bank Everyday');
     expect(grocer).toHaveTextContent('-$45.00');
     expect(screen.getByText('Interest').closest('tr')).toHaveTextContent('Northwind Checking ··1234');
+  });
+
+  it('shows 100 at a time, more on request, and the first 100 again when the search changes', async () => {
+    const many: TransactionsResponse = {
+      ...CHECKING,
+      matched: 250,
+      transactions: Array.from({ length: 250 }, (_, index) => entry(`m${index}`, '2026-10-01', { source: 'report', kind: 'withdrawal', automatic: 'withdrawal', description: `Purchase ${index + 1}`, amount: 1_00 })),
+    };
+    server.use(http.get('*/api/accounts/chk/transactions', () => HttpResponse.json(many)));
+    renderPage(<Transactions />, { route: '/?account=chk' });
+    expect(await screen.findByText('Purchase 1')).toBeInTheDocument();
+    const rows = () => screen.getAllByRole('row').length - 1;
+    expect(rows()).toBe(100);
+    expect(screen.getByText('Showing 100 of 250')).toBeInTheDocument();
+    await userEvent.click(screen.getByRole('button', { name: 'Show 100 more' }));
+    expect(rows()).toBe(200);
+    // The last few: as many as are left.
+    await userEvent.click(screen.getByRole('button', { name: 'Show 50 more' }));
+    expect(rows()).toBe(250);
+    expect(screen.queryByText(/^Showing/)).not.toBeInTheDocument();
+    // A new search starts from the first 100.
+    await userEvent.type(screen.getByPlaceholderText('Description or amount'), 'Purchase');
+    await expect.poll(rows).toBe(100);
   });
 });

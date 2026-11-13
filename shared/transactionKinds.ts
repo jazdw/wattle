@@ -79,3 +79,6 @@ export function plaidKind(type: string | null, subtype: string | null, amount: n
   if (kind === 'cash' && !['adjustment', 'pending credit', 'pending debit', 'rebalance', 'return of principal'].includes(sub)) return bySign(amount);
   return null;
 }
+
+/** Days apart that a transfer you link by hand may be: its two sides, either way. */
+export const TRANSFER_LINK_DAYS = 10;

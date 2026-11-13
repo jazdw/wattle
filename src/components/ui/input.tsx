@@ -8,13 +8,14 @@ function useControlId(props: { id?: string; name?: string }): string | undefined
   return props.id ?? (props.name ? undefined : generated);
 }
 
+// 16px text on a phone (14px from sm up): iPhones zoom the page into a text box or list whose text is smaller, and stay zoomed.
 export function Input({ className, ...props }: ComponentProps<'input'>) {
   const id = useControlId(props);
   return (
     <input
       id={id}
       className={cn(
-        'flex h-9 w-full rounded-md border border-input bg-card px-3 py-1 text-sm shadow-xs placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:opacity-50',
+        'flex h-9 w-full rounded-md border border-input bg-card px-3 py-1 text-base shadow-xs sm:text-sm placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:opacity-50',
         className,
       )}
       {...props}
@@ -30,7 +31,7 @@ export function NativeSelect({ className, ...props }: ComponentProps<'select'>) 
       <select
         id={id}
         className={cn(
-          'flex h-9 w-full appearance-none rounded-md border border-input bg-card py-1 pl-2 pr-8 text-sm shadow-xs focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:opacity-50',
+          'flex h-9 w-full appearance-none rounded-md border border-input bg-card py-1 pl-2 pr-8 text-base shadow-xs sm:text-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:opacity-50',
           className,
         )}
         {...props}

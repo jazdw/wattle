@@ -5,6 +5,7 @@ import { ACCOUNTS } from '../test/fixtures';
 import { bankSgml, buy, fee, sgml, sgmlAccounts } from '../test/ofx';
 import { renderPage } from '../test/render';
 import { sent, server } from '../test/server';
+import { localDateTime } from '../lib/format';
 import { Import } from './Import';
 
 describe('Import page', () => {
@@ -26,7 +27,7 @@ describe('Import page', () => {
   }
   const accepted = { accounts: [] };
   /** The server finds nothing wrong. */
-  const checked = (problems: unknown[] = []) => server.use(http.post('*/api/imports/check', () => HttpResponse.json({ accounts: [], problems })));
+  const checked = (problems: unknown[] = [], warnings: unknown[] = []) => server.use(http.post('*/api/imports/check', () => HttpResponse.json({ accounts: [], problems, warnings })));
   /** Import, once the check has run. */
   async function importIt(user: ReturnType<typeof renderPage>['user']) {
     const button = screen.getByRole('button', { name: 'Import' });
@@ -120,6 +121,8 @@ describe('Import page', () => {
     upload(bankSgml([['20260915', '-100.00']], '-300.00', { card: true, number: '99995555' }));
     await user.selectOptions(await screen.findByLabelText('Import ··5555 into'), 'new');
     expect(screen.getByLabelText('Type')).toHaveValue('credit');
+    // Newest first: the statement's closing balance and the opening one worked back to its start, which have no change, say which they are.
+    expect(screen.getAllByRole('row').slice(1).map((row) => row.textContent)).toEqual(['Oct 8, 2026Closing balance$300.00', 'Sep 15, 2026$100.00$300.00', 'Sep 1, 2026Opening balance$200.00']);
     // The file's institution, to correct.
     expect(screen.getByLabelText('Institution')).toHaveValue('Example Bank');
     await user.clear(screen.getByLabelText('Institution'));
@@ -130,6 +133,51 @@ describe('Import page', () => {
     });
   });
 
+  it("shows each file's days and balance, and takes the ending balance from the account's balance Wattle has that day when the file's is later", async () => {
+    server.use(
+      http.post('*/api/imports', () => HttpResponse.json(accepted)),
+      // The account already has the file's last day (a later year's file imported first): $250.00 owed.
+      http.get('*/api/accounts/card/balances', ({ request }) => HttpResponse.json({ balances: new URL(request.url).searchParams.get('on') === '2026-01-01' ? [{ date: '2026-01-01', balance: -250_00, source: 'import' }] : [] })),
+    );
+    checked();
+    const { user } = await openImport();
+    // A year's statement whose balance is from the day it was downloaded, long after.
+    upload(bankSgml([['20251120', '-250.00']], '-6000.00', { card: true, number: '99995555', start: '20250101', end: '20260101', asOf: '20261008' }));
+    await user.selectOptions(await screen.findByLabelText('Import ··5555 into'), 'card');
+    expect(screen.getByText(/Transactions Jan 1, 2025 – Jan 1, 2026 · 1 transaction/)).toBeInTheDocument();
+    // When it's from, in the browser's time zone (noon GMT in the file).
+    expect(screen.getByText(`Its balance $6,000.00 as of ${localDateTime('2026-10-08T12:00:00.000Z')}, after its transactions end, so not used`)).toBeInTheDocument();
+    await waitFor(() => expect(screen.getByLabelText('Ending balance, Jan 1, 2026')).toHaveValue('250.00'));
+    expect(screen.getByText(/Wattle’s balance on Jan 1, 2026, from an earlier import/)).toBeInTheDocument();
+    // The other, worked out through its transaction: nothing, so it starts the day before.
+    expect(screen.getByLabelText('Starting balance, Nov 19, 2025')).toHaveValue('0.00');
+    expect(screen.getByText(/Nothing before its first transaction, so it starts the day before/)).toBeInTheDocument();
+    await importIt(user);
+    await expect.poll(() => sent('POST /api/imports')[0]?.body).toMatchObject({
+      accounts: [{ target: { accountId: 'card' }, file: { kind: 'balances', rows: [{ date: '2025-11-19', balance: 0 }, { date: '2025-11-20', balance: 250 }, { date: '2026-01-01', balance: 250 }] } }],
+    });
+  });
+
+  it('assumes a starting balance of nothing when neither the file nor Wattle has one, and takes either you change', async () => {
+    server.use(http.post('*/api/imports', () => HttpResponse.json(accepted)));
+    // Balances differing from Wattle's are said, without stopping the import.
+    checked([], [{ label: '··5555', date: '2025-11-20', text: 'On 2025-11-20, this works out $300.00 where Wattle has $250.00 from the institution: transactions may be missing, or the starting or ending balance is wrong.' }]);
+    const { user } = await openImport();
+    upload(bankSgml([['20251120', '-250.00']], '-6000.00', { card: true, number: '99995555', start: '20250101', end: '20260101', asOf: '20261008' }));
+    await user.selectOptions(await screen.findByLabelText('Import ··5555 into'), 'card');
+    await waitFor(() => expect(screen.getByLabelText('Starting balance, Nov 19, 2025')).toHaveValue('0.00'));
+    expect(screen.getByText(/Assumed: Wattle has no balance for this account before Jan 1, 2025/)).toBeInTheDocument();
+    expect(screen.getByLabelText('Ending balance, Jan 1, 2026')).toHaveValue('250.00');
+    // Changing the ending balance works the start out from it.
+    await user.clear(screen.getByLabelText('Ending balance, Jan 1, 2026'));
+    await user.type(screen.getByLabelText('Ending balance, Jan 1, 2026'), '300');
+    expect(screen.getByLabelText('Starting balance, Jan 1, 2025')).toHaveValue('50.00');
+    expect(screen.getAllByText('Entered by you.')).toHaveLength(1);
+    expect(await screen.findByText(/works out \$300.00 where Wattle has \$250.00 from the institution/)).toBeInTheDocument();
+    await importIt(user);
+    await expect.poll(() => sent('POST /api/imports')[0]?.body).toMatchObject({ accounts: [{ file: { rows: [{ date: '2025-01-01', balance: 50 }, { date: '2025-11-20', balance: 300 }, { date: '2026-01-01', balance: 300 }] } }] });
+  });
+
   it('works out a CSV of transactions from a balance you give, at its start or end', async () => {
     server.use(http.post('*/api/imports', () => HttpResponse.json(accepted)));
     checked();
@@ -138,12 +186,13 @@ describe('Import page', () => {
     upload('Date,Description,Amount\n2026-09-01,Contribution,500.00\n2026-09-15,Purchase,-200.00');
     expect(await screen.findByText(/2 transactions · Sep 1, 2026 – Sep 15, 2026/)).toBeInTheDocument();
     await user.selectOptions(screen.getByLabelText('Import file0 into'), 'wbc');
-    expect(screen.getByText(/Give the balance known at the start or end/)).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: 'Import' })).toBeDisabled();
+    // None known: nothing assumed at the start, to change.
+    await waitFor(() => expect(screen.getByLabelText('Starting balance, Aug 31, 2026')).toHaveValue('0.00'));
 
     // $1,000 before the first transaction.
-    await user.selectOptions(screen.getByLabelText('Known'), 'start');
-    await user.type(screen.getByLabelText('Balance'), '1000');
+    await user.clear(screen.getByLabelText(/^Starting balance/));
+    await user.type(screen.getByLabelText(/^Starting balance/), '1000');
+    expect(screen.getByLabelText('Starting balance, Sep 1, 2026')).toHaveValue('1000');
     await importIt(user);
     await expect.poll(() => sent('POST /api/imports')[0]?.body).toEqual({
       accounts: [
@@ -266,8 +315,9 @@ describe('Import page', () => {
 
     await user.selectOptions(screen.getByLabelText('Import file0 into'), 'wbc');
     // One known balance for both: $1,000 after the last.
-    expect(screen.getByText(/2 transactions · Jun 1, 2025 – Jun 1, 2026/)).toBeInTheDocument();
-    await user.type(screen.getByLabelText('Balance'), '1000');
+    await waitFor(() => expect(screen.getByLabelText('Ending balance, Jun 1, 2026')).toHaveValue('800.00'));
+    await user.clear(screen.getByLabelText('Ending balance, Jun 1, 2026'));
+    await user.type(screen.getByLabelText('Ending balance, Jun 1, 2026'), '1000');
     await importIt(user);
     await expect.poll(() => sent('POST /api/imports')[0]?.body).toEqual({
       accounts: [

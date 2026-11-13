@@ -34,7 +34,8 @@ export function previewRows(file: ImportedFile): PreviewRow[] {
     return file.rows
       .map((row, index) => ({
         date: row.date,
-        label: index === 0 ? 'Balance' : 'Change',
+        // Neither end has a change to show: the file's first balance (a statement's, worked back to its start) and its last.
+        label: index === 0 ? 'Opening balance' : index === file.rows.length - 1 ? 'Closing balance' : 'Change',
         description: null,
         kind: null,
         security: null,

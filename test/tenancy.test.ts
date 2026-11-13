@@ -59,6 +59,7 @@ describe('tenant isolation', () => {
 
     // B can't read or change A's records by id.
     expect((await asB(`/api/accounts/${accountId}/balances`)).status).toBe(404);
+    expect((await asB(`/api/accounts/${accountId}/balances?on=2026-10-01`)).status).toBe(404);
     expect((await asB(`/api/accounts/${accountId}`, { method: 'PATCH', json: { name: 'Mine' } })).status).toBe(404);
     expect((await asB(`/api/accounts/${accountId}/balances`, { method: 'POST', json: { date: '2026-10-02', balance: 1 } })).status).toBe(404);
     expect((await asB(`/api/accounts/${accountId}`, { method: 'DELETE' })).status).toBe(404);
