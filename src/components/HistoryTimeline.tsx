@@ -87,12 +87,16 @@ export function HistoryTimeline({ coverage, today }: { coverage: Pick<AccountCov
       <div className="flex items-start gap-2">
         <span className={rowLabel} />
         <div className="relative h-4 flex-1 text-[11px] text-muted-foreground">
-          {axisMarks(from, to).map((mark) => (
-            // Centred on its day, kept inside at the ends.
-            <span key={mark.date} className="absolute whitespace-nowrap" style={{ left: `${left(mark.date)}%`, transform: `translateX(${left(mark.date) > 88 ? -100 : left(mark.date) < 8 ? 0 : -50}%)` }}>
-              {mark.label}
-            </span>
-          ))}
+          {/* Its first and last day always; months or years between, clear of them, where there's room. */}
+          <span className="absolute left-0 whitespace-nowrap">{longDate(from)}</span>
+          <span className="absolute right-0 whitespace-nowrap">{longDate(to)}</span>
+          {axisMarks(from, to)
+            .filter((mark) => left(mark.date) > 20 && left(mark.date) < 80)
+            .map((mark) => (
+              <span key={mark.date} className="absolute hidden -translate-x-1/2 whitespace-nowrap sm:inline" style={{ left: `${left(mark.date)}%` }}>
+                {mark.label}
+              </span>
+            ))}
         </div>
       </div>
       <p className="min-h-4 text-xs text-muted-foreground" aria-live="polite">

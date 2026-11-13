@@ -346,13 +346,18 @@ describe('Accounts page', () => {
     const { user } = renderPage(<Accounts />);
     const toggle = await screen.findByRole('button', { name: "Show Northwind Checking's history" });
     expect(toggle).toHaveTextContent('Balances Jan 1, 2026 – today · Transactions Jan 5, 2026 – Sep 30, 2026 · 1 gap · balance unchanged since Sep 1, 2026');
-    expect(screen.queryByText('Your files')).not.toBeInTheDocument();
+    expect(screen.queryByText('Imported')).not.toBeInTheDocument();
+    // Its first and last day, at the ends.
+    await user.click(toggle);
+    expect(screen.getByText('Jan 1, 2026', { selector: 'span' })).toBeInTheDocument();
+    expect(screen.getByText('Oct 8, 2026', { selector: 'span' })).toBeInTheDocument();
+    await user.click(toggle);
     await user.click(toggle);
     expect(toggle).toHaveAttribute('aria-expanded', 'true');
     // The key: where each part came from, and the balance that stopped updating.
-    for (const label of ['Your files', 'The institution', 'Balance not updating']) expect(screen.getByText(label)).toBeInTheDocument();
+    for (const label of ['Imported', 'Plaid', 'Balance not updating']) expect(screen.getByText(label)).toBeInTheDocument();
     // A run says what it is when pointed at.
-    await user.hover(screen.getByTitle('Balances · Your files · Jan 1, 2026 – Mar 31, 2026'));
-    expect(screen.getByText('Balances · Your files · Jan 1, 2026 – Mar 31, 2026', { selector: 'p' })).toBeInTheDocument();
+    await user.hover(screen.getByTitle('Balances · Imported · Jan 1, 2026 – Mar 31, 2026'));
+    expect(screen.getByText('Balances · Imported · Jan 1, 2026 – Mar 31, 2026', { selector: 'p' })).toBeInTheDocument();
   });
 });

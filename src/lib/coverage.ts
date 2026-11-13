@@ -3,7 +3,7 @@ import { addDays, type IsoDate } from '../../shared/dates';
 import type { AccountCoverage, CoverageSource } from '../../shared/types';
 import { longDate } from './format';
 
-export const SOURCE_LABELS: Record<CoverageSource, string> = { files: 'Your files', bank: 'The institution', you: 'Entered by you', new: 'This import' };
+export const SOURCE_LABELS: Record<CoverageSource, string> = { files: 'Imported', bank: 'Plaid', you: 'Manual', new: 'This import' };
 export const SOURCE_COLORS: Record<CoverageSource, string> = { files: 'var(--series-1)', bank: 'var(--series-3)', you: 'var(--series-4)', new: 'var(--series-2)' };
 
 /** The first and last day of an account's history (balances or transactions), or null with none. */
