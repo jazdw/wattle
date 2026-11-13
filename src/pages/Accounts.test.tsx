@@ -319,4 +319,40 @@ describe('Accounts page', () => {
     renderPage(<Accounts />);
     expect(await screen.findByText(/Plaid Items used: 7 of 10/)).toBeInTheDocument();
   });
+
+  it("says under each account the days it has history for, and shows where each part came from when it's opened", async () => {
+    server.use(
+      http.get('*/api/coverage', () =>
+        HttpResponse.json({
+          today: '2026-10-08',
+          accounts: [
+            {
+              accountId: 'chk',
+              balances: [
+                { from: '2026-01-01', to: '2026-03-31', source: 'files', filled: false },
+                // A gap in April.
+                { from: '2026-05-01', to: '2026-10-08', source: 'bank', filled: false },
+              ],
+              transactions: [
+                { date: '2026-01-05', source: 'files', count: 2 },
+                { date: '2026-09-30', source: 'bank', count: 1 },
+              ],
+              unchangedSince: '2026-09-01',
+            },
+          ],
+        }),
+      ),
+    );
+    const { user } = renderPage(<Accounts />);
+    const toggle = await screen.findByRole('button', { name: "Show Northwind Checking's history" });
+    expect(toggle).toHaveTextContent('Balances Jan 1, 2026 – today · Transactions Jan 5, 2026 – Sep 30, 2026 · 1 gap · balance unchanged since Sep 1, 2026');
+    expect(screen.queryByText('Your files')).not.toBeInTheDocument();
+    await user.click(toggle);
+    expect(toggle).toHaveAttribute('aria-expanded', 'true');
+    // The key: where each part came from, and the balance that stopped updating.
+    for (const label of ['Your files', 'The institution', 'Balance not updating']) expect(screen.getByText(label)).toBeInTheDocument();
+    // A run says what it is when pointed at.
+    await user.hover(screen.getByTitle('Balances · Your files · Jan 1, 2026 – Mar 31, 2026'));
+    expect(screen.getByText('Balances · Your files · Jan 1, 2026 – Mar 31, 2026', { selector: 'p' })).toBeInTheDocument();
+  });
 });

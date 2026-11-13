@@ -1,5 +1,6 @@
 import { keepPreviousData, queryOptions, useQuery, type UseQueryOptions } from '@tanstack/react-query';
 import type {
+  CoverageResponse,
   AccountsResponse,
   ConnectionsResponse,
   HistoryGroup,
@@ -35,6 +36,11 @@ export function useHistory(range: Range, group: HistoryGroup, accountId?: string
     queryFn: () => api<HistoryResponse>(`/api/history?${params}`),
     placeholderData: keepPreviousData,
   });
+}
+
+/** Each account's stored history by source (the history timeline). */
+export function useCoverage() {
+  return useQuery({ queryKey: ['coverage'], queryFn: () => api<CoverageResponse>('/api/coverage') });
 }
 
 export function useAccounts(options: Pick<UseQueryOptions<AccountsResponse, Error, AccountsResponse, string[]>, 'refetchInterval'> = {}) {

@@ -454,6 +454,40 @@ export interface ImportCheck {
   warnings: ImportProblem[];
 }
 
+/**
+ * Where an account's history came from, as the history timeline groups it:
+ * your files, the institution (Plaid's daily balances, bank reports,
+ * investment transactions), or you; `new` is a file being imported, for the
+ * import page to show beside what's stored.
+ */
+export type CoverageSource = 'files' | 'bank' | 'you' | 'new';
+
+/** Consecutive days of an account's balances from one source; `filled` when Wattle filled them (carried from the day before, estimated). */
+export interface CoverageRun {
+  from: IsoDate;
+  to: IsoDate;
+  source: CoverageSource;
+  filled: boolean;
+}
+
+/** An account's stored history: its balances' runs (days with none are gaps), its transactions per day and source. */
+export interface AccountCoverage {
+  accountId: string;
+  balances: CoverageRun[];
+  transactions: { date: IsoDate; source: CoverageSource; count: number }[];
+  /**
+   * The institution's balance hasn't changed since this day (a week or more)
+   * though transactions are dated after it: the balance has stopped updating.
+   */
+  unchangedSince: IsoDate | null;
+}
+
+/** GET /api/coverage: every account's. */
+export interface CoverageResponse {
+  today: IsoDate;
+  accounts: AccountCoverage[];
+}
+
 /** POST /api/imports/tickers: a ticker for a security a file names without one. */
 export interface TickerSuggestions {
   suggestions: TickerSuggestion[];

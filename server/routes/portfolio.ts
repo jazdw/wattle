@@ -27,6 +27,7 @@ import { activeTarget, loadPortfolio } from '../services/portfolio';
 import { stableId } from '../services/ids';
 import { Lease, targetsLease } from '../services/lease';
 import { checkImport, importAccounts, suggestTickers } from '../services/holdingsImport';
+import { loadCoverage } from '../services/coverage';
 import { snapshotHousehold } from '../services/snapshots';
 import { activeConnections, MANUAL_SYNC_INTERVAL_MS, syncConnection } from '../services/sync';
 import { describeError } from '../lib/errors';
@@ -49,6 +50,9 @@ portfolioRoutes.get('/portfolio', async (c) => {
 });
 
 const GROUPS: HistoryGroup[] = ['total', 'account', 'category', 'holding', 'source'];
+
+/** Each account's stored history by source, for the history timeline (Accounts page, import page). */
+portfolioRoutes.get('/coverage', async (c) => c.json(await loadCoverage(c.env.deps, c.get('tenant'))));
 
 portfolioRoutes.get('/history', async (c) => {
   const tenant = c.get('tenant');

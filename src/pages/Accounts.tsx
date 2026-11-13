@@ -1,5 +1,5 @@
 import { useMutation, useQueryClient } from '@tanstack/react-query';
-import { EyeOff, History, Layers, Link2, ListChecks, Pencil, Plus, RefreshCw, RotateCcw, SquareCheckBig, Unplug, Upload } from 'lucide-react';
+import { ChevronDown, EyeOff, History, Layers, Link2, ListChecks, Pencil, Plus, RefreshCw, RotateCcw, SquareCheckBig, Unplug, Upload } from 'lucide-react';
 import { useState } from 'react';
 import { Link } from 'react-router-dom';
 import type { AccountSummary, ConnectionSummary } from '../../shared/types';
@@ -15,7 +15,9 @@ import { Button } from '../components/ui/button';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '../components/ui/card';
 import { Dialog, DialogContent } from '../components/ui/dialog';
 import { Alert, Skeleton } from '../components/ui/misc';
-import { useAccounts, useConnections } from '../hooks/queries';
+import { useAccounts, useConnections, useCoverage } from '../hooks/queries';
+import { HistoryTimeline } from '../components/HistoryTimeline';
+import { historySummary } from '../lib/coverage';
 import { useAuth, useOwnerName } from '../hooks/useAuth';
 import { accountKind, money, relativeTime, upcomingTime } from '../lib/format';
 
@@ -346,11 +348,18 @@ function AccountList({
   onEdit: (account: AccountSummary) => void;
   onHoldings?: (account: AccountSummary) => void;
 }) {
+  const coverage = useCoverage();
+  const [open, setOpen] = useState<Set<string>>(new Set());
   if (accounts.length === 0) return <p className="text-sm text-muted-foreground">No accounts.</p>;
+  const toggle = (id: string) => setOpen((now) => (now.has(id) ? new Set([...now].filter((each) => each !== id)) : new Set([...now, id])));
   return (
     <ul className="divide-y">
-      {accounts.map((account) => (
-        <li key={account.id} className={`flex items-center justify-between gap-3 py-2 text-sm ${account.isHidden ? 'opacity-60' : ''}`}>
+      {accounts.map((account) => {
+        const history = coverage.data?.accounts.find((found) => found.accountId === account.id);
+        const expanded = open.has(account.id);
+        return (
+        <li key={account.id} className={`grid grid-cols-1 gap-2 py-2 text-sm ${account.isHidden ? 'opacity-60' : ''}`}>
+          <div className="flex min-w-0 items-center justify-between gap-3">
           <div className="min-w-0">
             <p className="flex items-center gap-1.5 font-medium">
               {account.isHidden && <EyeOff className="size-3.5 shrink-0" aria-label="Hidden" />}
@@ -392,8 +401,26 @@ function AccountList({
               <Pencil />
             </Button>
           </div>
+          </div>
+          {/* The days it has history for; expanded, where each part came from. */}
+          {history && coverage.data && (
+            <div className="grid min-w-0 gap-2">
+              <button
+                type="button"
+                className="flex min-w-0 items-start gap-1 text-left text-xs text-muted-foreground hover:text-foreground"
+                onClick={() => toggle(account.id)}
+                aria-expanded={expanded}
+                aria-label={`${expanded ? 'Hide' : 'Show'} ${account.name}'s history`}
+              >
+                <ChevronDown className={`mt-px size-3.5 shrink-0 transition-transform ${expanded ? '' : '-rotate-90'}`} />
+                <span className="min-w-0">{historySummary(history, coverage.data.today)}</span>
+              </button>
+              {expanded && <HistoryTimeline coverage={history} today={coverage.data.today} />}
+            </div>
+          )}
         </li>
-      ))}
+        );
+      })}
     </ul>
   );
 }

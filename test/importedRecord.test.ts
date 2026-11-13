@@ -63,7 +63,7 @@ describe('the imported record', () => {
     const elsewhere = new Set(['server/routes/transactions.ts', 'server/services/backfill.ts', 'server/services/holdingsImport.ts', 'server/services/importedRecord.ts', 'server/services/sync.ts']);
     const files = (dir: string): string[] => readdirSync(dir, { withFileTypes: true }).flatMap((entry) => (entry.isDirectory() ? files(join(dir, entry.name)) : entry.name.endsWith('.ts') ? [join(dir, entry.name)] : []));
     const readers = files('server').filter((file) => /\.from\((transactions|transactionsTable|schema\.transactions)\)/.test(readFileSync(file, 'utf8')) && !elsewhere.has(file));
-    expect(readers.sort()).toEqual(['server/services/breakdown.ts', 'server/services/transactionList.ts', 'server/services/transfers.ts']);
+    expect(readers.sort()).toEqual(['server/services/breakdown.ts', 'server/services/coverage.ts', 'server/services/transactionList.ts', 'server/services/transfers.ts']);
     for (const file of readers) expect(readFileSync(file, 'utf8'), file).toContain('counted()');
   });
 });
