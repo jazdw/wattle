@@ -6,7 +6,7 @@
  * bank and card accounts; a CSV is dates and balances, or transactions
  * worked out from a balance you give (./csv, ./known).
  */
-import { addDays, type IsoDate } from '../../shared/dates';
+import { addDays, mergeSpans, type IsoDate } from '../../shared/dates';
 import { longDate } from './format';
 import type { ImportedBalances, ImportedFile, ImportedHoldings } from '../../shared/schemas';
 import type { AccountType } from '../../shared/types';
@@ -229,14 +229,26 @@ export function combineAccounts(copies: FileAccount[]): FileAccount {
   const transactions = mergeTransactions(files.map((file) => file.transactions as ReadTransaction[]));
   const securities = [...new Map(files.flatMap((file) => file.securities).map((security) => [security.id, security])).values()];
   const asOf = files.map((file) => file.asOf).sort().at(-1)!;
+  const covers = combinedCovers(files);
   // Holdings: from the latest file that has them (not one of transactions only).
   const known = copies.filter((copy) => !copy.unanchored).map((copy) => copy.file as ImportedHoldings);
   if (known.length === 0) {
     const moneyMoves = copies.some((copy) => copy.unanchored?.kind === 'holdings' && copy.unanchored.moneyMoves);
-    return { ...shared, file: { kind: 'holdings', currency: first.file.currency, asOf, securities, positions: [], cash: 0, transactions }, unanchored: { kind: 'holdings', securities, transactions, moneyMoves } };
+    return { ...shared, file: { kind: 'holdings', currency: first.file.currency, asOf, securities, positions: [], cash: 0, transactions, ...(covers ? { covers } : {}) }, unanchored: { kind: 'holdings', securities, transactions, moneyMoves } };
   }
   const latest = known.reduce((best, file) => (file.asOf > best.asOf ? file : best));
-  return { ...shared, file: { ...latest, asOf, securities, transactions } };
+  return { ...shared, file: { ...latest, asOf, securities, transactions, covers } };
+}
+
+/**
+ * The days several files of an account cover together, when each says and
+ * they leave none out between them; else none (the server then takes the
+ * first transaction's to the last).
+ */
+function combinedCovers(files: ImportedHoldings[]): ImportedHoldings['covers'] {
+  if (files.some((file) => !file.covers)) return undefined;
+  const merged = mergeSpans(files.map((file) => file.covers!));
+  return merged.length === 1 ? merged[0] : undefined;
 }
 
 /** What an account in the files holds now, in cents (positions at the file's prices, and cash). */

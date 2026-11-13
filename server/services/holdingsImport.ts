@@ -48,6 +48,7 @@ import type { Deps } from '../ports';
 import { reconstructHistory, type BackfillHolding, type BackfillTransaction, type PriceResult } from './backfillCore';
 import { BUSY_RETRY_SECONDS, daysPerBlock, PRICE_LOOKBACK_DAYS, windows } from './backfill';
 import { signedBalance, writeBalances } from './balances';
+import { rangeStatements } from './coverage';
 import { stableId } from './ids';
 import { enqueue, RetryLater, type JobContext } from './jobRunner';
 import { accountLease, connectionLease, Lease } from './lease';
@@ -206,6 +207,8 @@ interface Plan {
   estimated?: string[];
   /** Each trade's close (by the file's id for the security), for a preview. */
   closes?: { date: string; security: string; close: number }[];
+  /** The days the file's transactions cover, recorded with them (./coverage). */
+  covers?: { from: IsoDate; to: IsoDate };
   days: number;
   from: IsoDate;
   to: IsoDate;
@@ -228,6 +231,8 @@ export async function importAccounts(deps: Deps, tenant: Tenant, request: Import
   const runId = crypto.randomUUID();
   let queued = false;
   for (const plan of plans) {
+    // A holdings file's days covered, with its account's statements (its transactions are written by its blocks).
+    if (plan.covers && !plan.balances) plan.statements.push(...(await rangeStatements(tenant, plan.account.id, 'import', plan.covers.from, plan.covers.to, deps.now().getTime())));
     if (plan.statements.length > 0) {
       const lease = plan.replacesHoldings ? await Lease.acquireOrBusy(deps, tenant, accountLease(plan.account.id), 'Someone else is changing this account. Try again in a moment.') : null;
       try {
@@ -250,6 +255,8 @@ export async function importAccounts(deps: Deps, tenant: Tenant, request: Import
         if (deletes.length > 0) await runAtomic(tenant.db, deletes);
         for (let index = 0; index < plan.stored.length; index += STORED_PER_BATCH) await runAtomic(tenant.db, transactionUpserts(tenant, plan.stored.slice(index, index + STORED_PER_BATCH)));
       }
+      const covered = plan.covers ? await rangeStatements(tenant, plan.account.id, 'import', plan.covers.from, plan.covers.to, deps.now().getTime()) : [];
+      if (covered.length > 0) await runAtomic(tenant.db, covered);
     } else {
       await enqueue(
         deps,
@@ -427,7 +434,9 @@ async function prepareImport(deps: Deps, tenant: Tenant, request: ImportRequest)
     if (entry.file.kind === 'balances') {
       const dates = entry.file.rows.map((row) => row.date).sort();
       const stored = entry.file.transactions ? fileTransactionRows(tenant, account, entry.file.transactions.filter((txn) => txn.date <= dates.at(-1)!), now) : undefined;
-      plans.push({ ...base, balances: entry.file.rows, stored, days: dateRange(dates[0], dates.at(-1)!).length, from: dates[0], to: dates.at(-1)! });
+      // A file of balances alone covers no transactions.
+      const covers = entry.file.covers || stored?.length ? fileCovers(entry.file.covers, stored ?? [], null, dates.at(-1)!) : undefined;
+      plans.push({ ...base, balances: entry.file.rows, stored, covers, days: dateRange(dates[0], dates.at(-1)!).length, from: dates[0], to: dates.at(-1)! });
       continue;
     }
     const plan = await planHoldings(deps, tenant, { ...base, file: entry.file, today, now, cashIds, byTicker, hasCloses, closes, balancesOnly: account.type !== 'investment', problem: (text, date) => problem(entry.label, text, date) });
@@ -709,7 +718,21 @@ async function planHoldings(deps: Deps, tenant: Tenant, context: HoldingsContext
     to: end,
     estimated,
     closes: tradeCloses,
+    covers: fileCovers(file.covers, stored, start, end),
   };
+}
+
+/**
+ * The days a file's transactions cover, as it says, else its first
+ * transaction's to its last; within the days written (`from`–`to`, either
+ * open). Undefined when that leaves none.
+ */
+function fileCovers(covers: { from: IsoDate; to: IsoDate } | undefined, stored: StoredTransaction[], from: IsoDate | null, to: IsoDate): { from: IsoDate; to: IsoDate } | undefined {
+  const dates = stored.map((row) => row.date).sort();
+  const span = covers ?? (dates.length > 0 ? { from: dates[0], to: dates.at(-1)! } : undefined);
+  if (!span) return undefined;
+  const clamped = { from: from && span.from < from ? from : span.from, to: span.to > to ? to : span.to };
+  return clamped.from <= clamped.to ? clamped : undefined;
 }
 
 /** Days an institution's feed may take to show a transaction its own download already has (a reinvested dividend). */

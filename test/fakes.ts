@@ -21,6 +21,9 @@ export interface PlaidState {
   historicalBalances: Record<string, { date: string; current: number }[]>;
   /** A bank report's transactions per account. */
   reportTransactions: Record<string, { transaction_id: string; date: string; amount: number; original_description: string; pending: boolean }[]>;
+  /** When the report was made, and the days of history it has per account (left out where not given). */
+  reportGenerated: string;
+  reportDaysAvailable: Record<string, number>;
   /** start_date of each /investments/transactions/get (first page). */
   transactionStarts: string[];
   assetReportReady: boolean;
@@ -111,6 +114,8 @@ export function fakePlaid(initial: Partial<PlaidState> = {}): PlaidApi & { state
     transactionsNotReady: false,
     historicalBalances: {},
     reportTransactions: {},
+    reportGenerated: '2026-10-09T02:00:00Z',
+    reportDaysAvailable: {},
     transactionStarts: [],
     assetReportReady: true,
     assetReportFails: false,
@@ -201,10 +206,12 @@ export function fakePlaid(initial: Partial<PlaidState> = {}): PlaidApi & { state
       if (state.assetReportGetError) throw new PlaidApiError(400, 'ASSET_REPORT_ERROR', state.assetReportGetError, 'report failed');
       if (!state.assetReportReady) throw new PlaidApiError(400, 'ASSET_REPORT_ERROR', 'PRODUCT_NOT_READY', 'wait');
       return {
+        date_generated: state.reportGenerated,
         items: [
           {
             accounts: Object.entries(state.historicalBalances).map(([accountId, balances]) => ({
               account_id: accountId,
+              ...(accountId in state.reportDaysAvailable ? { days_available: state.reportDaysAvailable[accountId] } : {}),
               historical_balances: balances.map((balance) => ({ ...balance, iso_currency_code: 'USD' })),
               transactions: state.reportTransactions[accountId] ?? [],
             })),

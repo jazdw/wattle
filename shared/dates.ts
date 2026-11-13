@@ -96,6 +96,18 @@ export function dateRange(start: IsoDate, end: IsoDate): IsoDate[] {
   return dates;
 }
 
+/** Spans of days (inclusive) as few as cover the same days: merged where they overlap or touch, earliest first. */
+export function mergeSpans<T extends { from: IsoDate; to: IsoDate }>(spans: T[]): { from: IsoDate; to: IsoDate }[] {
+  const merged: { from: IsoDate; to: IsoDate }[] = [];
+  for (const span of [...spans].sort((a, b) => a.from.localeCompare(b.from))) {
+    const last = merged.at(-1);
+    if (last && span.from <= addDays(last.to, 1)) {
+      if (span.to > last.to) last.to = span.to;
+    } else merged.push({ from: span.from, to: span.to });
+  }
+  return merged;
+}
+
 export function isIsoDate(value: unknown): value is IsoDate {
   return typeof value === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(value) && !Number.isNaN(Date.parse(value));
 }

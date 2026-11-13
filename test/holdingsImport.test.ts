@@ -45,7 +45,7 @@ async function linked(shares = 20) {
   await api('/api/plaid/exchange', { method: 'POST', json: { publicToken: 'p', kind: 'investments' } });
   await settle(deps);
   const [brk] = await deps.db.select().from(schema.accounts);
-  const send = (file: ReturnType<typeof download>, path = '/api/imports') => api(path, { method: 'POST', json: { accounts: [{ label: '··1234', target: { accountId: brk.id }, file }] } });
+  const send = (file: ReturnType<typeof download> & { covers?: { from: string; to: string } }, path = '/api/imports') => api(path, { method: 'POST', json: { accounts: [{ label: '··1234', target: { accountId: brk.id }, file }] } });
   const day = async (date: string) => (await deps.db.select().from(schema.accountDaily).where(and(eq(schema.accountDaily.accountId, brk.id), eq(schema.accountDaily.date, date))))[0];
   const vti = async (date: string) => {
     const [row] = await deps.db.select().from(schema.holdingDaily).innerJoin(schema.securities, eq(schema.securities.id, schema.holdingDaily.securityId)).where(and(eq(schema.holdingDaily.accountId, brk.id), eq(schema.holdingDaily.date, date), eq(schema.securities.ticker, 'VTI')));
@@ -78,6 +78,19 @@ describe('holdings history import', () => {
     // The synced day the file covers: the institution's own records replace the copy synced from them.
     expect(await day(TODAY)).toMatchObject({ source: 'import' });
     expect(await vti(TODAY)).toMatchObject({ quantity: 20, source: 'import' });
+  });
+
+  it('records the days the file says its transactions cover, within the days it writes; without them, its first transaction to its last', async () => {
+    const ranges = async (deps: Awaited<ReturnType<typeof linked>>['deps']) => (await deps.db.select().from(schema.transactionRanges)).map(({ source, from, to }) => ({ source, from, to }));
+    const positions = [{ ticker: 'VTI', shares: 20 }, { ticker: null, shares: 50 }];
+    const stated = await linked();
+    expect((await stated.send({ ...download(positions, HISTORY), covers: { from: '2026-05-01', to: '2026-10-31' } })).status).toBe(200);
+    // Its days are written from its first transaction to the day its positions are as of.
+    expect(await ranges(stated.deps)).toEqual([{ source: 'import', from: '2026-05-29', to: TODAY }]);
+
+    const unstated = await linked();
+    expect((await unstated.send(download(positions, HISTORY))).status).toBe(200);
+    expect(await ranges(unstated.deps)).toEqual([{ source: 'import', from: '2026-05-29', to: '2026-09-02' }]);
   });
 
   it('counts a split from the transaction that records it', async () => {

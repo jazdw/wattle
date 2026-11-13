@@ -1,14 +1,16 @@
 /**
  * An account's history at a glance: its balances as a bar coloured by where
  * each run of days came from (your files, the institution, you; hatched where
- * Wattle filled them, empty where there are none), and its transactions as
- * a mark on each day that has any. Plain data in, so the Accounts page shows
- * what's stored and the import page can add a file's days (`new`) beside it.
+ * Wattle filled them, empty where there are none), and its transactions the
+ * same way: the days each source covers, coloured by the one whose
+ * transactions count there (empty where none does). Plain data in, so the
+ * Accounts page shows what's stored and the import page can add a file's
+ * days (`new`) beside it.
  */
 import { useState } from 'react';
 import type { IsoDate } from '../../shared/dates';
-import type { AccountCoverage, CoverageSource } from '../../shared/types';
-import { historySpan, SOURCE_COLORS, SOURCE_LABELS } from '../lib/coverage';
+import type { AccountCoverage } from '../../shared/types';
+import { historySpan, SOURCE_COLORS, SOURCE_LABELS, transactionRuns } from '../lib/coverage';
 import { longDate } from '../lib/format';
 
 const DAY_MS = 86_400_000;
@@ -40,10 +42,8 @@ export function HistoryTimeline({ coverage, today }: { coverage: Pick<AccountCov
   const left = (date: string) => ((time(date) - time(from)) / DAY_MS / days) * 100;
   const width = (start: string, end: string) => Math.max(((time(end) - time(start)) / DAY_MS + 1) / days * 100, 0.4);
   const shown = (text: string) => ({ onMouseEnter: () => setDetail(text), onFocus: () => setDetail(text), onClick: () => setDetail(text), title: text });
-  // Transactions by day, every source on it.
-  const byDay = new Map<string, { source: CoverageSource; count: number }[]>();
-  for (const day of coverage.transactions) byDay.set(day.date, [...(byDay.get(day.date) ?? []), { source: day.source, count: day.count }]);
-  const sources = [...new Set([...coverage.balances.map((run) => run.source), ...coverage.transactions.map((day) => day.source)])];
+  const runs = transactionRuns(coverage.transactions);
+  const sources = [...new Set([...coverage.balances.map((run) => run.source), ...runs.map((run) => run.source)])];
   const filled = coverage.balances.some((run) => run.filled);
   const rowLabel = 'w-24 shrink-0 text-xs text-muted-foreground';
   return (
@@ -77,10 +77,20 @@ export function HistoryTimeline({ coverage, today }: { coverage: Pick<AccountCov
       <div className="flex items-center gap-2">
         <span className={rowLabel}>Transactions</span>
         <div className="relative h-4 flex-1 overflow-hidden rounded-sm bg-muted/60">
-          {[...byDay].map(([date, found]) => {
-            const total = found.reduce((sum, item) => sum + item.count, 0);
-            const text = `${longDate(date)} · ${total} ${total === 1 ? 'transaction' : 'transactions'} · ${found.map((item) => SOURCE_LABELS[item.source]).join(', ')}`;
-            return <span key={date} className="absolute inset-y-0 w-px min-w-[2px]" style={{ left: `${left(date)}%`, background: SOURCE_COLORS[found[0].source] }} {...shown(text)} />;
+          {runs.map((run) => {
+            const parts = [`Transactions · ${SOURCE_LABELS[run.source]} · ${longDate(run.from)} – ${longDate(run.to)}`];
+            if (run.count !== null) parts.push(`${run.count} ${run.count === 1 ? 'transaction' : 'transactions'}`);
+            if (run.also.length > 0) parts.push(`Also ${run.also.map((other) => `${SOURCE_LABELS[other.source]} ${longDate(other.from)} – ${longDate(other.to)}`).join(', ')}`);
+            const text = parts.join(' · ');
+            return (
+              <span
+                key={`${run.from}:${run.source}`}
+                tabIndex={0}
+                className="absolute inset-y-0 outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                style={{ left: `${left(run.from)}%`, width: `${width(run.from, run.to)}%`, background: SOURCE_COLORS[run.source] }}
+                {...shown(text)}
+              />
+            );
           })}
         </div>
       </div>

@@ -116,6 +116,11 @@ const securityRef = z.string().trim().min(1).max(40);
 const fileTransactionId = z.string().trim().min(1).max(255).optional();
 /** How the file describes a transaction (its memo or payee). */
 const fileDescription = z.string().trim().max(500).optional();
+/** The days the file says its transactions cover (a statement's start and end); without it, its first transaction's to its last. */
+const covers = z
+  .object({ from: isoDate, to: isoDate })
+  .refine((span) => span.from <= span.to, { message: 'The days covered end before they start.' })
+  .optional();
 
 /** An investment account's download: its positions and cash now, and its transactions. */
 export const importedHoldingsSchema = z.object({
@@ -129,6 +134,7 @@ export const importedHoldingsSchema = z.object({
   positions: z.array(z.object({ security: securityRef, shares: z.number().finite(), price: z.number().finite().nonnegative().optional() })).max(1000),
   /** Cash held now, in cents. */
   cash: z.number().int(),
+  covers,
   transactions: z
     .array(
       z.object({
@@ -162,6 +168,7 @@ export const importedBalancesSchema = z.object({
   kind: z.literal('balances'),
   currency: z.string().length(3).optional(),
   rows: z.array(z.object({ date: isoDate, balance: z.number().finite() })).min(1).max(5000),
+  covers,
   transactions: z
     .array(
       z.object({

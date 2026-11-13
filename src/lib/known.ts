@@ -81,9 +81,12 @@ export function withKnown(account: FileAccount, known: Known | undefined): FileA
     const from = pending.from ?? first;
     const opening = known.at === 'start' ? given : given - total;
     const start = opening === 0 ? addDays(first, -1) : known.at === 'start' || pending.from ? (first > from ? from : addDays(from, -1)) : null;
-    const rows = balanceRows(posted, closing, pending.to && pending.to > asOf ? pending.to : asOf, start, pending.owed);
+    const end = pending.to && pending.to > asOf ? pending.to : asOf;
+    const rows = balanceRows(posted, closing, end, start, pending.owed);
     const kept = transactions.map((txn) => ({ ...(txn.id ? { id: txn.id } : {}), date: txn.date, kind: txn.kind, label: txn.label, ...(txn.description ? { description: txn.description } : {}), ...(txn.memo ? { memo: txn.memo } : {}), amount: cashEffect(txn) }));
-    return { ...account, file: { kind: 'balances', currency: account.file.currency, rows, transactions: kept } };
+    // A statement vouches for every day it says it covers, whichever day its balances start (a CSV says none: the server takes its first transaction's to its last).
+    const covers = pending.from ? { from: from < first ? from : first, to: end } : undefined;
+    return { ...account, file: { kind: 'balances', currency: account.file.currency, rows, transactions: kept, ...(covers ? { covers } : {}) } };
   }
   if (pending.moneyMoves && known.cash === null) return null;
   if (pending.securities.some((security) => known.shares[security.id] == null)) return null;
@@ -95,6 +98,7 @@ export function withKnown(account: FileAccount, known: Known | undefined): FileA
     return Math.abs(shares) < 1e-6 ? [] : [{ security: security.id, shares: Math.round(shares * 1e6) / 1e6, ...(price ? { price } : {}) }];
   });
   const cash = pending.moneyMoves ? toMinor(known.cash!) + (forward ? transactions.reduce((sum, txn) => sum + cashEffect(txn), 0) : 0) : 0;
-  const file: ImportedHoldings = { kind: 'holdings', currency: account.file.currency, asOf, securities: pending.securities, positions, cash, transactions };
+  const covers = account.file.covers;
+  const file: ImportedHoldings = { kind: 'holdings', currency: account.file.currency, asOf, securities: pending.securities, positions, cash, transactions, ...(covers ? { covers } : {}) };
   return { ...account, file };
 }

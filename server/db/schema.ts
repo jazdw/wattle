@@ -342,6 +342,32 @@ export const transactions = sqliteTable(
   ],
 );
 
+/**
+ * The days each source's transactions cover in an account, inclusive: a
+ * file's stated days, a bank report's, a complete Plaid fetch's. A day
+ * without transactions leaves no row in `transactions`, so this tells a
+ * quiet stretch from a missing one. Kept merged per account and source
+ * (services/coverage.ts rangeStatements): re-importing a file changes
+ * nothing, a nightly sync extends one row.
+ */
+export const transactionRanges = sqliteTable(
+  'transaction_ranges',
+  {
+    id: text('id').primaryKey(),
+    householdId: text('household_id')
+      .notNull()
+      .references(() => households.id, { onDelete: 'cascade' }),
+    accountId: text('account_id')
+      .notNull()
+      .references(() => accounts.id, { onDelete: 'cascade' }),
+    source: text('source', { enum: TRANSACTION_SOURCES }).notNull(),
+    from: text('from').notNull(),
+    to: text('to').notNull(),
+    recordedAt: integer('recorded_at').notNull(),
+  },
+  (table) => [index('transaction_ranges_account').on(table.householdId, table.accountId)],
+);
+
 /** A transfer between two of the household's accounts: matched automatically, suggested for you to check, or decided by you. */
 export const TRANSFER_STATUSES = ['auto', 'suggested', 'confirmed', 'rejected'] as const;
 

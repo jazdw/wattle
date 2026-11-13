@@ -470,11 +470,24 @@ export interface CoverageRun {
   filled: boolean;
 }
 
-/** An account's stored history: its balances' runs (days with none are gaps), its transactions per day and source. */
+/**
+ * Days a source's transactions cover (a file's stated days, a bank report's,
+ * a Plaid fetch's), with the transactions counted in them. Merged per source,
+ * and split where another source's days start or end, so the parts of a
+ * display run each add their whole count (src/lib/coverage.ts transactionRuns).
+ */
+export interface TransactionRange {
+  from: IsoDate;
+  to: IsoDate;
+  source: CoverageSource;
+  count: number;
+}
+
+/** An account's stored history: its balances' runs and the days each source's transactions cover (days with none are gaps). */
 export interface AccountCoverage {
   accountId: string;
   balances: CoverageRun[];
-  transactions: { date: IsoDate; source: CoverageSource; count: number }[];
+  transactions: TransactionRange[];
   /**
    * The institution's balance hasn't changed since this day (a week or more)
    * though transactions are dated after it: the balance has stopped updating.

@@ -20,6 +20,11 @@ const REVIEWED: Record<string, Record<string, string>> = {
     holdings: 'connection lease, in the sync pass batch',
     transactions: "connection lease, in the sync pass batch; insert-or-ignore by (account, source, Plaid's id), and an import's rows from the first of Plaid's on deleted in the same batch",
     securities: 'connection lease; new ones get derived ids (shared across connections)',
+    transactionRanges: "connection lease, in the sync pass batch (a complete fetch's days, via coverage.ts rangeStatements); hiding an account deletes its Plaid ranges with its Plaid transactions",
+  },
+  'server/services/coverage.ts': {
+    transactionRanges:
+      "rangeStatements: the ranges it overlaps or touches deleted by id and their union inserted, in the caller's batch (an import's, a report's under the connection lease, a sync's); two at once leave overlapping rows, which are merged when read, and nothing is lost",
   },
   'server/services/backfill.ts': {
     connections: 'connection lease (or marking a load due + note when busy)',

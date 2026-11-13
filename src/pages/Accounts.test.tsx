@@ -334,8 +334,11 @@ describe('Accounts page', () => {
                 { from: '2026-05-01', to: '2026-10-08', source: 'bank', filled: false },
               ],
               transactions: [
-                { date: '2026-01-05', source: 'files', count: 2 },
-                { date: '2026-09-30', source: 'bank', count: 1 },
+                { from: '2026-01-01', to: '2026-03-31', source: 'files', count: 2 },
+                // A gap in April; the bank's report and your file both cover May.
+                { from: '2026-05-01', to: '2026-05-31', source: 'bank', count: 0 },
+                { from: '2026-05-01', to: '2026-05-31', source: 'files', count: 3 },
+                { from: '2026-06-01', to: '2026-09-30', source: 'bank', count: 1 },
               ],
               unchangedSince: '2026-09-01',
             },
@@ -345,7 +348,7 @@ describe('Accounts page', () => {
     );
     const { user } = renderPage(<Accounts />);
     const toggle = await screen.findByRole('button', { name: "Show Northwind Checking's history" });
-    expect(toggle).toHaveTextContent('Balances Jan 1, 2026 – today · Transactions Jan 5, 2026 – Sep 30, 2026 · 1 gap · balance unchanged since Sep 1, 2026');
+    expect(toggle).toHaveTextContent('Balances Jan 1, 2026 – today · 1 gap · Transactions Jan 1, 2026 – Sep 30, 2026 · 1 gap · balance unchanged since Sep 1, 2026');
     expect(screen.queryByText('Imported')).not.toBeInTheDocument();
     // Its first and last day, at the ends.
     await user.click(toggle);
@@ -359,5 +362,11 @@ describe('Accounts page', () => {
     // A run says what it is when pointed at.
     await user.hover(screen.getByTitle('Balances · Imported · Jan 1, 2026 – Mar 31, 2026'));
     expect(screen.getByText('Balances · Imported · Jan 1, 2026 – Mar 31, 2026', { selector: 'p' })).toBeInTheDocument();
+    // Transactions as the days each source covers, with the gap between them: May's are your file's, the bank's also there.
+    const may = 'Transactions · Imported · May 1, 2026 – May 31, 2026 · 3 transactions · Also Plaid May 1, 2026 – May 31, 2026';
+    await user.hover(screen.getByTitle(may));
+    expect(screen.getByText(may, { selector: 'p' })).toBeInTheDocument();
+    expect(screen.getByTitle('Transactions · Plaid · Jun 1, 2026 – Sep 30, 2026 · 1 transaction')).toBeInTheDocument();
+    expect(screen.queryByTitle(/Transactions · .* Apr /)).not.toBeInTheDocument();
   });
 });

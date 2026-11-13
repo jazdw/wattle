@@ -258,6 +258,9 @@ function statement(response: Element, securities: Map<string, ImportedHoldings['
   const account = text((response.INVACCTFROM as Element | undefined)?.ACCTID);
   const used = new Set([...held.map((row) => row.security), ...transactions.flatMap((txn) => (txn.security ? [txn.security] : []))]);
   const lastTrade = transactions.map((txn) => txn.date).sort().at(-1);
+  // The days its transactions cover, as it says.
+  const listed = (response.INVTRANLIST ?? {}) as Element;
+  const covers = text(listed.DTSTART) && text(listed.DTEND) ? { from: day(listed.DTSTART), to: day(listed.DTEND) } : null;
   return {
     number: account || null,
     institution: institution ?? (text((response.INVACCTFROM as Element | undefined)?.BROKERID) || null),
@@ -270,6 +273,7 @@ function statement(response: Element, securities: Map<string, ImportedHoldings['
       positions: held,
       cash,
       transactions: transactions.sort((a, b) => a.date.localeCompare(b.date)),
+      ...(covers && covers.from <= covers.to ? { covers } : {}),
     },
   };
 }

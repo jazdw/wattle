@@ -12,11 +12,12 @@ import { toMinor } from '../../shared/money';
 import { itemProducts, PlaidApiError, type LinkKind, type PlaidApi } from '../adapters/plaid';
 import type { BatchItem } from 'drizzle-orm/batch';
 import { chunkRows, inChunks, runAtomic } from '../db/batch';
-import { accounts, connections, holdings, securities, transactions } from '../db/schema';
+import { accounts, connections, holdings, securities, transactionRanges, transactions } from '../db/schema';
 import type { Tenant } from '../db/tenant';
 import type { Deps } from '../ports';
 import { closeInterruptedRuns, SyncRun, type SyncTrigger } from './activity';
 import { queueReportCollection } from './assetReports';
+import { rangeStatements } from './coverage';
 import { queueDueHistory } from './backfill';
 import { BusyError, connectionLease, holdWhile, Lease, snapshotLease } from './lease';
 import { decryptToken, encryptToken, loadTokenKeys, tokenAad } from './crypto';
@@ -356,7 +357,7 @@ async function syncPass(
       const securityIds = await planSecurities(deps, tenant, fetched.investments.securities, writes);
       // Holdings not fetched this time are left as they are.
       if (fetched.investments.holdings) holdingCount = await planHoldings(deps, tenant, fetched.investments.holdings, fetched.investments.securities, securityIds, visible, run, writes);
-      ({ planned: transactionCount, added: newTransactions } = await planTransactions(deps, tenant, connection, fetched.investments.transactions, securityIds, visible, run, writes));
+      ({ planned: transactionCount, added: newTransactions } = await planTransactions(deps, tenant, connection, fetched.investments.transactions, fetched.investments.transactionsComplete, securityIds, visible, run, writes));
     }
     writes.push(
       setConnection({
@@ -850,13 +851,17 @@ async function recordHoldingChanges(
 
 /**
  * Plan inserts for investment transactions (already-stored ones are left
- * alone). A new one dated before the history was built makes it stale.
+ * alone). A new one dated before the history was built makes it stale. A
+ * complete fetch records the days it covers for each account it has
+ * transactions for (./coverage): from the earliest Plaid returned (not the
+ * two years asked for, which Plaid may not have) to today.
  */
 async function planTransactions(
   deps: Deps,
   tenant: Tenant,
   connection: ConnectionRow,
   plaidTransactions: InvestmentTransaction[],
+  complete: boolean,
   securityIds: Map<string, string>,
   visibleAccounts: VisibleAccounts,
   run: SyncRun,
@@ -916,6 +921,12 @@ async function planTransactions(
         .onConflictDoNothing({ target: [transactions.accountId, transactions.source, transactions.externalId] }),
     ),
   );
+  if (complete) {
+    const today = marketDate(deps.now());
+    const earliest = new Map<string, string>();
+    for (const row of rows) if (!earliest.has(row.accountId) || row.date < earliest.get(row.accountId)!) earliest.set(row.accountId, row.date);
+    for (const [accountId, from] of earliest) writes.push(...(await rangeStatements(tenant, accountId, 'plaid', from < today ? from : today, today, deps.now().getTime())));
+  }
   run.count('transactions', rows.length);
   return { planned: rows.length, added };
 }
@@ -1032,5 +1043,6 @@ export function purgeStatements(tenant: Tenant, accountId: string): BatchItem<'s
   return [
     tenant.db.delete(holdings).where(tenant.scope(holdings, eq(holdings.accountId, accountId))),
     tenant.db.delete(transactions).where(tenant.scope(transactions, eq(transactions.accountId, accountId), eq(transactions.source, 'plaid'))),
+    tenant.db.delete(transactionRanges).where(tenant.scope(transactionRanges, eq(transactionRanges.accountId, accountId), eq(transactionRanges.source, 'plaid'))),
   ];
 }

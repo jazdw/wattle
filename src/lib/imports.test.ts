@@ -18,6 +18,22 @@ describe('readFiles', () => {
     expect(holdings(read.accounts[0]).asOf).toBe('2026-10-08');
   });
 
+  it('takes the days several investment downloads of an account cover together when they leave none out, else none', () => {
+    const download = (start: string, end: string, trade: string) => sgml(trade, end).replace('<DTSTART>20260101', `<DTSTART>${start}`);
+    const first = download('20250101', '20250630', buy('B1', '20250303', '10', '12.5', '125.00'));
+    const second = download('20250701', '20251231', buy('B2', '20250803', '10', '12.5', '125.00'));
+    const later = download('20260201', '20260630', buy('B3', '20260303', '10', '12.5', '125.00'));
+    const covers = (files: string[]) => {
+      const read = readFiles(files);
+      if (read.kind !== 'accounts') throw new Error('expected accounts');
+      return holdings(read.accounts[0]).covers;
+    };
+    expect(covers([first])).toEqual({ from: '2025-01-01', to: '2025-06-30' });
+    expect(covers([second, first])).toEqual({ from: '2025-01-01', to: '2025-12-31' });
+    // January is left out: the server takes the first transaction's day to the last.
+    expect(covers([first, second, later])).toBeUndefined();
+  });
+
   it('keeps each account in a download with several', () => {
     const one = sgml(buy('B1', '20260803', '10', '12.5', '125.00'));
     const statement = one.slice(one.indexOf('<INVSTMTTRNRS>'), one.indexOf('</INVSTMTMSGSRSV1>'));
@@ -89,6 +105,8 @@ describe('readFiles', () => {
     expect(account.unanchored).toMatchObject({ kind: 'cash', owed: true, from: '2025-01-01', to: '2026-01-01', fileBalance: { amount: 600, asOf: '2026-10-08', atEnd: false } });
     // Nothing owed at its start: from the day before the charge, then carried to its last day.
     expect(worked(account, 'start', 0)).toMatchObject({ rows: [{ date: '2025-11-19', balance: 0 }, { date: '2025-11-20', balance: 100 }, { date: '2026-01-01', balance: 100 }] });
+    // Its transactions still cover every day it says.
+    expect(worked(account, 'start', 0)).toMatchObject({ covers: { from: '2025-01-01', to: '2026-01-01' } });
     // Owing something at its start: from the day the statement starts.
     expect(worked(account, 'start', 40)).toMatchObject({ rows: [{ date: '2025-01-01', balance: 40 }, { date: '2025-11-20', balance: 140 }, { date: '2026-01-01', balance: 140 }] });
   });

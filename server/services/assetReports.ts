@@ -14,7 +14,7 @@
 import { eq, gt, inArray, lt, ne, sql } from 'drizzle-orm';
 import type { BatchItem } from 'drizzle-orm/batch';
 import type { AssetReport } from 'plaid';
-import { marketDate } from '../../shared/dates';
+import { addDays, marketDate, type IsoDate } from '../../shared/dates';
 import { toMinor } from '../../shared/money';
 import { PlaidApiError } from '../adapters/plaid';
 import { chunkRows, runAtomic } from '../db/batch';
@@ -22,6 +22,7 @@ import { accountDaily, accounts, connections, jobs, transactions } from '../db/s
 import type { Tenant } from '../db/tenant';
 import type { Deps } from '../ports';
 import { completeRunStatements, SyncRun, type SyncTrigger } from './activity';
+import { rangeStatements } from './coverage';
 import { decryptToken, loadTokenKeys, tokenAad } from './crypto';
 import { enqueue, RetryLater, type JobContext } from './jobRunner';
 import { connectionLease, Lease } from './lease';
@@ -121,8 +122,11 @@ async function fetchReport(deps: Deps, tenant: Tenant, connection: ConnectionRow
 }
 
 interface ReportRows {
+  accountId: string;
   balances: (typeof accountDaily.$inferInsert)[];
   transactions: (typeof transactions.$inferInsert)[];
+  /** The days its transactions cover: the report's day less the days it has, else its first posted transaction's to its last. */
+  covers?: { from: IsoDate; to: IsoDate };
 }
 
 /** The report's daily balances and posted transactions for the connection's accounts, by account id. */
@@ -134,6 +138,8 @@ async function reportByAccount(deps: Deps, tenant: Tenant, connection: Connectio
   const byExternal = new Map(accountRows.map((row) => [row.externalId, row]));
   const now = deps.now().getTime();
   const result = new Map<string, ReportRows>();
+  // The day the report was made, where the bank's history it holds ends.
+  const generated = report.date_generated ? marketDate(new Date(report.date_generated)) : null;
   for (const item of report.items) {
     for (const reportAccount of item.accounts) {
       const account = byExternal.get(reportAccount.account_id);
@@ -141,7 +147,7 @@ async function reportByAccount(deps: Deps, tenant: Tenant, connection: Connectio
       // Investment accounts' history is rebuilt from their transactions.
       if (connection.hasInvestments && account.type === 'investment') continue;
       const liability = account.type === 'credit' || account.type === 'loan';
-      const rows = result.get(account.id) ?? { balances: [], transactions: [] };
+      const rows = result.get(account.id) ?? { accountId: account.id, balances: [], transactions: [] };
       for (const balance of reportAccount.historical_balances ?? []) {
         const minor = toMinor(balance.current);
         rows.balances.push({
@@ -170,19 +176,23 @@ async function reportByAccount(deps: Deps, tenant: Tenant, connection: Connectio
           createdAt: now,
         });
       }
+      const dates = rows.transactions.map((txn) => txn.date).sort();
+      if (generated && typeof reportAccount.days_available === 'number') rows.covers = { from: addDays(generated, -reportAccount.days_available), to: generated };
+      else if (dates.length > 0) rows.covers = { from: dates[0], to: dates.at(-1)! };
       result.set(account.id, rows);
     }
   }
   return result;
 }
 
-/** Statements writing an account's report rows: balances (see balanceStatements) and new transactions. */
-function reportStatements(tenant: Tenant, rows: ReportRows): BatchItem<'sqlite'>[] {
+/** Statements writing an account's report rows: balances (see balanceStatements), new transactions and the days they cover (./coverage). */
+async function reportStatements(deps: Deps, tenant: Tenant, rows: ReportRows): Promise<BatchItem<'sqlite'>[]> {
   return [
     ...balanceStatements(tenant, rows.balances),
     ...chunkRows(transactions, rows.transactions).map((chunk) =>
       tenant.db.insert(transactions).values(chunk).onConflictDoNothing({ target: [transactions.accountId, transactions.source, transactions.externalId] }),
     ),
+    ...(rows.covers ? await rangeStatements(tenant, rows.accountId, 'report', rows.covers.from, rows.covers.to, deps.now().getTime()) : []),
   ];
 }
 
@@ -322,9 +332,9 @@ export async function collectReport({ deps, tenant, job, renew }: JobContext): P
   if (size <= deps.config.jobChunkRows) {
     run.count('days', days);
     run.count('transactions', [...byAccount.values()].reduce((sum, rows) => sum + rows.transactions.length, 0));
-    await withLease(deps, tenant, connection.id, renew, () =>
+    await withLease(deps, tenant, connection.id, renew, async () =>
       runAtomic(tenant.db, [
-        ...[...byAccount.values()].flatMap((rows) => reportStatements(tenant, rows)),
+        ...(await Promise.all([...byAccount.values()].map((rows) => reportStatements(deps, tenant, rows)))).flat(),
         ...collectedStatements(deps, tenant, connection),
         run.statement(),
         ...run.responseStatements(),
@@ -354,8 +364,8 @@ export async function collectReportAccount({ deps, tenant, job, renew }: JobCont
   if (!connection?.assetReportTokenEnc || !deps.plaid) return { days: 0 };
   const run = new SyncRun(deps, tenant, connection.id, 'balance_history', payload.trigger);
   const { report } = await fetchReport(deps, tenant, connection, run);
-  const rows = (await reportByAccount(deps, tenant, connection, report)).get(payload.accountId) ?? { balances: [], transactions: [] };
-  await withLease(deps, tenant, connection.id, renew, () => runAtomic(tenant.db, reportStatements(tenant, rows)));
+  const rows = (await reportByAccount(deps, tenant, connection, report)).get(payload.accountId) ?? { accountId: payload.accountId, balances: [], transactions: [] };
+  await withLease(deps, tenant, connection.id, renew, async () => runAtomic(tenant.db, await reportStatements(deps, tenant, rows)));
   return { days: rows.balances.length, transactions: rows.transactions.length };
 }
 
