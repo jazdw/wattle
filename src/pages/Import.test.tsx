@@ -1,6 +1,6 @@
-import { fireEvent, screen, waitFor } from '@testing-library/react';
+import { fireEvent, screen, waitFor, within } from '@testing-library/react';
 import { http, HttpResponse } from 'msw';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { ACCOUNTS } from '../test/fixtures';
 import { bankSgml, buy, fee, sgml, sgmlAccounts } from '../test/ofx';
 import { renderPage } from '../test/render';
@@ -74,6 +74,29 @@ describe('Import page', () => {
     await user.click(screen.getByRole('button', { name: 'Import more files' }));
     expect(screen.getByLabelText('Files')).toBeInTheDocument();
     expect(screen.queryByText(/Found its/)).not.toBeInTheDocument();
+  });
+
+  it("shows the file's days beside the history stored for the account it goes into", async () => {
+    checked();
+    server.use(
+      http.get('*/api/coverage', () =>
+        HttpResponse.json({ today: '2026-10-08', accounts: [{ accountId: 'wbc', balances: [{ from: '2026-01-01', to: '2026-10-08', source: 'bank', filled: false }], transactions: [], unchangedSince: null }] }),
+      ),
+    );
+    const { user } = await openImport();
+    upload(bank);
+    await screen.findByText(/Found its date and balance columns/);
+    expect(screen.queryByText('History with this import')).not.toBeInTheDocument(); // nowhere to go yet
+
+    await user.selectOptions(screen.getByLabelText('Import The file into'), 'wbc');
+    expect(await screen.findByText('History with this import')).toBeInTheDocument();
+    // A pixel a day (Jan 1 – Oct 8): the file's days are this import's, the rest Plaid's.
+    const bars = screen.getByRole('group', { name: /History by day/ });
+    vi.spyOn(bars, 'getBoundingClientRect').mockReturnValue({ left: 0, width: 281, top: 0, height: 38, right: 281, bottom: 38, x: 0, y: 0, toJSON: () => ({}) });
+    await user.pointer({ target: bars, coords: { clientX: 272.5 } });
+    expect(within(bars.parentElement!).getByRole('status')).toHaveTextContent(/^Sep 30, 2026Balance This import/);
+    await user.pointer({ target: bars, coords: { clientX: 14.5 } });
+    expect(within(bars.parentElement!).getByRole('status')).toHaveTextContent(/^Jan 15, 2026Balance Plaid/);
   });
 
   it('imports every account in a download: matched by last digits, new, or skipped', async () => {

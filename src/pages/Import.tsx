@@ -10,12 +10,13 @@ import { useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { accountLabel } from '../../shared/accounts';
 import { holdingLabel } from '../../shared/holdings';
-import { addDays, dateRange } from '../../shared/dates';
+import { addDays, dateRange, type IsoDate } from '../../shared/dates';
 import { CURRENCIES, type Currency } from '../../shared/money';
 import type { ImportRequest } from '../../shared/schemas';
-import type { AccountSummary, AccountType, ImportCheck, ImportProblem, ImportResponse, TickerSuggestions } from '../../shared/types';
+import type { AccountCoverage, AccountSummary, AccountType, ImportCheck, ImportProblem, ImportResponse, TickerSuggestions } from '../../shared/types';
 import { api } from '../api';
 import { SubtypeSelect } from '../components/AccountDialogs';
+import { HistoryTimeline } from '../components/HistoryTimeline';
 import { PageHeader } from '../components/Layout';
 import { Badge } from '../components/ui/badge';
 import { Button } from '../components/ui/button';
@@ -23,11 +24,12 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '../co
 import { Field, Input, NativeSelect } from '../components/ui/input';
 import { Alert, Td, Th } from '../components/ui/misc';
 import { Switch } from '../components/ui/switch';
-import { useAccounts } from '../hooks/queries';
+import { useAccounts, useCoverage } from '../hooks/queries';
 import { useAuth } from '../hooks/useAuth';
 import { extractBalances, parseAmount, type BalanceMapping, type DateFormat } from '../lib/csv';
 import { ACCOUNT_TYPE_OPTIONS, accountKind, localDateTime, longDate, money, quantity } from '../lib/format';
 import { previewRows } from '../lib/importPreview';
+import { withImport } from '../lib/coverage';
 import { balanceAtEnd, combineAccounts, fileValue, last4, readFiles, type FileAccount, type ReadFiles, type StatementFile } from '../lib/imports';
 import { cashEffect, withKnown, type Known } from '../lib/known';
 import { cn } from '../lib/utils';
@@ -79,6 +81,8 @@ export function Import({ checkDelay = CHECK_DELAY_MS }: { checkDelay?: number })
   const queryClient = useQueryClient();
   const { me, currency: shown } = useAuth();
   const accounts = useAccounts();
+  // What's stored for each account, to show a file's days beside it.
+  const coverage = useCoverage();
   const [read, setRead] = useState<ReadFiles | null>(null);
   const [mapping, setMapping] = useState<BalanceMapping>(DEFAULT_MAPPING);
   const [choices, setChoices] = useState<Choice[]>([]);
@@ -397,6 +401,8 @@ export function Import({ checkDelay = CHECK_DELAY_MS }: { checkDelay?: number })
             warnings={warnings.filter((found) => found.label === labelOf(account))}
             closes={checked ? (check.data!.accounts.find((found) => found.label === labelOf(account))?.closes ?? []) : []}
             nameOf={nameOf}
+            stored={coverage.data?.accounts.find((found) => choices[index]?.to === 'account' && found.accountId === (choices[index] as { accountId: string }).accountId)}
+            today={coverage.data?.today}
             skipped={preview?.skipped ?? 0}
             shown={shown}
           />
@@ -447,6 +453,8 @@ function AccountSection({
   warnings,
   closes,
   nameOf,
+  stored,
+  today,
   skipped,
   shown,
 }: {
@@ -463,6 +471,9 @@ function AccountSection({
   warnings: ImportProblem[];
   closes: ImportCheck['accounts'][number]['closes'];
   nameOf: (id: string | null) => string | null;
+  /** The history stored for the account it goes into (none for a new account). */
+  stored?: AccountCoverage;
+  today?: IsoDate;
   skipped: number;
   shown: Currency;
 }) {
@@ -573,6 +584,13 @@ function AccountSection({
             {found.text}
           </Alert>
         ))}
+        {/* Its days beside what's stored, once it's going somewhere. */}
+        {(choice.to === 'account' || choice.to === 'new') && worked && today && (
+          <div className="grid gap-1.5">
+            <p className="text-xs font-medium">{choice.to === 'account' ? 'History with this import' : 'History from this import'}</p>
+            <HistoryTimeline coverage={withImport(choice.to === 'account' ? stored : undefined, file, today)} today={today} />
+          </div>
+        )}
         {choice.to !== 'skip' && !joined && worked && <PreviewTable file={file} currency={currency} problemDates={new Set(problems.flatMap((found) => (found.date ? [found.date] : [])))} closes={closes} nameOf={nameOf} />}
       </CardContent>
     </Card>

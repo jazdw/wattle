@@ -1,6 +1,6 @@
 /** An account's stored history (GET /api/coverage), summed up: its span, its gaps, the line under it on the Accounts page, and its transactions as runs to draw. */
 import { addDays, mergeSpans, type IsoDate } from '../../shared/dates';
-import type { AccountCoverage, CoverageSource, TransactionRange } from '../../shared/types';
+import type { AccountCoverage, CoverageRun, CoverageSource, TransactionRange } from '../../shared/types';
 import { longDate } from './format';
 
 export const SOURCE_LABELS: Record<CoverageSource, string> = { files: 'Imported', bank: 'Plaid', you: 'Manual', new: 'This import' };
@@ -68,6 +68,40 @@ export function transactionRuns(ranges: (Omit<TransactionRange, 'count'> & { cou
     const whole = own.every((range) => range.from >= run.from && range.to <= run.to && range.count !== null);
     return { ...run, count: whole ? own.reduce((sum, range) => sum + range.count!, 0) : null };
   });
+}
+
+/** What a file being imported writes, as far as its history goes: its balances' days and its transactions'. */
+type ImportFile = { kind: 'balances'; rows: { date: IsoDate }[]; transactions?: { date: IsoDate }[]; covers?: Span } | { kind: 'holdings'; asOf: IsoDate; transactions: { date: IsoDate }[]; covers?: Span };
+
+/**
+ * An account's stored history with a file being imported laid over it as
+ * `new`: its balances replace the stored ones on the days it writes (a CSV
+ * of balances from its first row to its last, carried between; an investment
+ * download from its first transaction to the day its positions are as of, or
+ * today), and its transactions cover the days it says (else its first
+ * transaction's to its last). With nothing stored (a new account), the file's alone.
+ */
+export function withImport(stored: Pick<AccountCoverage, 'balances' | 'transactions' | 'unchangedSince'> | undefined, file: ImportFile, today: IsoDate): Pick<AccountCoverage, 'balances' | 'transactions' | 'unchangedSince'> {
+  const dates = file.transactions?.map((txn) => txn.date).sort() ?? [];
+  const writes: Span | null =
+    file.kind === 'balances'
+      ? file.rows.length > 0
+        ? { from: file.rows[0].date, to: file.rows.at(-1)!.date }
+        : null
+      : dates.length > 0
+        ? { from: dates[0], to: file.asOf < today ? file.asOf : today }
+        : null;
+  const balances = (stored?.balances ?? []).flatMap((run): CoverageRun[] => {
+    if (!writes || run.to < writes.from || run.from > writes.to) return [run];
+    return [...(run.from < writes.from ? [{ ...run, to: addDays(writes.from, -1) }] : []), ...(run.to > writes.to ? [{ ...run, from: addDays(writes.to, 1) }] : [])];
+  });
+  if (writes) balances.push({ from: writes.from, to: writes.to, source: 'new', filled: false });
+  balances.sort((a, b) => a.from.localeCompare(b.from));
+  const covers = file.covers ?? (dates.length > 0 ? { from: dates[0], to: dates.at(-1)! } : null);
+  const transactions: TransactionRange[] = [...(stored?.transactions ?? []), ...(covers ? [{ ...covers, source: 'new' as const, count: dates.length }] : [])];
+  // A balance found to have stopped updating is the institution's: the file's days replace it where they reach.
+  const unchangedSince = stored?.unchangedSince && !(writes && writes.to >= stored.unchangedSince) ? stored.unchangedSince : null;
+  return { balances, transactions, unchangedSince };
 }
 
 const gapCount = (count: number) => `${count} ${count === 1 ? 'gap' : 'gaps'}`;
