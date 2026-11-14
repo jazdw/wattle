@@ -606,6 +606,8 @@ describe('history backfill', () => {
     const [connection] = await deps.db.select().from(schema.connections);
     expect(connection).toMatchObject({ hasInvestments: false, hasBalanceHistory: true });
     expect(plaid.state.calls).not.toContain('holdings');
+    // No product Plaid updates daily: its balances stay as they were when linked, and the login says so.
+    expect((await client(deps, home.cookie)('/api/connections')).body.connections[0]).toMatchObject({ refreshesBalances: false });
   });
 
   it('skips balance history where the institution does not support Assets', async () => {

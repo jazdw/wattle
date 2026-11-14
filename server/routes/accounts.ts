@@ -79,6 +79,10 @@ connectionRoutes.get('/', async (c) => {
         kind: row.kind,
         hasInvestments: row.hasInvestments,
         hasBalanceHistory: row.hasBalanceHistory,
+        // Plaid's balances are cached, refreshed about once a day only for a
+        // login with Transactions, Investments or Liabilities; Wattle's links
+        // have Investments or nothing that does (Assets doesn't).
+        refreshesBalances: row.hasInvestments,
         // A consent warning shows while the login otherwise works; a login
         // problem takes precedence.
         status: row.status === 'ok' && consentEnding(row, c.env.deps.now().getTime()) ? 'pending_expiration' : row.status,

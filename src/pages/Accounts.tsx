@@ -216,7 +216,13 @@ export function Accounts() {
                   </Button>
                 </div>
               </CardHeader>
-              <CardContent>
+              <CardContent className="grid gap-3">
+                {connection.status === 'ok' && !connection.refreshesBalances && (
+                  <Alert variant="warning">
+                    Plaid doesn't refresh this login's balances: each sync gets the balances from when it was linked, so they don't change. Import statements to keep
+                    them up to date.
+                  </Alert>
+                )}
                 <AccountList
                   accounts={accountsBy(connection.id)}
                   currency={currency}

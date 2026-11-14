@@ -72,11 +72,14 @@ describe('Accounts page', () => {
     expect(within(northwind).getByText('Connected')).toBeInTheDocument();
     expect(within(northwind).getByText(/No history from bank/)).toBeInTheDocument();
     expect(within(northwind).getByText(/Linked by Pat/)).toBeInTheDocument();
+    // Balance history only, so Plaid doesn't refresh its balances: the card says so.
+    expect(within(northwind).getByText(/Plaid doesn't refresh this login's balances/)).toBeInTheDocument();
 
     const vanguard = card('Vanguard');
     expect(within(vanguard).getByText('Sign-in needed')).toBeInTheDocument();
     expect(within(vanguard).getByRole('button', { name: 'Fix connection' })).toBeInTheDocument();
     expect(within(vanguard).getByText(/Linked by Sam/)).toBeInTheDocument();
+    expect(within(vanguard).queryByText(/Plaid doesn't refresh/)).not.toBeInTheDocument();
 
     expect(within(accountRow('Joint IRA copy')).getByText(/Hidden — not synced or counted/)).toBeInTheDocument();
     expect(within(accountRow('Old savings')).getByText(/No longer reported/)).toBeInTheDocument();

@@ -46,6 +46,12 @@ export interface ConnectionSummary {
   hasInvestments: boolean;
   /** Daily balance history from the bank (Plaid Assets). */
   hasBalanceHistory: boolean;
+  /**
+   * Plaid refreshes the login's balances each day. It does only for a login
+   * with a product it updates daily (Investments here); otherwise every sync
+   * gets the balances Plaid had when it was linked.
+   */
+  refreshesBalances: boolean;
   status: ConnectionStatus;
   errorCode: string | null;
   ownerUserId: string | null;
