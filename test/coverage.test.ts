@@ -161,9 +161,9 @@ describe('recording the days transactions cover', () => {
     expect(await ranges()).toEqual([{ source: 'import', from: '2026-07-03', to: '2026-07-20' }]);
   });
 
-  it("a bank report records the report's day less the days it has; a complete investment fetch, its earliest transaction to today; hiding removes Plaid's", async () => {
+  it("a bank report records the report's day less the days it has; a complete investment fetch, its earliest transaction to today for every investment account; hiding removes Plaid's", async () => {
     const plaid = fakePlaid({
-      accounts: [account('brk', 'investment', 1000), account('chk', 'depository', 500), account('sav', 'depository', 900)],
+      accounts: [account('brk', 'investment', 1000), account('ira', 'investment', 0), account('chk', 'depository', 500), account('sav', 'depository', 900)],
       securities: [security('s-vti', 'VTI', 'etf', 100)],
       holdings: [holding('brk', 's-vti', 10, 100)],
       transactions: [
@@ -195,6 +195,8 @@ describe('recording the days transactions cover', () => {
     // Without the days it has: its first transaction's to its last.
     expect(await rangesOf('sav')).toEqual([{ source: 'report', from: '2026-09-15', to: '2026-10-01' }]);
     expect(await rangesOf('brk')).toEqual([{ source: 'plaid', from: '2026-09-01', to: '2026-10-08' }]);
+    // An investment account Plaid returned none for has none on those days; a bank account isn't one it reports.
+    expect(await rangesOf('ira')).toEqual([{ source: 'plaid', from: '2026-09-01', to: '2026-10-08' }]);
 
     // Hiding the account (its data deleted) removes Plaid's days with its transactions.
     expect((await api(`/api/accounts/${id('brk')}`, { method: 'PATCH', json: { isHidden: true, purge: true } })).status).toBe(200);

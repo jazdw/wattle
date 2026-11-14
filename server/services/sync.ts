@@ -435,7 +435,7 @@ async function fetchFromPlaid(deps: Deps, plaid: PlaidApi, connection: Connectio
 }
 
 /** Visible accounts of a connection: Plaid account_id → Wattle account. */
-type VisibleAccounts = Map<string, { id: string; name: string; currency: string }>;
+type VisibleAccounts = Map<string, { id: string; name: string; currency: string; type: string }>;
 
 /**
  * Accounts reported again under a new account_id: Plaid gives an account
@@ -565,7 +565,7 @@ async function planAccounts(
           createdAt: now,
         }),
       );
-      visible.set(account.account_id, { id, name, currency });
+      visible.set(account.account_id, { id, name, currency, type: account.type });
       continue;
     }
 
@@ -587,7 +587,7 @@ async function planAccounts(
         .set({ ...descriptive, name: followPlaidName(name, current), currency, balance, balanceAsOf: now, missingSince: null, ...(returned ? { externalId: account.account_id } : {}) })
         .where(tenant.scope(accounts, eq(accounts.id, current.id))),
     );
-    visible.set(account.account_id, { id: current.id, name, currency });
+    visible.set(account.account_id, { id: current.id, name, currency, type: account.type });
   }
   run.count('accounts', visible.size);
 
@@ -852,9 +852,13 @@ async function recordHoldingChanges(
 /**
  * Plan inserts for investment transactions (already-stored ones are left
  * alone). A new one dated before the history was built makes it stale. A
- * complete fetch records the days it covers for each account it has
- * transactions for (./coverage): from the earliest Plaid returned (not the
- * two years asked for, which Plaid may not have) to today.
+ * complete fetch records the days it covers (./coverage) for each investment
+ * account in the login, those it returned none for too (an account with
+ * nothing happening): from the earliest transaction Plaid returned for any of
+ * them (not the two years asked for, which Plaid may not have) to today. Not
+ * for its other accounts (a cash management account), whose transactions
+ * Plaid's investments product may not report though it lists them; nor when
+ * it returned none at all, which shows nothing of how far back it reaches.
  */
 async function planTransactions(
   deps: Deps,
@@ -923,9 +927,12 @@ async function planTransactions(
   );
   if (complete) {
     const today = marketDate(deps.now());
-    const earliest = new Map<string, string>();
-    for (const row of rows) if (!earliest.has(row.accountId) || row.date < earliest.get(row.accountId)!) earliest.set(row.accountId, row.date);
-    for (const [accountId, from] of earliest) writes.push(...(await rangeStatements(tenant, accountId, 'plaid', from < today ? from : today, today, deps.now().getTime())));
+    const earliest = plaidTransactions.map((txn) => txn.date).sort()[0];
+    if (earliest) {
+      const from = earliest < today ? earliest : today;
+      const covered = new Set([...[...visibleAccounts.values()].filter((account) => account.type === 'investment').map((account) => account.id), ...rows.map((row) => row.accountId)]);
+      for (const accountId of covered) writes.push(...(await rangeStatements(tenant, accountId, 'plaid', from, today, deps.now().getTime())));
+    }
   }
   run.count('transactions', rows.length);
   return { planned: rows.length, added };
