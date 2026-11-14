@@ -41,8 +41,6 @@ export interface TransactionRun {
   source: CoverageSource;
   /** Its transactions on these days; null where that's not known (a stored range cut by a file being imported). */
   count: number | null;
-  /** Other sources covering some of these days, which don't count on them. */
-  also: { source: CoverageSource; from: IsoDate; to: IsoDate }[];
 }
 
 /**
@@ -63,15 +61,12 @@ export function transactionRuns(ranges: (Omit<TransactionRange, 'count'> & { cou
     if (last && last.source === source && addDays(last.to, 1) === from) {
       last.to = to;
       last.covering = [...new Set([...last.covering, ...covering])];
-    } else runs.push({ from, to, source, count: null, also: [], covering });
+    } else runs.push({ from, to, source, count: null, covering });
   }
   return runs.map(({ covering, ...run }) => {
     const own = covering.filter((range) => range.source === run.source);
     const whole = own.every((range) => range.from >= run.from && range.to <= run.to && range.count !== null);
-    const others = PRECEDENCE.filter((source) => source !== run.source).flatMap((source) =>
-      mergeSpans(covering.filter((range) => range.source === source).map((range) => ({ from: range.from > run.from ? range.from : run.from, to: range.to < run.to ? range.to : run.to }))).map((span) => ({ source, ...span })),
-    );
-    return { ...run, count: whole ? own.reduce((sum, range) => sum + range.count!, 0) : null, also: others };
+    return { ...run, count: whole ? own.reduce((sum, range) => sum + range.count!, 0) : null };
   });
 }
 

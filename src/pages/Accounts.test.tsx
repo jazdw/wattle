@@ -1,6 +1,6 @@
 import { act, screen, within } from '@testing-library/react';
 import { http, HttpResponse } from 'msw';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { account, CONNECTIONS } from '../test/fixtures';
 import { plaidLink } from '../test/plaid';
 import { renderPage } from '../test/render';
@@ -335,8 +335,8 @@ describe('Accounts page', () => {
               ],
               transactions: [
                 { from: '2026-01-01', to: '2026-03-31', source: 'files', count: 2 },
-                // A gap in April; the bank's report and your file both cover May.
-                { from: '2026-05-01', to: '2026-05-31', source: 'bank', count: 0 },
+                // A gap in April; your file covers May, the bank's report its second half too.
+                { from: '2026-05-15', to: '2026-05-31', source: 'bank', count: 0 },
                 { from: '2026-05-01', to: '2026-05-31', source: 'files', count: 3 },
                 { from: '2026-06-01', to: '2026-09-30', source: 'bank', count: 1 },
               ],
@@ -359,14 +359,29 @@ describe('Accounts page', () => {
     expect(toggle).toHaveAttribute('aria-expanded', 'true');
     // The key: where each part came from, and the balance that stopped updating.
     for (const label of ['Imported', 'Plaid', 'Balance not updating']) expect(screen.getByText(label)).toBeInTheDocument();
-    // A run says what it is when pointed at.
-    await user.hover(screen.getByTitle('Balances · Imported · Jan 1, 2026 – Mar 31, 2026'));
-    expect(screen.getByText('Balances · Imported · Jan 1, 2026 – Mar 31, 2026', { selector: 'p' })).toBeInTheDocument();
-    // Transactions as the days each source covers, with the gap between them: May's are your file's, the bank's also there.
-    const may = 'Transactions · Imported · May 1, 2026 – May 31, 2026 · 3 transactions · Also Plaid May 1, 2026 – May 31, 2026';
-    await user.hover(screen.getByTitle(may));
-    expect(screen.getByText(may, { selector: 'p' })).toBeInTheDocument();
-    expect(screen.getByTitle('Transactions · Plaid · Jun 1, 2026 – Sep 30, 2026 · 1 transaction')).toBeInTheDocument();
-    expect(screen.queryByTitle(/Transactions · .* Apr /)).not.toBeInTheDocument();
+    // Pointed at, a cursor marks the day and says what's on it. The bars are a pixel a day here (Jan 1 – Oct 8 is 281 days).
+    const bars = screen.getByRole('group', { name: /History by day/ });
+    vi.spyOn(bars, 'getBoundingClientRect').mockReturnValue({ left: 0, width: 281, top: 0, height: 38, right: 281, bottom: 38, x: 0, y: 0, toJSON: () => ({}) });
+    const status = () => within(bars.parentElement!).queryByRole('status');
+    const card = async (day: number) => {
+      await user.pointer({ target: bars, coords: { clientX: day + 0.5 } });
+      return status()?.textContent;
+    };
+    expect(await card(14)).toBe('Jan 15, 2026Balance ImportedTransactions ImportedJan 1, 2026 – Mar 31, 20262 transactions');
+    // April: a gap in both.
+    expect(await card(104)).toBe('Apr 15, 2026Balance NoneTransactions None recorded');
+    // Transactions as the days each source covers: May's are your file's, where the bank's report covers some days too.
+    expect(await card(139)).toBe('May 20, 2026Balance PlaidTransactions ImportedMay 1, 2026 – May 31, 20263 transactions');
+    expect(await card(257)).toBe('Sep 15, 2026Balance PlaidNot updating since Sep 1, 2026Transactions PlaidJun 1, 2026 – Sep 30, 20261 transaction');
+    // The mouse leaving clears it.
+    await user.pointer({ target: document.body });
+    expect(status()).not.toBeInTheDocument();
+    // From the keyboard: focused, the last day; the arrows and Home move it.
+    act(() => bars.focus());
+    expect(status()).toHaveTextContent(/^Oct 8, 2026/);
+    await user.keyboard('{ArrowLeft}');
+    expect(status()).toHaveTextContent(/^Oct 7, 2026/);
+    await user.keyboard('{Home}');
+    expect(status()).toHaveTextContent(/^Jan 1, 2026/);
   });
 });

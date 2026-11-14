@@ -253,28 +253,19 @@ describe('transaction ranges for the timeline', () => {
       { from: '2026-05-01', to: '2026-05-31', source: 'bank' as const, count: 1 },
     ];
     expect(transactionRuns(ranges)).toEqual([
-      { from: '2026-01-01', to: '2026-01-31', source: 'bank', count: 3, also: [] },
-      { from: '2026-02-01', to: '2026-02-28', source: 'files', count: 5, also: [{ source: 'bank', from: '2026-02-01', to: '2026-02-28' }] },
-      { from: '2026-03-01', to: '2026-03-31', source: 'bank', count: 2, also: [] },
+      { from: '2026-01-01', to: '2026-01-31', source: 'bank', count: 3 },
+      { from: '2026-02-01', to: '2026-02-28', source: 'files', count: 5 },
+      { from: '2026-03-01', to: '2026-03-31', source: 'bank', count: 2 },
       // April is a gap.
-      { from: '2026-05-01', to: '2026-05-31', source: 'bank', count: 1, also: [] },
+      { from: '2026-05-01', to: '2026-05-31', source: 'bank', count: 1 },
     ]);
     // A file being imported over part of what's stored: the institution's cut there, its count no longer known.
     expect(transactionRuns([...ranges, { from: '2026-01-15', to: '2026-02-10', source: 'new', count: 9 }])).toEqual([
-      { from: '2026-01-01', to: '2026-01-14', source: 'bank', count: null, also: [] },
-      {
-        from: '2026-01-15',
-        to: '2026-02-10',
-        source: 'new',
-        count: 9,
-        also: [
-          { source: 'files', from: '2026-02-01', to: '2026-02-10' },
-          { source: 'bank', from: '2026-01-15', to: '2026-02-10' },
-        ],
-      },
-      { from: '2026-02-11', to: '2026-02-28', source: 'files', count: null, also: [{ source: 'bank', from: '2026-02-11', to: '2026-02-28' }] },
-      { from: '2026-03-01', to: '2026-03-31', source: 'bank', count: 2, also: [] },
-      { from: '2026-05-01', to: '2026-05-31', source: 'bank', count: 1, also: [] },
+      { from: '2026-01-01', to: '2026-01-14', source: 'bank', count: null },
+      { from: '2026-01-15', to: '2026-02-10', source: 'new', count: 9 },
+      { from: '2026-02-11', to: '2026-02-28', source: 'files', count: null },
+      { from: '2026-03-01', to: '2026-03-31', source: 'bank', count: 2 },
+      { from: '2026-05-01', to: '2026-05-31', source: 'bank', count: 1 },
     ]);
   });
 });
