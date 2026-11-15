@@ -3,16 +3,18 @@
  * with its kind (shared/transactionKinds.ts) and the transfer between your
  * accounts it's one side of, filtered by dates and a search.
  */
-import { and, count, desc, eq, gte, inArray, lte, max, min, or, sql } from 'drizzle-orm';
+import { and, count, desc, eq, gte, inArray, lte, max, min, or } from 'drizzle-orm';
 import { fullDescription } from '../../shared/descriptions';
 import type { Currency } from '../../shared/money';
 import { kindOf } from '../../shared/transactionKinds';
 import type { TransactionEntry, TransactionsResponse } from '../../shared/types';
 import { inChunks } from '../db/batch';
 import { accounts, securities, transactions as transactionsTable, transfers } from '../db/schema';
-import { counted } from './importedRecord';
+import { counted, withPlaidDetails } from './importedRecord';
 import type { Tenant } from '../db/tenant';
 import { isCashSecurity } from './valuation';
+
+const squash = (text: string | null) => (text ?? '').toLowerCase().replace(/\s+/g, '');
 
 /** Transactions returned at most (newest first). */
 export const TRANSACTIONS_LIMIT = 2000;
@@ -28,13 +30,14 @@ export async function listTransactions(tenant: Tenant, account: typeof accounts.
   const kind: TransactionsResponse['kind'] = !account ? 'all' : account.type === 'investment' ? 'investment' : 'bank';
   // The account's record: an import's on its days, the institution's on the rest (./importedRecord).
   const all = account ? tenant.scope(transactionsTable, eq(transactionsTable.accountId, account.id), counted()) : tenant.scope(transactionsTable, eq(accounts.isHidden, false), counted());
-  // Filters: dates from and to (inclusive), and words in the description or memo, or an amount (either way).
+  // A file's transaction shows Plaid's details where Plaid has the same one (./importedRecord).
+  const plaid = withPlaidDetails();
+  // Filters: dates from and to (inclusive), and words in either description, the memo or the merchant, or an amount (either way).
   const day = (value: string | undefined) => (value && /^\d{4}-\d{2}-\d{2}$/.test(value) ? value : null);
   const from = day(query.from);
   const to = day(query.to);
   const words = query.q?.trim().slice(0, 100) ?? '';
   const pattern = `%${words.replace(/[%_\\]/g, (found) => `\\${found}`)}%`;
-  const like = (column: typeof transactionsTable.description | typeof transactionsTable.memo) => sql`${column} like ${pattern} escape '\\'`;
   const searchedAmount = /^[-$\d.,\s]+$/.test(words) && /\d/.test(words) ? Math.round(Math.abs(Number(words.replace(/[^\d.]/g, ''))) * 100) : null;
   const scope = and(
     all,
@@ -43,7 +46,7 @@ export async function listTransactions(tenant: Tenant, account: typeof accounts.
     words
       ? searchedAmount !== null && Number.isFinite(searchedAmount)
         ? or(eq(transactionsTable.amount, searchedAmount), eq(transactionsTable.amount, -searchedAmount))
-        : or(like(transactionsTable.description), like(transactionsTable.memo))
+        : plaid.matches(pattern)
       : undefined,
   );
   const rows = await tenant.db
@@ -56,8 +59,7 @@ export async function listTransactions(tenant: Tenant, account: typeof accounts.
       type: transactionsTable.type,
       subtype: transactionsTable.subtype,
       kind: transactionsTable.kind,
-      description: transactionsTable.description,
-      memo: transactionsTable.memo,
+      ...plaid.columns,
       ticker: securities.ticker,
       security: securities.name,
       securityType: securities.type,
@@ -68,6 +70,7 @@ export async function listTransactions(tenant: Tenant, account: typeof accounts.
     .from(transactionsTable)
     .innerJoin(accounts, eq(accounts.id, transactionsTable.accountId))
     .leftJoin(securities, eq(securities.id, transactionsTable.securityId))
+    .leftJoin(plaid.twin, plaid.on)
     .where(scope)
     .orderBy(desc(transactionsTable.date), desc(transactionsTable.id))
     .limit(TRANSACTIONS_LIMIT);
@@ -87,9 +90,10 @@ export async function listTransactions(tenant: Tenant, account: typeof accounts.
   const others = new Map<string, { accountId: string; accountName: string; institutionName: string | null; mask: string | null; date: string; description: string | null }>();
   for (const chunk of inChunks(otherIds)) {
     const found = await tenant.db
-      .select({ id: transactionsTable.id, accountId: transactionsTable.accountId, accountName: accounts.name, institutionName: accounts.institutionName, mask: accounts.mask, date: transactionsTable.date, description: transactionsTable.description, memo: transactionsTable.memo })
+      .select({ id: transactionsTable.id, accountId: transactionsTable.accountId, accountName: accounts.name, institutionName: accounts.institutionName, mask: accounts.mask, date: transactionsTable.date, description: plaid.columns.description, memo: plaid.columns.memo })
       .from(transactionsTable)
       .innerJoin(accounts, eq(accounts.id, transactionsTable.accountId))
+      .leftJoin(plaid.twin, plaid.on)
       .where(tenant.scope(transactionsTable, inArray(transactionsTable.id, chunk)));
     // Keyed by its id, kept apart from the details: the transfer's own id is the one Unlink sends.
     for (const { id, memo, ...row } of found) others.set(id, { ...row, description: fullDescription(row.description, memo) });
@@ -99,16 +103,20 @@ export async function listTransactions(tenant: Tenant, account: typeof accounts.
     const other = link && others.get(link.outId === id ? link.inId : link.outId);
     return link && other ? { id: link.id, status: link.status, ...other } : null;
   };
-  const transactions: TransactionEntry[] = rows.map(({ securityType, ...row }) => {
-    const automatic = kindOf({ ...row, kind: null }, row.security !== null && isCashSecurity({ ticker: row.ticker, type: securityType }));
-    return { ...row, currency: row.currency as Currency, kind: row.kind ?? automatic, kindByYou: row.kind !== null, automatic, transfer: transferOf(row.id) };
+  const transactions: TransactionEntry[] = rows.map(({ securityType, ownDescription, ownMemo, twinId, merchant, ...row }) => {
+    // Its kind from its own facts: a file's mapping, not Plaid's category.
+    const automatic = kindOf({ ...row, description: ownDescription, kind: null }, row.security !== null && isCashSecurity({ ticker: row.ticker, type: securityType }));
+    const own = fullDescription(ownDescription, ownMemo);
+    // The file's own text where it says more than a change of case or spacing.
+    const fileDescription = twinId !== null && own !== null && squash(own) !== squash(row.description) ? own : null;
+    return { ...row, currency: row.currency as Currency, kind: row.kind ?? automatic, kindByYou: row.kind !== null, automatic, merchant, fileDescription, transfer: transferOf(row.id) };
   });
   const [range] = await tenant.db
     .select({ from: min(transactionsTable.date), to: max(transactionsTable.date) })
     .from(transactionsTable)
     .innerJoin(accounts, eq(accounts.id, transactionsTable.accountId))
     .where(all);
-  const [matched] = await tenant.db.select({ total: count() }).from(transactionsTable).innerJoin(accounts, eq(accounts.id, transactionsTable.accountId)).where(scope);
+  const [matched] = await tenant.db.select({ total: count() }).from(transactionsTable).innerJoin(accounts, eq(accounts.id, transactionsTable.accountId)).leftJoin(plaid.twin, plaid.on).where(scope);
   return {
     kind,
     currency: (account?.currency ?? 'USD') as Currency,

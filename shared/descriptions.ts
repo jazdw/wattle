@@ -14,3 +14,20 @@ export function fullDescription(description: string | null | undefined, memo: st
   // NAME cut at its limit runs straight on into MEMO; otherwise they're two parts.
   return description.length === OFX_NAME_LENGTH ? description + memo : `${description} · ${memo}`;
 }
+
+/** A code of Plaid's in words: FOOD_AND_DRINK → "Food and drink". */
+const codeWords = (code: string) => {
+  const text = code.toLowerCase().replace(/_/g, ' ');
+  return text.charAt(0).toUpperCase() + text.slice(1);
+};
+
+/**
+ * Plaid's personal finance category in words: its primary level, and the
+ * detailed one less the primary it repeats (FOOD_AND_DRINK,
+ * FOOD_AND_DRINK_GROCERIES → "Food and drink · Groceries"). Null without one.
+ */
+export function categoryWords(primary: string | null | undefined, detailed: string | null | undefined): string | null {
+  if (!primary) return detailed ? codeWords(detailed) : null;
+  const rest = detailed?.startsWith(`${primary}_`) ? detailed.slice(primary.length + 1) : null;
+  return rest ? `${codeWords(primary)} · ${codeWords(rest)}` : codeWords(primary);
+}

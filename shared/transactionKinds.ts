@@ -2,7 +2,8 @@
  * What a transaction does, whatever it came from. You can set one on any
  * transaction; otherwise it's worked out here, when read: an imported file's
  * own mapping (its readers map the file's types: src/lib/imports.ts), Plaid's
- * investment type and subtype, or a bank transaction's sign. So a better
+ * investment type and subtype, Plaid's category for a bank transaction, or
+ * a bank transaction's sign and description. So a better
  * mapping applies to everything already stored.
  */
 
@@ -23,7 +24,7 @@ export const KIND_WORDS: Record<TransactionKind, string> = {
 };
 
 export interface KindFacts {
-  source: 'plaid' | 'report' | 'import';
+  source: 'plaid' | 'bank' | 'report' | 'import';
   /** Set by you. */
   kind: TransactionKind | null;
   type: string | null;
@@ -32,6 +33,9 @@ export interface KindFacts {
   amount: number;
   quantity: number;
   description: string | null;
+  /** Plaid's personal finance category on a bank transaction: primary (BANK_FEES) and detailed (INCOME_DIVIDENDS). */
+  plaidCategory?: string | null;
+  plaidCategoryDetailed?: string | null;
 }
 
 /** Plaid's subtypes for money earned: under `cash`, and (for some institutions) under `fee` too. */
@@ -54,6 +58,7 @@ export function kindOf(row: KindFacts, isCash = false): TransactionKind | null {
   if (row.kind) return row.kind;
   if (row.source === 'import') return isKind(row.subtype) ? row.subtype : null;
   if (row.source === 'report') return bankKind(row.amount, row.description);
+  if (row.source === 'bank') return plaidBankKind(row.plaidCategory ?? null, row.plaidCategoryDetailed ?? null, row.amount, row.description);
   return plaidKind(row.type, row.subtype, row.amount, row.quantity, isCash);
 }
 
@@ -62,6 +67,16 @@ export function bankKind(amount: number, description: string | null): Transactio
   const text = description ?? '';
   if (amount < 0) return /\binterest\b/i.test(text) ? 'income' : 'deposit';
   return /\b(fee|service charge|interest)\b/i.test(text) ? 'fee' : 'withdrawal';
+}
+
+/** Plaid's categories for money earned on a bank account. */
+const INCOME_CATEGORIES = new Set(['INCOME_DIVIDENDS', 'INCOME_INTEREST_EARNED']);
+
+/** A Plaid bank transaction: its category where it tells (a bank's fee, interest or dividends), else as a bank report's. */
+export function plaidBankKind(category: string | null, detailed: string | null, amount: number, description: string | null): TransactionKind {
+  if (category === 'BANK_FEES' && amount > 0) return 'fee';
+  if (detailed && INCOME_CATEGORIES.has(detailed) && amount < 0) return 'income';
+  return bankKind(amount, description);
 }
 
 /** A Plaid investment transaction, by its subtype first (they're more telling than its type). */

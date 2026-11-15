@@ -82,4 +82,23 @@ describe('migrations', () => {
       { household_id: 'h1', account_id: 'sav', source: 'report', from: '2026-09-15', to: '2026-10-01' },
     ]);
   });
+
+  it("0007 adds Plaid's bank transaction columns and the bank feed, keeping every row", async () => {
+    const client = createClient({ url: ':memory:' });
+    await client.execute('PRAGMA foreign_keys = ON');
+    for (const name of files.filter((file) => file < '0007')) await apply(client, name);
+    await client.execute("INSERT INTO households (id, name, display_currency, created_at) VALUES ('h1', 'Example', 'USD', 1)");
+    await client.execute("INSERT INTO connections (id, household_id, provider, external_id, access_token_enc, kind, created_at) VALUES ('c1', 'h1', 'plaid', 'item-1', 'enc', 'account', 1)");
+    await client.execute("INSERT INTO accounts (id, household_id, source, name, type, currency, created_at) VALUES ('chk', 'h1', 'manual', 'Checking', 'depository', 'USD', 1)");
+    await client.execute("INSERT INTO transactions (id, household_id, account_id, source, external_id, date, amount, currency, description, created_at) VALUES ('r1', 'h1', 'chk', 'report', 'r1', '2026-10-02', 10000, 'USD', 'Payment', 1)");
+
+    for (const name of files.filter((file) => file >= '0007')) await apply(client, name);
+
+    expect({ ...(await client.execute('SELECT id, bank_feed, bank_feed_error, bank_cursor FROM connections')).rows[0] }).toEqual({ id: 'c1', bank_feed: null, bank_feed_error: null, bank_cursor: null });
+    expect({ ...(await client.execute('SELECT id, amount, description, plaid_category, merchant_name FROM transactions')).rows[0] }).toEqual({ id: 'r1', amount: 10000, description: 'Payment', plaid_category: null, merchant_name: null });
+    await client.execute(
+      "INSERT INTO transactions (id, household_id, account_id, source, external_id, date, amount, currency, plaid_category, plaid_category_detailed, merchant_name, created_at) VALUES ('b1', 'h1', 'chk', 'bank', 'b1', '2026-10-02', 10000, 'USD', 'GENERAL_MERCHANDISE', 'GENERAL_MERCHANDISE_OTHER_GENERAL_MERCHANDISE', 'Example Store', 1)",
+    );
+    expect((await client.execute("SELECT count(*) AS n FROM transactions WHERE source = 'bank'")).rows[0].n).toBe(1);
+  });
 });

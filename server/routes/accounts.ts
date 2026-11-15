@@ -80,9 +80,10 @@ connectionRoutes.get('/', async (c) => {
         hasInvestments: row.hasInvestments,
         hasBalanceHistory: row.hasBalanceHistory,
         // Plaid's balances are cached, refreshed about once a day only for a
-        // login with Transactions, Investments or Liabilities; Wattle's links
-        // have Investments or nothing that does (Assets doesn't).
-        refreshesBalances: row.hasInvestments,
+        // login with Transactions, Investments or Liabilities (Assets alone
+        // doesn't): Wattle's have Investments, Transactions, or neither.
+        refreshesBalances: row.hasInvestments || row.bankFeed === 'loading' || row.bankFeed === 'on',
+        bankFeed: row.bankFeed,
         // A consent warning shows while the login otherwise works; a login
         // problem takes precedence.
         status: row.status === 'ok' && consentEnding(row, c.env.deps.now().getTime()) ? 'pending_expiration' : row.status,
@@ -392,6 +393,11 @@ accountRoutes.patch('/:id', async (c) => {
   const statements: BatchItem<'sqlite'>[] = [];
   if (Object.keys(update).length > 0) {
     statements.push(tenant.db.update(accounts).set(update).where(tenant.scope(accounts, eq(accounts.id, account.id))));
+  }
+  if (body.isHidden === false && account.isHidden && account.connectionId) {
+    // Plaid's cursor never sends again what was skipped while the account was
+    // hidden: the next sync reads the login's bank transactions from the start.
+    statements.push(tenant.db.update(connections).set({ bankCursor: null }).where(tenant.scope(connections, eq(connections.id, account.connectionId))));
   }
   if (body.isHidden) {
     statements.push(...purgeStatements(tenant, account.id));

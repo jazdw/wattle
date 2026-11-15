@@ -38,15 +38,19 @@ const BACKFILL_TEXT: Record<ConnectionSummary['backfillStatus'], string | null> 
   skipped: 'No history from bank — import a CSV',
 };
 
-/** Plaid's Trial plan allows 10 production Items, and removed ones still count. */
-const TRIAL_ITEM_LIMIT = 10;
+/** Plaid's Trial plan allows 20 production Items, and removed ones still count. */
+const TRIAL_ITEM_LIMIT = 20;
 
 /** What a login brings in, from the Plaid products it has. */
 function provides(connection: ConnectionSummary): string {
-  if (connection.hasInvestments && connection.hasBalanceHistory) return 'Holdings and balance history';
-  if (connection.hasInvestments) return 'Holdings';
-  if (connection.hasBalanceHistory) return 'Balance history';
-  return 'Balances';
+  const parts = [
+    connection.hasInvestments && 'holdings',
+    (connection.bankFeed === 'on' || connection.bankFeed === 'loading') && 'transactions',
+    connection.hasBalanceHistory && 'balance history',
+  ].filter((part): part is string => Boolean(part));
+  if (parts.length === 0) return 'Balances';
+  const text = parts.length === 1 ? parts[0] : `${parts.slice(0, -1).join(', ')} and ${parts.at(-1)}`;
+  return text.charAt(0).toUpperCase() + text.slice(1);
 }
 
 export function Accounts() {
@@ -178,6 +182,11 @@ export function Accounts() {
                     ) : (
                       BACKFILL_TEXT[connection.backfillStatus] && <Badge variant="outline">{BACKFILL_TEXT[connection.backfillStatus]}</Badge>
                     )}
+                    {connection.bankFeed === 'loading' && connection.status === 'ok' && (
+                      <Badge variant="outline" title="Plaid is gathering this login's bank and card transactions; older ones arrive over the next syncs.">
+                        Loading transactions…
+                      </Badge>
+                    )}
                   </CardTitle>
                   <CardDescription>
                     Linked by {ownerName(connection.ownerUserId)} · {provides(connection)} · synced{' '}
@@ -217,6 +226,14 @@ export function Accounts() {
                 </div>
               </CardHeader>
               <CardContent className="grid gap-3">
+                {connection.status === 'ok' && connection.bankFeed === 'consent' && (
+                  <Alert variant="warning">
+                    <div className="flex flex-wrap items-center justify-between gap-2">
+                      <span>The institution hasn't given Plaid this login's transactions. Allow them on its sign-in page to bring them in, with balances that update.</span>
+                      <PlaidLinkButton kind={connection.kind} connectionId={connection.id} label="Allow transactions" variant="accent" size="sm" onError={setError} />
+                    </div>
+                  </Alert>
+                )}
                 {connection.status === 'ok' && !connection.refreshesBalances && (
                   <Alert variant="warning">
                     Plaid doesn't refresh this login's balances: each sync gets the balances from when it was linked, so they don't change. Import statements to keep

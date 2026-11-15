@@ -1,6 +1,6 @@
 /** Configurable fakes for the external providers (no network in tests). */
-import type { AccountBase, Holding, InvestmentTransaction, Security } from 'plaid';
-import { PlaidApiError, type PlaidApi } from '../server/adapters/plaid';
+import type { AccountBase, Holding, InvestmentTransaction, Security, Transaction } from 'plaid';
+import { PlaidApiError, type PlaidApi, type TransactionsSyncPage } from '../server/adapters/plaid';
 import { bytesToBase64Url, sha256Hex } from '../server/lib/encoding';
 import type { DailyClose, FxProvider, PriceProvider, Quote, QuoteProvider, SecurityDescription } from '../server/ports';
 
@@ -42,6 +42,34 @@ export interface PlaidState {
   /** days_requested of each asset report asked for. */
   assetReportDays: number[];
   removed: string[];
+  /**
+   * /transactions/sync's answers, each given once in order: a page (its
+   * cursor defaults to `cursor-<n>`, has_more to false, its status to
+   * complete) or an error code to throw; once they're used up, nothing new
+   * at the cursor sent.
+   */
+  bankPages: (Partial<TransactionsSyncPage> | string)[];
+  /** The cursor each /transactions/sync call was given. */
+  bankCursors: (string | null)[];
+}
+
+/** A posted bank transaction as /transactions/sync sends it (made-up values). */
+export function bankTxn(id: string, accountId: string, date: string, amount: number, extra: Partialish<Transaction> = {}) {
+  return {
+    transaction_id: id,
+    account_id: accountId,
+    date,
+    amount,
+    iso_currency_code: 'USD',
+    name: `Payment ${id}`,
+    original_description: null,
+    merchant_name: null,
+    payment_channel: 'other',
+    authorized_date: null,
+    pending: false,
+    personal_finance_category: null,
+    ...extra,
+  } as unknown as Transaction;
 }
 
 export function account(id: string, type: string, current: number, extra: Partialish<AccountBase> = {}) {
@@ -127,8 +155,11 @@ export function fakePlaid(initial: Partial<PlaidState> = {}): PlaidApi & { state
     transactionsPageSize: 2,
     assetReportDays: [],
     removed: [],
+    bankPages: [],
+    bankCursors: [],
     ...initial,
   };
+  let bankPage = 0;
   const guard = (name: string) => {
     state.calls.push(name);
     if (state.failWith) throw new PlaidApiError(400, 'ITEM_ERROR', state.failWith, 'fake failure');
@@ -143,6 +174,7 @@ export function fakePlaid(initial: Partial<PlaidState> = {}): PlaidApi & { state
         getAccounts: '/accounts/get',
         getHoldings: '/investments/holdings/get',
         getInvestmentTransactions: '/investments/transactions/get',
+        syncTransactions: '/transactions/sync',
         getAssetReport: '/asset_report/get',
       };
       return new Proxy(api, {
@@ -194,6 +226,15 @@ export function fakePlaid(initial: Partial<PlaidState> = {}): PlaidApi & { state
         investment_transactions: page,
         total_investment_transactions: inRange.length,
       } as never;
+    },
+    syncTransactions: async (_token, cursor) => {
+      guard('bank_transactions');
+      state.bankCursors.push(cursor);
+      const page = state.bankPages.shift();
+      if (typeof page === 'string') throw new PlaidApiError(400, page === 'INVALID_PRODUCT' ? 'INVALID_INPUT' : 'ITEM_ERROR', page, 'fake failure');
+      if (!page) return { added: [], modified: [], removed: [], next_cursor: cursor ?? 'cursor-0', has_more: false, transactions_update_status: 'HISTORICAL_UPDATE_COMPLETE' };
+      bankPage += 1;
+      return { added: [], modified: [], removed: [], next_cursor: `cursor-${bankPage}`, has_more: false, transactions_update_status: 'HISTORICAL_UPDATE_COMPLETE', ...page };
     },
     createAssetReport: async (_token, days) => {
       state.calls.push('asset_report:create');

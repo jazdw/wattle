@@ -60,7 +60,7 @@ describe('the imported record', () => {
 
   it("is what every reader of an account's transactions goes by", () => {
     // These read them for something else: the sync and the import (their own rows), the history rebuild (Plaid's), a kind you set (by id), and the pairing itself.
-    const elsewhere = new Set(['server/routes/transactions.ts', 'server/services/backfill.ts', 'server/services/holdingsImport.ts', 'server/services/importedRecord.ts', 'server/services/sync.ts']);
+    const elsewhere = new Set(['server/routes/transactions.ts', 'server/services/bankTransactions.ts', 'server/services/backfill.ts', 'server/services/holdingsImport.ts', 'server/services/importedRecord.ts', 'server/services/sync.ts']);
     const files = (dir: string): string[] => readdirSync(dir, { withFileTypes: true }).flatMap((entry) => (entry.isDirectory() ? files(join(dir, entry.name)) : entry.name.endsWith('.ts') ? [join(dir, entry.name)] : []));
     const readers = files('server').filter((file) => /\.from\((transactions|transactionsTable|schema\.transactions)\)/.test(readFileSync(file, 'utf8')) && !elsewhere.has(file));
     expect(readers.sort()).toEqual(['server/services/breakdown.ts', 'server/services/coverage.ts', 'server/services/transactionList.ts', 'server/services/transfers.ts']);

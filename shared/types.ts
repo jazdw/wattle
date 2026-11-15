@@ -48,10 +48,16 @@ export interface ConnectionSummary {
   hasBalanceHistory: boolean;
   /**
    * Plaid refreshes the login's balances each day. It does only for a login
-   * with a product it updates daily (Investments here); otherwise every sync
-   * gets the balances Plaid had when it was linked.
+   * with a product it updates daily (Investments or Transactions here);
+   * otherwise every sync gets the balances Plaid had when it was linked.
    */
   refreshesBalances: boolean;
+  /**
+   * Plaid Transactions (bank, card and loan transactions): null not tried
+   * yet, loading while Plaid gathers the history, on, unsupported (Plaid
+   * refused it), consent (the institution needs it granted: sign in again).
+   */
+  bankFeed: 'loading' | 'on' | 'unsupported' | 'consent' | null;
   status: ConnectionStatus;
   errorCode: string | null;
   ownerUserId: string | null;
@@ -93,15 +99,15 @@ export interface SyncRunSummary {
 
 export type AccountType = 'depository' | 'credit' | 'loan' | 'investment' | 'property' | 'other';
 
-/** One transaction of an account: an investment one from Plaid's Investments data, or a bank one from a bank history report. */
+/** One transaction of an account: an investment one from Plaid's Investments data, a bank one from Plaid's Transactions or a bank history report, or a file's. */
 export interface TransactionEntry {
   id: string;
   /** Its account, and the currency its amount is in. */
   accountId: string;
   currency: Currency;
   date: string;
-  /** Where it came from: Plaid's investment transactions, a bank history report, or a file you imported. */
-  source: 'plaid' | 'report' | 'import';
+  /** Where it came from: Plaid's investment transactions, Plaid's bank transactions, a bank history report, or a file you imported. */
+  source: 'plaid' | 'bank' | 'report' | 'import';
   /** The institution's own type: Plaid's buy | sell | cash | fee | transfer | cancel, a file's type name; bank: null. */
   type: string | null;
   /** Plaid's subtype (dividend, reinvestment, split, …). */
@@ -114,9 +120,17 @@ export interface TransactionEntry {
   automatic: TransactionKind | null;
   /** The transfer between your accounts it's one side of (linked automatically or by you). */
   transfer: { id: string; status: 'auto' | 'confirmed'; accountId: string; accountName: string; institutionName: string | null; mask: string | null; date: string; /** The other side's own description, its MEMO joined. */ description: string | null } | null;
+  /** Plaid's description where it has one for the transaction (a file's paired with Plaid's bank transaction), else its own. */
   description: string | null;
-  /** A Quicken file's MEMO beside its NAME: shown joined (shared/descriptions.ts fullDescription). */
+  /** A Quicken file's MEMO beside its NAME: shown joined (shared/descriptions.ts fullDescription). Null when Plaid's description is shown. */
   memo: string | null;
+  /** A file's own text (its description and memo joined), when Plaid's is shown in its place. */
+  fileDescription: string | null;
+  /** Plaid's personal finance category: primary (FOOD_AND_DRINK) and detailed (FOOD_AND_DRINK_GROCERIES). */
+  plaidCategory: string | null;
+  plaidCategoryDetailed: string | null;
+  /** The merchant, when Plaid names one. */
+  merchant: string | null;
   ticker: string | null;
   security: string | null;
   quantity: number | null;

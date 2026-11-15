@@ -155,6 +155,16 @@ export const connections = sqliteTable(
     assetReportTokenEnc: text('asset_report_token_enc'),
     /** Plaid asset_report_id of the pending report (matches the ASSETS webhook; not secret). */
     assetReportId: text('asset_report_id'),
+    /**
+     * Plaid Transactions (bank, card and loan transactions, services/bankTransactions.ts):
+     * null not tried yet, loading while Plaid still gathers the history,
+     * on, unsupported (Plaid refused it: bank_feed_error says why) or
+     * consent (the institution needs it granted in update-mode Link).
+     */
+    bankFeed: text('bank_feed', { enum: ['loading', 'on', 'unsupported', 'consent'] }),
+    bankFeedError: text('bank_feed_error'),
+    /** Where the next /transactions/sync carries on from (Plaid's cursor; not secret). */
+    bankCursor: text('bank_cursor'),
     createdAt: integer('created_at').notNull(),
   },
   (table) => [
@@ -289,8 +299,12 @@ export const holdings = sqliteTable(
   ],
 );
 
-/** Where a transaction came from: Plaid's investment transactions, a bank history report, or an imported file. */
-export const TRANSACTION_SOURCES = ['plaid', 'report', 'import'] as const;
+/**
+ * Where a transaction came from: Plaid's investment transactions (plaid),
+ * Plaid's bank, card and loan transactions (bank), a bank history report, or
+ * an imported file.
+ */
+export const TRANSACTION_SOURCES = ['plaid', 'bank', 'report', 'import'] as const;
 
 /**
  * Every account's transactions, from wherever they came. Each has a kind
@@ -328,8 +342,21 @@ export const transactions = sqliteTable(
     fees: integer('fees'),
     /** Set by you; null: worked out from the type when read. */
     kind: text('kind', { enum: TRANSACTION_KINDS }),
-    /** An imported transaction that is this one (Plaid's or a report's, shown a day or two apart): the import's counts instead (services/importedRecord.ts). */
+    /** The transaction that is this one and counts instead (services/importedRecord.ts): an import's over the institution's, Plaid's bank feed over a report's. */
     replacedBy: text('replaced_by').references((): AnySQLiteColumn => transactions.id, { onDelete: 'set null' }),
+    /**
+     * Plaid's, on its bank transactions, kept as sent: its personal finance
+     * category (v2) at the primary (FOOD_AND_DRINK) and detailed
+     * (FOOD_AND_DRINK_GROCERIES) levels and its confidence, the merchant, how
+     * it was paid (online, in store, other) and the day it was authorized.
+     * A plain `category` is left free for your own.
+     */
+    plaidCategory: text('plaid_category'),
+    plaidCategoryDetailed: text('plaid_category_detailed'),
+    plaidCategoryConfidence: text('plaid_category_confidence'),
+    merchantName: text('merchant_name'),
+    paymentChannel: text('payment_channel'),
+    authorizedDate: text('authorized_date'),
     createdAt: integer('created_at').notNull(),
   },
   (table) => [
@@ -339,6 +366,8 @@ export const transactions = sqliteTable(
     index('transactions_household_date').on(table.householdId, table.date, table.id),
     // A sync's "already stored?" by Plaid's ids, which don't name the account.
     index('transactions_household_external').on(table.householdId, table.source, table.externalId),
+    // The transaction that replaced each (a file's showing Plaid's details), and deletes clearing replaced_by.
+    index('transactions_replaced_by').on(table.replacedBy),
   ],
 );
 

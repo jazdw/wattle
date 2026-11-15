@@ -1,6 +1,14 @@
 /**
- * Which transactions count when an account has both a file's and the
- * institution's (Plaid's or a bank report's). A file is the institution's own
+ * Which transactions count when an account has more than one source's. The
+ * order of trust is import > Plaid's (investment or bank) > a bank report's.
+ *
+ * Plaid's bank transactions over a report's: on the days Plaid's cover in
+ * an account (transaction_ranges, source `bank`), a report's don't count,
+ * and each report transaction is paired with Plaid's that is it (by Plaid's
+ * id where they share one, else as below) and marked `replacedBy` it, a kind
+ * you set and a transfer you decided moving across (pairBank).
+ *
+ * A file's over the institution's (Plaid's or a bank report's). A file is the institution's own
  * record, so on the days an import wrote, its transactions count and the
  * institution's are kept but left out; on every other day the institution's
  * count. Nothing is deleted: a sync sends its transactions again anyway, and
@@ -14,7 +22,10 @@
  * A paired one is marked `replacedBy` the file's and left out wherever it's
  * dated, and gives the file's its description when that's the file's text
  * in full (a bank's file splits it across NAME and MEMO, cutting NAME at 32
- * characters), a kind you set on it, and a transfer you decided.
+ * characters), a kind you set on it, and a transfer you decided. Plaid's
+ * bank transaction gives no text: it keeps its own description, category
+ * and merchant, never copied or overwritten, and the file's is read with
+ * them (withPlaidDetails), so importing a file can't lose them.
  *
  * Everything that reads transactions as the account's record uses
  * `counted()`; the history rebuild doesn't: it walks back through Plaid's
@@ -22,6 +33,7 @@
  */
 import { and, eq, gte, inArray, isNull, lte, max, min, ne, or, sql, type SQL } from 'drizzle-orm';
 import type { BatchItem } from 'drizzle-orm/batch';
+import { alias } from 'drizzle-orm/sqlite-core';
 import { addDays } from '../../shared/dates';
 import { inChunks, runAtomic } from '../db/batch';
 import { accountDaily, securities, transactions, transfers } from '../db/schema';
@@ -35,16 +47,47 @@ const SHARES_EPSILON = 0.001;
 
 /**
  * The condition for a transaction that counts: the file's, or the
- * institution's off the import's days and not paired with one of the file's.
- * An import's days take over only in an account with a file's transactions:
- * one imported before imports kept them wrote days with none to show.
+ * institution's off the import's days and not paired with one of the file's
+ * (or a report's paired with Plaid's, or on days Plaid's bank transactions
+ * cover). An import's days take over only in an account with a file's
+ * transactions: one imported before imports kept them wrote days with none
+ * to show.
  */
 export function counted(): SQL {
   return sql.raw(
     `("transactions"."source" = 'import' or ("transactions"."replaced_by" is null and not (` +
       `exists (select 1 from "account_daily" "imported" where "imported"."account_id" = "transactions"."account_id" and "imported"."date" = "transactions"."date" and "imported"."source" = 'import')` +
-      ` and exists (select 1 from "transactions" "kept" where "kept"."household_id" = "transactions"."household_id" and "kept"."account_id" = "transactions"."account_id" and "kept"."source" = 'import'))))`,
+      ` and exists (select 1 from "transactions" "kept" where "kept"."household_id" = "transactions"."household_id" and "kept"."account_id" = "transactions"."account_id" and "kept"."source" = 'import'))` +
+      ` and not ("transactions"."source" = 'report' and exists (select 1 from "transaction_ranges" "feed" where "feed"."household_id" = "transactions"."household_id" and "feed"."account_id" = "transactions"."account_id" and "feed"."source" = 'bank' and "feed"."from" <= "transactions"."date" and "feed"."to" >= "transactions"."date"))))`,
   );
+}
+
+/**
+ * A counted transaction read with Plaid's details: a file's paired with
+ * Plaid's bank transaction (its twin, `replacedBy` the file's) shows Plaid's
+ * description, category and merchant, its own text kept beside them; any
+ * other shows its own. Left-join `twin` on `on`.
+ */
+export function withPlaidDetails() {
+  const twin = alias(transactions, 'twin');
+  return {
+    twin,
+    on: and(eq(twin.replacedBy, transactions.id), eq(twin.source, 'bank'), eq(twin.householdId, transactions.householdId))!,
+    columns: {
+      description: sql<string | null>`coalesce(${twin.description}, ${transactions.description})`,
+      // A file's MEMO goes with its own text, not with Plaid's description.
+      memo: sql<string | null>`case when ${twin.id} is null then ${transactions.memo} end`,
+      ownDescription: transactions.description,
+      ownMemo: transactions.memo,
+      plaidCategory: sql<string | null>`coalesce(${twin.plaidCategory}, ${transactions.plaidCategory})`,
+      plaidCategoryDetailed: sql<string | null>`coalesce(${twin.plaidCategoryDetailed}, ${transactions.plaidCategoryDetailed})`,
+      merchant: sql<string | null>`coalesce(${twin.merchantName}, ${transactions.merchantName})`,
+      twinId: twin.id,
+    },
+    /** Words searched for in either text, and the merchant. */
+    matches: (pattern: string) =>
+      sql`(${transactions.description} like ${pattern} escape '\\' or ${transactions.memo} like ${pattern} escape '\\' or ${twin.description} like ${pattern} escape '\\' or ${transactions.merchantName} like ${pattern} escape '\\' or ${twin.merchantName} like ${pattern} escape '\\')`,
+  };
 }
 
 export interface Comparable {
@@ -116,6 +159,7 @@ export function betterText(file: Described, feed: Described): { description: str
  * that no longer count: matching then works on the file's.
  */
 export async function pairImported(tenant: Tenant): Promise<{ paired: number }> {
+  const replacer = alias(transactions, 'replacer');
   const ranges = await tenant.db
     .select({ accountId: accountDaily.accountId, from: min(accountDaily.date), to: max(accountDaily.date) })
     .from(accountDaily)
@@ -123,6 +167,8 @@ export async function pairImported(tenant: Tenant): Promise<{ paired: number }> 
     .groupBy(accountDaily.accountId);
   const statements: BatchItem<'sqlite'>[] = [];
   let paired = 0;
+  // Every account's pairs, for moving transfers once: a transfer between two accounts may move on both sides.
+  const allPairs = new Map<{ id: string }, { id: string }>();
   for (const { accountId, from, to } of ranges) {
     if (!from || !to) continue;
     const rows = await tenant.db
@@ -140,9 +186,11 @@ export async function pairImported(tenant: Tenant): Promise<{ paired: number }> 
         type: transactions.type,
         ticker: securities.ticker,
         securityType: securities.type,
+        replacedBySource: replacer.source,
       })
       .from(transactions)
       .leftJoin(securities, eq(securities.id, transactions.securityId))
+      .leftJoin(replacer, eq(replacer.id, transactions.replacedBy))
       .where(tenant.scope(transactions, eq(transactions.accountId, accountId), gte(transactions.date, addDays(from, -OVERLAP_DAYS)), lte(transactions.date, addDays(to, OVERLAP_DAYS))));
     // As compared: a cash fund (the sweep, Plaid's cash) as no security, and a fee as money out (./backfill paidOut: some feeds sign them as money in).
     const compared = rows.map((row) => ({
@@ -151,7 +199,8 @@ export async function pairImported(tenant: Tenant): Promise<{ paired: number }> 
       amount: row.source !== 'import' && row.type === 'fee' ? Math.abs(row.amount) : row.amount,
     }));
     const file = compared.filter((row) => row.source === 'import');
-    const feed = compared.filter((row) => row.source !== 'import');
+    // A report's paired with Plaid's bank transaction is that one's (pairBank): the file's pairs with Plaid's.
+    const feed = compared.filter((row) => row.source !== 'import' && !(row.source === 'report' && row.replacedBySource === 'bank'));
     // An import that kept no transactions (from before imports did) takes nothing over.
     if (!file.length && !(await tenant.db.select({ id: transactions.id }).from(transactions).where(tenant.scope(transactions, eq(transactions.accountId, accountId), eq(transactions.source, 'import'))).limit(1)).length) continue;
     const pairs = pairUp(file, feed);
@@ -161,16 +210,88 @@ export async function pairImported(tenant: Tenant): Promise<{ paired: number }> 
       if (replacedBy !== row.replacedBy) statements.push(tenant.db.update(transactions).set({ replacedBy }).where(tenant.scope(transactions, eq(transactions.id, row.id))));
     }
     for (const [theirs, ours] of pairs) {
-      const text = betterText(ours, theirs);
+      // Plaid's bank transaction keeps its text, read with the file's (withPlaidDetails).
+      const text = theirs.source === 'bank' ? null : betterText(ours, theirs);
       if (text && (text.description !== ours.description || ours.memo !== null)) statements.push(tenant.db.update(transactions).set(text).where(tenant.scope(transactions, eq(transactions.id, ours.id))));
       if (theirs.kind && !ours.kind) statements.push(tenant.db.update(transactions).set({ kind: theirs.kind }).where(tenant.scope(transactions, eq(transactions.id, ours.id), isNull(transactions.kind))));
     }
-    statements.push(...(await movedTransfers(tenant, pairs)));
+    for (const [theirs, ours] of pairs) allPairs.set(theirs, ours);
     // The institution's that no longer count: on the import's days, or paired.
     const left = feed.filter((row) => pairs.has(row) || (row.date >= from && row.date <= to)).map((row) => row.id);
     for (const ids of inChunks(left, 45)) {
       statements.push(tenant.db.delete(transfers).where(tenant.scope(transfers, inArray(transfers.status, ['auto', 'suggested']), or(inArray(transfers.outId, ids), inArray(transfers.inId, ids)))));
     }
+  }
+  statements.push(...(await movedTransfers(tenant, allPairs)));
+  if (statements.length > 0) await runAtomic(tenant.db, statements);
+  return { paired };
+}
+
+/**
+ * Pair each account's bank report transactions with Plaid's bank
+ * transactions (see above): by Plaid's id where they share one, else the
+ * same amount within five days (pairUp). A paired report transaction is
+ * marked `replacedBy` Plaid's, which takes a kind you set on it and a
+ * transfer you decided; automatic and suggested transfers on it are removed,
+ * for matching to redo on Plaid's.
+ */
+export async function pairBank(tenant: Tenant): Promise<{ paired: number }> {
+  const withBank = await tenant.db
+    .selectDistinct({ accountId: transactions.accountId })
+    .from(transactions)
+    .where(tenant.scope(transactions, eq(transactions.source, 'bank')));
+  const statements: BatchItem<'sqlite'>[] = [];
+  let paired = 0;
+  // Newly paired, in every account at once: a transfer between two accounts may move on both sides.
+  const fresh = new Map<{ id: string }, { id: string }>();
+  for (const { accountId } of withBank) {
+    const rows = await tenant.db
+      .select({
+        id: transactions.id,
+        source: transactions.source,
+        externalId: transactions.externalId,
+        date: transactions.date,
+        amount: transactions.amount,
+        description: transactions.description,
+        memo: transactions.memo,
+        kind: transactions.kind,
+        replacedBy: transactions.replacedBy,
+      })
+      .from(transactions)
+      .where(tenant.scope(transactions, eq(transactions.accountId, accountId), inArray(transactions.source, ['bank', 'report'])));
+    const bank = rows.filter((row) => row.source === 'bank');
+    const reports = rows.filter((row) => row.source === 'report');
+    if (reports.length === 0) continue;
+    const bankIds = new Set(bank.map((row) => row.id));
+    // Plaid's own id first, then alike (one each), within each amount: pairUp compares every pair it's given.
+    const byExternal = new Map(bank.map((row) => [row.externalId, row]));
+    const pairs = new Map<(typeof rows)[number], (typeof rows)[number]>();
+    for (const report of reports) {
+      const twin = byExternal.get(report.externalId);
+      if (twin) pairs.set(report, twin);
+    }
+    const taken = new Set(pairs.values());
+    const byAmount = new Map<number, { bank: typeof rows; reports: typeof rows }>();
+    for (const row of bank) if (!taken.has(row)) (byAmount.get(row.amount) ?? byAmount.set(row.amount, { bank: [], reports: [] }).get(row.amount)!).bank.push(row);
+    for (const row of reports) if (!pairs.has(row)) byAmount.get(row.amount)?.reports.push(row);
+    for (const group of byAmount.values()) for (const [report, twin] of pairUp(group.bank, group.reports)) pairs.set(report, twin);
+    paired += pairs.size;
+    for (const report of reports) {
+      const twin = pairs.get(report);
+      // Paired, or no longer paired with Plaid's (one removed or changed); one replaced by a file's stays so.
+      if (twin && report.replacedBy !== twin.id) statements.push(tenant.db.update(transactions).set({ replacedBy: twin.id }).where(tenant.scope(transactions, eq(transactions.id, report.id))));
+      else if (!twin && report.replacedBy !== null && bankIds.has(report.replacedBy)) statements.push(tenant.db.update(transactions).set({ replacedBy: null }).where(tenant.scope(transactions, eq(transactions.id, report.id))));
+    }
+    // Newly paired: once paired, a report's doesn't count, so nothing new lands on it.
+    for (const [report, twin] of pairs) {
+      if (report.replacedBy === twin.id) continue;
+      fresh.set(report, twin);
+      if (report.kind && !twin.kind) statements.push(tenant.db.update(transactions).set({ kind: report.kind }).where(tenant.scope(transactions, eq(transactions.id, twin.id), isNull(transactions.kind))));
+    }
+  }
+  statements.push(...(await movedTransfers(tenant, fresh)));
+  for (const ids of inChunks([...fresh.keys()].map((row) => row.id), 45)) {
+    statements.push(tenant.db.delete(transfers).where(tenant.scope(transfers, inArray(transfers.status, ['auto', 'suggested']), or(inArray(transfers.outId, ids), inArray(transfers.inId, ids)))));
   }
   if (statements.length > 0) await runAtomic(tenant.db, statements);
   return { paired };

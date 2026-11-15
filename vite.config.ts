@@ -23,6 +23,10 @@ export default defineConfig(({ mode }) => {
       react(),
       tailwindcss(),
       cloudflare({
+        // DEV_STATE_DIR: keep the local database (and other local state) there
+        // instead of .wrangler/state, to try things on an empty one. Apply its
+        // migrations with `wrangler d1 migrations apply wattle --local --persist-to <dir>`.
+        ...(process.env.DEV_STATE_DIR ? { persistState: { path: process.env.DEV_STATE_DIR } } : {}),
         // Deployment-specific values come from the environment at build time,
         // never the repo: wrangler.jsonc keeps a placeholder database id, and
         // scripts/deploy.mjs builds with D1_DATABASE_ID set. Local dev needs none.

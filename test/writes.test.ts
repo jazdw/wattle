@@ -15,12 +15,15 @@ const REVIEWED: Record<string, Record<string, string>> = {
     transfers: 'the pairing: automatic and suggested ones on transactions that no longer count deleted (matching redoes them), and ones you decided moved to the paired import row unless it has its own; in one batch',
   },
   'server/services/sync.ts': {
-    connections: 'connection lease; status via statusStatement (newest wins)',
+    connections: "connection lease; status via statusStatement (newest wins); the bank feed and cursor in the sync pass batch; re-linking clears a consent-needed feed",
     accounts: 'connection lease, in the sync pass batch',
     holdings: 'connection lease, in the sync pass batch',
     transactions: "connection lease, in the sync pass batch; insert-or-ignore by (account, source, Plaid's id), and an import's rows from the first of Plaid's on deleted in the same batch",
     securities: 'connection lease; new ones get derived ids (shared across connections)',
     transactionRanges: "connection lease, in the sync pass batch (a complete fetch's days, via coverage.ts rangeStatements); hiding an account deletes its Plaid ranges with its Plaid transactions",
+  },
+  'server/services/bankTransactions.ts': {
+    transactions: "connection lease, in the sync pass batch with the new cursor (all applied or neither); upserts by (account, source 'bank', Plaid's id) setting only Plaid's columns (a kind you set and replaced_by stay); Plaid's removed ones deleted by id; safe to repeat (a cleared cursor re-reads everything)",
   },
   'server/services/coverage.ts': {
     transactionRanges:
@@ -50,7 +53,7 @@ const REVIEWED: Record<string, Record<string, string>> = {
     plaidWebhooks: 'one insert with a fresh id per verified webhook',
   },
   'server/routes/accounts.ts': {
-    connections: 'accounts chosen: clears only the new-accounts notice, and only one from before the request (single conditional update; nothing else writes it but the webhook)',
+    connections: "accounts chosen: clears only the new-accounts notice, and only one from before the request (single conditional update; nothing else writes it but the webhook); un-hiding an account clears the login's bank cursor under the connection lease, atomic with the account",
     accounts: 'create: atomic; rename/owner/category: single update; hide: connection + snapshot leases; delete: account lease (manual) or connection + snapshot leases, re-checked as no longer reported (linked)',
     accountDaily: 'hide/purge: connection + snapshot leases',
     holdingDaily: 'hide/purge: connection + snapshot leases',

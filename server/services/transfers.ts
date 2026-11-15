@@ -33,7 +33,7 @@ import { inChunks, runAtomic } from '../db/batch';
 import { accounts, jobs, securities, transactions, transfers } from '../db/schema';
 import type { Tenant } from '../db/tenant';
 import type { Deps } from '../ports';
-import { counted, pairImported } from './importedRecord';
+import { counted, pairBank, pairImported } from './importedRecord';
 import { enqueue, type JobContext } from './jobRunner';
 import { isCashSecurity } from './valuation';
 
@@ -77,6 +77,8 @@ export async function moneyMoves(tenant: Tenant): Promise<MoneyMove[]> {
       quantity: transactions.quantity,
       description: transactions.description,
       memo: transactions.memo,
+      plaidCategory: transactions.plaidCategory,
+      plaidCategoryDetailed: transactions.plaidCategoryDetailed,
       institution: accounts.institutionName,
       accountType: accounts.type,
       mask: accounts.mask,
@@ -153,7 +155,8 @@ export function namesAnother(move: MoneyMove, other: MoneyMove, institutions: st
 
 /** Pair each transfer it can (see the top): linked when there's only one way to, suggested when there's more. */
 export async function matchTransfers(deps: Deps, tenant: Tenant): Promise<{ auto: number; suggested: number }> {
-  // Imported transactions first paired with the institution's, which then don't count (./importedRecord).
+  // Bank reports' transactions paired with Plaid's, then imported ones with the institution's, which then don't count (./importedRecord).
+  await pairBank(tenant);
   await pairImported(tenant);
   const existing = await tenant.db.select().from(transfers).where(tenant.scope(transfers));
   const all = await moneyMoves(tenant);

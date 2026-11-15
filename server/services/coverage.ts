@@ -6,7 +6,8 @@
  *
  * A day without transactions leaves no row, so the days a source covered are
  * recorded where its transactions are written (transaction_ranges, through
- * rangeStatements): an import, a bank report, a complete Plaid fetch.
+ * rangeStatements): an import, a bank report, a complete Plaid investment
+ * fetch, Plaid's bank transactions (./bankTransactions).
  */
 import { asc, count, eq, gte, inArray, lte } from 'drizzle-orm';
 import type { BatchItem } from 'drizzle-orm/batch';
@@ -21,7 +22,7 @@ import { counted } from './importedRecord';
 export const UNCHANGED_DAYS = 7;
 
 const BALANCE_SOURCES: Record<string, CoverageSource> = { import: 'files', snapshot: 'bank', rebuilt: 'bank', manual: 'you' };
-const TRANSACTION_SOURCES: Record<string, CoverageSource> = { import: 'files', report: 'bank', plaid: 'bank' };
+const TRANSACTION_SOURCES: Record<string, CoverageSource> = { import: 'files', report: 'bank', plaid: 'bank', bank: 'bank' };
 
 type TransactionSource = (typeof SOURCES)[number];
 

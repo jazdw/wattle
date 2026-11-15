@@ -141,9 +141,10 @@ plaidRoutes.post('/webhook', async (c) => {
   const setStatus = (status: 'login_required' | 'error', errorCode: string | null) =>
     record(statusStatement(tenant, connection.id, { status, errorCode }, observedAt));
 
-  // A sync job (which also redoes today's snapshot), fetching only the
-  // investment data the webhook says changed (each a billed Investments
-  // call). A repeat of the same webhook within a minute is the same job.
+  // A sync job (which also redoes today's snapshot, and fetches any new bank
+  // transactions), fetching only the investment data the webhook says
+  // changed (each an Investments call). A repeat of the same webhook within
+  // a minute is the same job.
   const sync = (investments: InvestmentFetch) =>
     enqueue(deps, tenant, [
       {
@@ -165,6 +166,13 @@ plaidRoutes.post('/webhook', async (c) => {
       break;
     case 'ITEM:LOGIN_REPAIRED':
       await sync('all');
+      break;
+    // New or changed bank transactions (/transactions/sync): balances and
+    // bank transactions, without spending Investments calls. The older
+    // TRANSACTIONS codes (DEFAULT_UPDATE and the like) say the same and are
+    // left out.
+    case 'TRANSACTIONS:SYNC_UPDATES_AVAILABLE':
+      await sync('none');
       break;
     // The sync collects the report (or records Plaid's failure to build it)
     // under the connection's lease; no investment data needed.

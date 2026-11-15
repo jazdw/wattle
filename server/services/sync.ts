@@ -1,6 +1,6 @@
 /**
- * Aggregator connections: linking, syncing balances/holdings/investment
- * transactions, and error states. Data for hidden accounts is dropped here —
+ * Aggregator connections: linking, syncing balances, holdings, investment
+ * and bank transactions (./bankTransactions), and error states. Data for hidden accounts is dropped here —
  * it is never written.
  */
 import { eq, inArray, isNotNull, isNull, lte, ne, notInArray, or, sql } from 'drizzle-orm';
@@ -17,8 +17,10 @@ import type { Tenant } from '../db/tenant';
 import type { Deps } from '../ports';
 import { closeInterruptedRuns, SyncRun, type SyncTrigger } from './activity';
 import { queueReportCollection } from './assetReports';
+import { fetchBankTransactions, fetchesBank, planBankTransactions, type BankFetch } from './bankTransactions';
 import { rangeStatements } from './coverage';
 import { queueDueHistory } from './backfill';
+import { enqueue } from './jobRunner';
 import { BusyError, connectionLease, holdWhile, Lease, snapshotLease } from './lease';
 import { decryptToken, encryptToken, loadTokenKeys, tokenAad } from './crypto';
 import { stableId } from './ids';
@@ -111,6 +113,8 @@ export async function linkConnection(
           // Only ever gained: a product isn't removed from an Item.
           ...(products.investments ? { hasInvestments: true } : {}),
           ...(products.assets ? { hasBalanceHistory: true } : {}),
+          // Signing in again may have granted Transactions: try it again.
+          bankFeed: sql`case when ${connections.bankFeed} = 'consent' then null else ${connections.bankFeed} end`,
         })
         .where(tenant.scope(connections, eq(connections.id, id), ne(connections.status, 'removed'))),
       run.statement(),
@@ -165,6 +169,8 @@ export interface SyncOptions {
   minIntervalMs?: number;
   /** Which investment data to fetch (default all). */
   investments?: InvestmentFetch;
+  /** Said in the sync log (a pass carrying on with bank transactions). */
+  note?: string;
 }
 
 /**
@@ -274,7 +280,7 @@ export async function syncConnection(
       );
       return { ...NOTHING, status: connection.status, skipped: true };
     }
-    return syncPass(deps, tenant, connection.id, trigger, lease, lease.abandoned ? "The previous run didn't finish (its lease expired)." : null, options.investments ?? 'all');
+    return syncPass(deps, tenant, connection.id, trigger, lease, [lease.abandoned && "The previous run didn't finish (its lease expired).", options.note].filter(Boolean).join(' ') || null, options.investments ?? 'all');
   });
 }
 
@@ -337,7 +343,7 @@ async function syncPass(
     let fetched: Fetched;
     const fetchedAt = deps.now().getTime();
     try {
-      fetched = await fetchFromPlaid(deps, run.plaid(), connection, parts);
+      fetched = await fetchFromPlaid(deps, run.plaid(), connection, parts, fetchesBank(connection, trigger));
     } catch (error) {
       const mapped = statusForError(error);
       if (!mapped) throw error;
@@ -359,8 +365,10 @@ async function syncPass(
       if (fetched.investments.holdings) holdingCount = await planHoldings(deps, tenant, fetched.investments.holdings, fetched.investments.securities, securityIds, visible, run, writes);
       ({ planned: transactionCount, added: newTransactions } = await planTransactions(deps, tenant, connection, fetched.investments.transactions, fetched.investments.transactionsComplete, securityIds, visible, run, writes));
     }
+    const bank = fetched.bank ? await planBankTransactions(deps, tenant, connection, fetched.bank, visible, run, writes) : null;
     writes.push(
       setConnection({
+        ...bank?.connection,
         lastSyncedAt: deps.now().getTime(),
         ...(fetched.investments?.holdings ? { holdingsFetchedAt: fetchedAt } : {}),
         ...(fetched.investments?.transactionsComplete ? { txnSyncedThrough: marketDate(deps.now()), transactionsFetchedAt: fetchedAt } : {}),
@@ -372,8 +380,17 @@ async function syncPass(
     );
     await lease.renew();
     await runAtomic(tenant.db, writes);
-    // New transactions may be one side of a transfer between your accounts.
-    if (newTransactions > 0) await queueMatching(deps, tenant, `sync:${connection.id}:${fetchedAt}`);
+    // New transactions may be one side of a transfer between your accounts (or a file's, or a report's, twin).
+    if (newTransactions > 0 || (bank?.changed ?? 0) > 0) await queueMatching(deps, tenant, `sync:${connection.id}:${fetchedAt}`);
+    // Plaid has more bank transactions than a pass takes: carry on in a job of
+    // its own (its own invocation, so its own D1 queries), balances and bank
+    // transactions only, once this sync has let go of the connection. Known by
+    // the cursor it carries on from, so the same work is queued once.
+    if (fetched.bank?.outcome === 'changes' && fetched.bank.more) {
+      await enqueue(deps, tenant, [
+        { id: `bank-more:${connection.id}:${fetched.bank.cursor}`, type: 'sync', payload: { connectionId: connection.id, trigger, investments: 'none', continuation: true }, connectionId: connection.id },
+      ]);
+    }
     return { accounts: fetched.accounts.length, holdings: holdingCount, transactions: transactionCount, status: 'ok' };
   } catch (error) {
     await run.failed(error);
@@ -393,17 +410,25 @@ interface Fetched {
     /** False when not fetched this time, or Plaid is still fetching history (right after linking). */
     transactionsComplete: boolean;
   } | null;
+  /** Bank, card and loan transactions (./bankTransactions); null for a login Plaid refused them for. */
+  bank: BankFetch | null;
 }
 
-async function fetchFromPlaid(deps: Deps, plaid: PlaidApi, connection: ConnectionRow, parts: { holdings: boolean; transactions: boolean }): Promise<Fetched> {
+async function fetchFromPlaid(deps: Deps, plaid: PlaidApi, connection: ConnectionRow, parts: { holdings: boolean; transactions: boolean }, withBank: boolean): Promise<Fetched> {
   const accessToken = await accessTokenFor(deps, connection);
   const plaidAccounts = await plaid.getAccounts(accessToken);
-  if (!connection.hasInvestments || (!parts.holdings && !parts.transactions)) return { accounts: plaidAccounts, investments: null };
+  const investments = await fetchInvestments(deps, plaid, accessToken, connection, parts);
+  const bank = withBank ? await fetchBankTransactions(plaid, accessToken, connection) : null;
+  return { accounts: plaidAccounts, investments, bank };
+}
+
+async function fetchInvestments(deps: Deps, plaid: PlaidApi, accessToken: string, connection: ConnectionRow, parts: { holdings: boolean; transactions: boolean }): Promise<Fetched['investments']> {
+  if (!connection.hasInvestments || (!parts.holdings && !parts.transactions)) return null;
 
   const holdingsResult = parts.holdings ? await plaid.getHoldings(accessToken) : null;
   const allSecurities = new Map((holdingsResult?.securities ?? []).map((security) => [security.security_id, security]));
   if (!parts.transactions) {
-    return { accounts: plaidAccounts, investments: { holdings: holdingsResult!.holdings, securities: [...allSecurities.values()], transactions: [], transactionsComplete: false } };
+    return { holdings: holdingsResult!.holdings, securities: [...allSecurities.values()], transactions: [], transactionsComplete: false };
   }
   const today = marketDate(deps.now());
   // Always the whole two years Plaid can have: the history Plaid holds grows
@@ -428,14 +453,11 @@ async function fetchFromPlaid(deps: Deps, plaid: PlaidApi, connection: Connectio
     offset += page.investment_transactions.length;
     if (page.investment_transactions.length === 0 || offset >= page.total_investment_transactions) break;
   }
-  return {
-    accounts: plaidAccounts,
-    investments: { holdings: holdingsResult?.holdings ?? null, securities: [...allSecurities.values()], transactions, transactionsComplete },
-  };
+  return { holdings: holdingsResult?.holdings ?? null, securities: [...allSecurities.values()], transactions, transactionsComplete };
 }
 
 /** Visible accounts of a connection: Plaid account_id → Wattle account. */
-type VisibleAccounts = Map<string, { id: string; name: string; currency: string; type: string }>;
+export type VisibleAccounts = Map<string, { id: string; name: string; currency: string; type: string }>;
 
 /**
  * Accounts reported again under a new account_id: Plaid gives an account
@@ -986,7 +1008,7 @@ export async function removeConnection(
             .set({ source: 'manual', ...(atPlaid ? { connectionId: null, externalId: null } : {}) })
             .where(tenant.scope(accounts, eq(accounts.connectionId, connection.id))),
       // A removed login is kept (without its token) so the Items-used count
-      // stays accurate: on Plaid's Trial plan it still uses one of the 10 slots.
+      // stays accurate: on Plaid's Trial plan it still uses one of the 20 slots.
       tenant.db
         .update(connections)
         .set(atPlaid ? { status: 'removed', accessTokenEnc: '', assetReportTokenEnc: null, assetReportId: null } : { status: 'disconnected' })
@@ -1049,7 +1071,7 @@ export async function activeConnections(tenant: Tenant): Promise<ConnectionRow[]
 export function purgeStatements(tenant: Tenant, accountId: string): BatchItem<'sqlite'>[] {
   return [
     tenant.db.delete(holdings).where(tenant.scope(holdings, eq(holdings.accountId, accountId))),
-    tenant.db.delete(transactions).where(tenant.scope(transactions, eq(transactions.accountId, accountId), eq(transactions.source, 'plaid'))),
-    tenant.db.delete(transactionRanges).where(tenant.scope(transactionRanges, eq(transactionRanges.accountId, accountId), eq(transactionRanges.source, 'plaid'))),
+    tenant.db.delete(transactions).where(tenant.scope(transactions, eq(transactions.accountId, accountId), inArray(transactions.source, ['plaid', 'bank']))),
+    tenant.db.delete(transactionRanges).where(tenant.scope(transactionRanges, eq(transactionRanges.accountId, accountId), inArray(transactionRanges.source, ['plaid', 'bank']))),
   ];
 }

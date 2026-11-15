@@ -14,6 +14,7 @@ import { accounts, transactions, transfers } from '../db/schema';
 import type { Tenant } from '../db/tenant';
 import type { AppEnv } from '../env';
 import { HttpError, notFound, readBody } from '../lib/http';
+import { withPlaidDetails } from '../services/importedRecord';
 import { listTransactions } from '../services/transactionList';
 import { linkable, moneyMoves, pairsWithMoves, type MoneyMove } from '../services/transfers';
 
@@ -125,6 +126,7 @@ async function linkedIds(tenant: Tenant): Promise<Set<string>> {
 /** Transactions as transfer sides: with their account and description. */
 async function sides(tenant: Tenant, moves: MoneyMove[]): Promise<TransferSide[]> {
   const found: TransferSide[] = [];
+  const plaid = withPlaidDetails();
   for (const chunk of inChunks([...new Set(moves.map((move) => move.id))])) {
     const rows = await tenant.db
       .select({
@@ -136,11 +138,13 @@ async function sides(tenant: Tenant, moves: MoneyMove[]): Promise<TransferSide[]
         date: transactions.date,
         amount: transactions.amount,
         currency: transactions.currency,
-        description: transactions.description,
-        memo: transactions.memo,
+        // Plaid's description where a file's has a twin from Plaid (services/importedRecord.ts).
+        description: plaid.columns.description,
+        memo: plaid.columns.memo,
       })
       .from(transactions)
       .innerJoin(accounts, and(eq(accounts.id, transactions.accountId), eq(accounts.householdId, transactions.householdId)))
+      .leftJoin(plaid.twin, plaid.on)
       .where(tenant.scope(transactions, inArray(transactions.id, chunk)));
     found.push(...rows.map(({ memo, ...row }) => ({ ...row, description: fullDescription(row.description, memo), currency: row.currency as Currency })));
   }

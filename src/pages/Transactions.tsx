@@ -5,7 +5,7 @@ import { useSearchParams } from 'react-router-dom';
 import { KIND_WORDS, TRANSACTION_KINDS, TRANSFER_LINK_DAYS, type TransactionKind } from '../../shared/transactionKinds';
 import { accountLabel } from '../../shared/accounts';
 import { holdingLabel } from '../../shared/holdings';
-import { fullDescription } from '../../shared/descriptions';
+import { categoryWords, fullDescription } from '../../shared/descriptions';
 import { fixedRangeStart } from '../../shared/ranges';
 import { addDays, marketDate } from '../../shared/dates';
 import type { Currency } from '../../shared/money';
@@ -24,6 +24,18 @@ import { ACCOUNT_TYPE_LABELS, ACCOUNT_TYPE_ORDER, changeClass, longDate, money, 
 
 /** A transaction's description and memo (a Quicken file's NAME and MEMO), joined to show. */
 const textOf = (entry: TransactionEntry) => fullDescription(entry.description, entry.memo);
+
+/** Plaid's details beneath the description: the file's own text where Plaid's is shown, then the merchant and the category in words. */
+function PlaidDetails({ entry }: { entry: TransactionEntry }) {
+  const category = categoryWords(entry.plaidCategory, entry.plaidCategoryDetailed);
+  const line = [entry.merchant, category].filter(Boolean).join(' — ');
+  return (
+    <>
+      {entry.fileDescription && <span className="block text-xs text-muted-foreground">{entry.fileDescription}</span>}
+      {line && <span className="block text-xs text-muted-foreground">{line}</span>}
+    </>
+  );
+}
 
 /** The institution's own name for the type, when it says more than the kind does. */
 function ownType(entry: TransactionEntry): string | null {
@@ -494,7 +506,10 @@ export function Transactions() {
                             {textOf(entry) && <span className="ml-2 text-xs text-muted-foreground">{textOf(entry)}</span>}
                           </>
                         ) : (
-                          (textOf(entry) ?? '—')
+                          <>
+                            {textOf(entry) ?? '—'}
+                            <PlaidDetails entry={entry} />
+                          </>
                         )}
                         {/* The shares and price columns, on a phone. */}
                         {shares && entry.quantity ? (

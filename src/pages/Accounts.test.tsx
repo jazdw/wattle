@@ -90,6 +90,43 @@ describe('Accounts page', () => {
     expect(within(manual).getByText('Example Super')).toBeInTheDocument();
   });
 
+  it("says what a login's transactions are doing: loading, on (its balances then refresh), or needing the institution's consent", async () => {
+    const withFeed = (bankFeed: 'loading' | 'on' | 'consent') =>
+      server.use(
+        http.get('*/api/connections', () =>
+          HttpResponse.json({
+            ...CONNECTIONS,
+            connections: CONNECTIONS.connections.map((connection) => (connection.id === 'c-northwind' ? { ...connection, bankFeed, refreshesBalances: bankFeed !== 'consent' } : connection)),
+          }),
+        ),
+      );
+    withFeed('loading');
+    const { unmount } = renderPage(<Accounts />);
+    await screen.findByText('Travel Card');
+    expect(within(card('Northwind')).getByText('Loading transactions…')).toBeInTheDocument();
+    expect(within(card('Northwind')).getByText(/Transactions and balance history/)).toBeInTheDocument();
+    expect(within(card('Northwind')).queryByText(/Plaid doesn't refresh/)).not.toBeInTheDocument();
+    unmount();
+
+    withFeed('on');
+    const second = renderPage(<Accounts />);
+    await screen.findByText('Travel Card');
+    expect(within(card('Northwind')).queryByText('Loading transactions…')).not.toBeInTheDocument();
+    expect(within(card('Northwind')).queryByText(/Plaid doesn't refresh/)).not.toBeInTheDocument();
+    second.unmount();
+
+    withFeed('consent');
+    const { user } = renderPage(<Accounts />);
+    await screen.findByText('Travel Card');
+    const northwind = card('Northwind');
+    expect(within(northwind).getByText(/hasn't given Plaid this login's transactions/)).toBeInTheDocument();
+    expect(within(northwind).getByText(/Balance history/)).toBeInTheDocument();
+    server.use(http.post('*/api/plaid/link-token', () => HttpResponse.json({ linkToken: 'link-update' })));
+    await user.click(within(northwind).getByRole('button', { name: 'Allow transactions' }));
+    await expect.poll(() => plaidLink.open.mock.calls.length).toBe(1);
+    expect(sent('POST /api/plaid/link-token')[0].body).toEqual({ kind: 'account', connectionId: 'c-northwind' });
+  });
+
   it('syncs and disconnects a connection (with confirmation)', async () => {
     const { user } = renderPage(<Accounts />);
     await screen.findByText('Travel Card');
@@ -320,7 +357,7 @@ describe('Accounts page', () => {
   it('counts used Plaid Items in production', async () => {
     server.use(http.get('*/api/connections', () => HttpResponse.json({ ...CONNECTIONS, plaidEnv: 'production', itemsUsed: 7 })));
     renderPage(<Accounts />);
-    expect(await screen.findByText(/Plaid Items used: 7 of 10/)).toBeInTheDocument();
+    expect(await screen.findByText(/Plaid Items used: 7 of 20/)).toBeInTheDocument();
   });
 
   it("says under each account the days it has history for, and shows where each part came from when it's opened", async () => {

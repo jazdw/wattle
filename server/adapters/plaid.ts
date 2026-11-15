@@ -13,7 +13,9 @@ import type {
   InvestmentTransaction,
   Item,
   JWKPublicKey,
+  RemovedTransaction,
   Security,
+  Transaction,
 } from 'plaid';
 
 export type PlaidEnvironment = 'sandbox' | 'production';
@@ -57,7 +59,7 @@ export interface PlaidResponse {
 }
 
 /** The data calls whose responses are kept (plaid_responses). */
-export const RECORDED_ENDPOINTS = new Set(['/accounts/get', '/investments/holdings/get', '/investments/transactions/get', '/asset_report/get']);
+export const RECORDED_ENDPOINTS = new Set(['/accounts/get', '/investments/holdings/get', '/investments/transactions/get', '/transactions/sync', '/asset_report/get']);
 
 export type LinkKind = 'investments' | 'account';
 
@@ -86,6 +88,24 @@ export interface InvestmentsTransactionsPage {
   total_investment_transactions: number;
 }
 
+/**
+ * One page of /transactions/sync: what changed since the cursor sent (all
+ * the history Plaid has, from none), and the cursor to send next.
+ */
+export interface TransactionsSyncPage {
+  added: Transaction[];
+  modified: Transaction[];
+  removed: RemovedTransaction[];
+  /** Empty while Plaid has nothing for the login yet. */
+  next_cursor: string;
+  has_more: boolean;
+  /** NOT_READY, INITIAL_UPDATE_COMPLETE (about 30 days so far) or HISTORICAL_UPDATE_COMPLETE. */
+  transactions_update_status?: string;
+}
+
+/** The most bank history Plaid fetches (/transactions/sync's days_requested; its default is 90). */
+export const BANK_HISTORY_DAYS = 730;
+
 export interface PlaidApi {
   readonly env: PlaidEnvironment;
   /** The same client, also appending every call it makes to `log`, and the data calls' responses to `received`. */
@@ -102,6 +122,8 @@ export interface PlaidApi {
     end: string,
     offset: number,
   ): Promise<InvestmentsTransactionsPage>;
+  /** Bank, card and loan transactions changed since `cursor` (null: from the start). The first call adds Transactions to the login. */
+  syncTransactions(accessToken: string, cursor: string | null): Promise<TransactionsSyncPage>;
   createAssetReport(
     accessToken: string,
     daysRequested: number,
@@ -137,6 +159,7 @@ export const PLAID_ENDPOINTS = new Set([
   '/accounts/get',
   '/investments/holdings/get',
   '/investments/transactions/get',
+  '/transactions/sync',
   '/asset_report/create',
   '/asset_report/get',
   '/asset_report/remove',
@@ -162,16 +185,17 @@ export function scrubPlaidResponse<T>(value: T): T {
 }
 const PRODUCTS: Record<LinkKind, { products: string[]; ifSupported?: string[]; consented: string[] }> = {
   // Any login: up to two years of daily balance history (Assets), plus
-  // holdings wherever it has investment accounts. No transactions are stored.
+  // holdings wherever it has investment accounts. Transactions is added at
+  // the first sync (services/bankTransactions.ts).
   account: { products: ['assets'], ifSupported: ['investments'], consented: LATER },
   // Fallback for institutions without Assets support (some 401(k) providers).
   investments: { products: ['investments'], consented: LATER },
 };
 
 /** Which of the products Wattle uses an Item has (from /item/get). */
-export function itemProducts(item: Pick<Item, 'products' | 'billed_products'>): { investments: boolean; assets: boolean } {
+export function itemProducts(item: Pick<Item, 'products' | 'billed_products'>): { investments: boolean; assets: boolean; transactions: boolean } {
   const all = new Set<string>([...(item.products ?? []), ...(item.billed_products ?? [])]);
-  return { investments: all.has('investments'), assets: all.has('assets') };
+  return { investments: all.has('investments'), assets: all.has('assets'), transactions: all.has('transactions') };
 }
 
 export function createPlaidClient(config: PlaidConfig, log?: PlaidCall[], received?: PlaidResponse[]): PlaidApi {
@@ -219,6 +243,8 @@ export function createPlaidClient(config: PlaidConfig, log?: PlaidCall[], receiv
       if (options.accessToken) {
         body.access_token = options.accessToken;
         if (options.chooseAccounts) body.update = { account_selection_enabled: true };
+        // An institution signing in on its own site may need Transactions granted on its consent screen.
+        body.additional_consented_products = LATER;
       } else {
         const products = PRODUCTS[options.kind];
         body.products = products.products;
@@ -268,6 +294,17 @@ export function createPlaidClient(config: PlaidConfig, log?: PlaidCall[], receiv
         start_date: start,
         end_date: end,
         options: { count: 500, offset },
+      });
+    },
+
+    async syncTransactions(accessToken, cursor) {
+      return call<TransactionsSyncPage>('/transactions/sync', {
+        access_token: accessToken,
+        ...(cursor ? { cursor } : {}),
+        // 250 a page keeps a kept response well under plaid_responses' size cap.
+        count: 250,
+        // days_requested only counts on the call that adds the product; fixed after that.
+        options: { include_original_description: true, days_requested: BANK_HISTORY_DAYS, personal_finance_category_version: 'v2' },
       });
     },
 

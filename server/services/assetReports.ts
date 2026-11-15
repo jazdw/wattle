@@ -341,6 +341,8 @@ export async function collectReport({ deps, tenant, job, renew }: JobContext): P
       ]),
     );
     await removeReport(run, fetched.token);
+    // The report's transactions may be one side of a transfer between your accounts (as after the large path's finish).
+    await queueMatching(deps, tenant, `report:${collect.runId}`);
     return { days };
   }
   // Large: one job per account, then the finish.

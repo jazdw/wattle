@@ -21,6 +21,10 @@ const entry = (id: string, date: string, extra: Partial<TransactionEntry>): Tran
   transfer: null,
   description: null,
   memo: null,
+  fileDescription: null,
+  plaidCategory: null,
+  plaidCategoryDetailed: null,
+  merchant: null,
   ticker: null,
   security: null,
   quantity: null,
@@ -74,6 +78,24 @@ describe('Transactions', () => {
     await userEvent.selectOptions(screen.getByLabelText('Account'), 'chk');
     expect(await screen.findByText('Interest')).toBeInTheDocument();
     expect(screen.getByLabelText(/^Type of Interest/)).toHaveDisplayValue('Dividend or interest');
+  });
+
+  it("shows Plaid's merchant and category under a bank transaction, and a file's own text under Plaid's description", async () => {
+    const feed: TransactionsResponse = {
+      ...CHECKING,
+      matched: 2,
+      transactions: [
+        entry('b2', '2026-10-02', { source: 'bank', kind: 'withdrawal', automatic: 'withdrawal', description: 'EXAMPLE GROCER #123 ANYTOWN', merchant: 'Example Grocer', plaidCategory: 'FOOD_AND_DRINK', plaidCategoryDetailed: 'FOOD_AND_DRINK_GROCERIES', amount: 42_50 }),
+        entry('i1', '2026-10-01', { source: 'import', kind: 'withdrawal', automatic: 'withdrawal', description: 'ONLINE TRANSFER TO SAVINGS 1234567890', fileDescription: 'ONLINE TRANSFER', plaidCategory: 'TRANSFER_OUT', plaidCategoryDetailed: 'TRANSFER_OUT_SAVINGS', amount: 100_00 }),
+      ],
+    };
+    server.use(http.get('*/api/accounts/chk/transactions', () => HttpResponse.json(feed)));
+    renderPage(<Transactions />, { route: '/?account=chk' });
+    expect(await screen.findByText('EXAMPLE GROCER #123 ANYTOWN')).toBeInTheDocument();
+    const rows = screen.getAllByRole('row').slice(1);
+    expect(within(rows[0]).getByText('Example Grocer — Food and drink · Groceries')).toBeInTheDocument();
+    expect(within(rows[1]).getByText('ONLINE TRANSFER')).toBeInTheDocument();
+    expect(within(rows[1]).getByText('Transfer out · Savings')).toBeInTheDocument();
   });
 
   it('sets a type you choose, and back to automatic', async () => {

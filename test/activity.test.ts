@@ -45,7 +45,7 @@ describe('sync log', () => {
     const runs = await activity();
     const sync = runs.find((run) => run.action === 'sync')!;
     expect(sync).toMatchObject({ trigger: 'link', outcome: 'ok', errorCode: null, truncated: false });
-    expect(sync.plaidCalls.map((call) => call.endpoint)).toEqual(['getAccounts', 'getHoldings', 'getInvestmentTransactions']);
+    expect(sync.plaidCalls.map((call) => call.endpoint)).toEqual(['getAccounts', 'getHoldings', 'getInvestmentTransactions', 'syncTransactions']);
     expect(sync.plaidCalls.every((call) => call.requestId?.startsWith('req-'))).toBe(true);
     expect(sync.counts).toMatchObject({ accounts: 1, holdings: 2, transactions: 0 });
     expect(sync.changes).toEqual(

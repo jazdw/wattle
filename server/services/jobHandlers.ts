@@ -9,7 +9,7 @@ import { finishNightly } from './jobs';
 import { collectReport, collectReportAccount, finishReport, reportFailed } from './assetReports';
 import { finishHistory, historyBlock, historyFailed, historyPrices, planHistory } from './backfill';
 import { importBlock, importReprice, queueImportRepricing } from './holdingsImport';
-import { runJobWith, runNextWith, type FailureHandlers, type JobHandler, type JobHandlers, type JobOutcome } from './jobRunner';
+import { RetryLater, runJobWith, runNextWith, type FailureHandlers, type JobHandler, type JobHandlers, type JobOutcome } from './jobRunner';
 import { typeHandEnteredSecurities } from './securityTypes';
 import { snapshotHousehold } from './snapshots';
 import { syncConnection, type InvestmentFetch } from './sync';
@@ -22,9 +22,14 @@ import { matchTransfersJob } from './transfers';
  * redone here.
  */
 const sync: JobHandler = async ({ deps, tenant, job }) => {
-  const { connectionId, trigger, investments } = job.payload as { connectionId: string; trigger: SyncTrigger; investments?: InvestmentFetch };
+  const { connectionId, trigger, investments, continuation } = job.payload as { connectionId: string; trigger: SyncTrigger; investments?: InvestmentFetch; continuation?: boolean };
   // Nightly: only investment data not already fetched since the market closed.
-  const result = await syncConnection(deps, tenant, connectionId, trigger, { investments: investments ?? (trigger === 'nightly' ? 'since-close' : 'all') });
+  const result = await syncConnection(deps, tenant, connectionId, trigger, {
+    investments: investments ?? (trigger === 'nightly' ? 'since-close' : 'all'),
+    ...(continuation ? { note: 'Carried on fetching bank transactions.' } : {}),
+  });
+  // Carrying on with Plaid's bank transactions: the connection was still busy (the sync that queued this, or another), so wait for it.
+  if (continuation && result.skipped) throw new RetryLater(30, 'The connection is busy; carrying on with bank transactions after it.');
   if (trigger !== 'nightly') await snapshotHousehold(deps, tenant, marketDate(deps.now()));
   return { status: result.status, accounts: result.accounts, holdings: result.holdings, transactions: result.transactions, ...(result.skipped ? { skipped: true } : {}) };
 };

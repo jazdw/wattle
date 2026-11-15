@@ -79,7 +79,7 @@ interface StoredTransaction {
   id: string;
   accountId: string;
   date: string;
-  source: 'plaid' | 'report' | 'import';
+  source: 'plaid' | 'bank' | 'report' | 'import';
   kind: TransactionKind | null;
   type: string | null;
   subtype: string | null;
@@ -87,6 +87,8 @@ interface StoredTransaction {
   quantity: number;
   price: number | null;
   description: string | null;
+  plaidCategory: string | null;
+  plaidCategoryDetailed: string | null;
   currency: string;
   securityId: string | null;
 }
@@ -116,6 +118,8 @@ export async function breakdown(tenant: Tenant, input: BreakdownInput): Promise<
           quantity: transactions.quantity,
           price: transactions.price,
           description: transactions.description,
+          plaidCategory: transactions.plaidCategory,
+          plaidCategoryDetailed: transactions.plaidCategoryDetailed,
           currency: transactions.currency,
           securityId: transactions.securityId,
         })

@@ -598,7 +598,8 @@ describe('history backfill', () => {
   });
 
   it('a login linked with Link account but no investment accounts has balance history only', async () => {
-    const plaid = fakePlaid({ accounts: [account('chk', 'depository', 1000)], historicalBalances: { chk: [{ date: '2026-10-01', current: 900 }] }, itemProducts: ['assets'] });
+    // An institution without Plaid Transactions either.
+    const plaid = fakePlaid({ accounts: [account('chk', 'depository', 1000)], historicalBalances: { chk: [{ date: '2026-10-01', current: 900 }] }, itemProducts: ['assets'], bankPages: ['PRODUCTS_NOT_SUPPORTED'] });
     const deps = await createTestDeps({ plaid });
     const home = await createHousehold(deps, 'Home', 'me@example.com');
     await client(deps, home.cookie)('/api/plaid/exchange', { method: 'POST', json: { publicToken: 'p', kind: 'account' } });
@@ -607,7 +608,7 @@ describe('history backfill', () => {
     expect(connection).toMatchObject({ hasInvestments: false, hasBalanceHistory: true });
     expect(plaid.state.calls).not.toContain('holdings');
     // No product Plaid updates daily: its balances stay as they were when linked, and the login says so.
-    expect((await client(deps, home.cookie)('/api/connections')).body.connections[0]).toMatchObject({ refreshesBalances: false });
+    expect((await client(deps, home.cookie)('/api/connections')).body.connections[0]).toMatchObject({ refreshesBalances: false, bankFeed: 'unsupported' });
   });
 
   it('skips balance history where the institution does not support Assets', async () => {
@@ -1029,7 +1030,7 @@ describe("a fund's close that reaches the price provider late", () => {
     const { deps } = await fund({ priceDatetime: '2026-10-08T22:00:00Z' });
     const [run] = await deps.db.select().from(schema.syncRuns).where(eq(schema.syncRuns.action, 'sync'));
     const responses = await deps.db.select().from(schema.plaidResponses);
-    expect(responses.map((row) => row.endpoint).sort()).toEqual(['/accounts/get', '/investments/holdings/get', '/investments/transactions/get']);
+    expect(responses.map((row) => row.endpoint).sort()).toEqual(['/accounts/get', '/investments/holdings/get', '/investments/transactions/get', '/transactions/sync']);
     expect(responses.every((row) => row.runId === run.id && row.requestId !== null)).toBe(true);
     const holdingsBody = JSON.parse(responses.find((row) => row.endpoint === '/investments/holdings/get')!.body);
     expect(holdingsBody.holdings[0]).toMatchObject({ institution_price: 101, institution_price_as_of: '2026-10-07', institution_price_datetime: '2026-10-08T22:00:00Z' });

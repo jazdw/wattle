@@ -77,7 +77,7 @@ describe('Plaid client', () => {
 
   it('only calls the endpoints it allows: none that return account numbers', async () => {
     const { PLAID_ENDPOINTS } = await import('./plaid');
-    for (const endpoint of ['/auth/get', '/liabilities/get', '/identity/get', '/processor/token/create', '/transactions/sync']) {
+    for (const endpoint of ['/auth/get', '/liabilities/get', '/identity/get', '/processor/token/create']) {
       expect(PLAID_ENDPOINTS.has(endpoint)).toBe(false);
     }
     const requests = stubFetch(() => Response.json({}));
@@ -87,6 +87,7 @@ describe('Plaid client', () => {
       plaid.getAccounts('a'),
       plaid.getHoldings('a'),
       plaid.getInvestmentTransactions('a', '2026-01-01', '2026-02-01', 0),
+      plaid.syncTransactions('a', null),
       plaid.getAssetReport('t'),
       plaid.removeAssetReport('t'),
       plaid.removeItem('a'),
@@ -97,7 +98,7 @@ describe('Plaid client', () => {
       plaid.createLinkToken({ clientUserId: 'u', kind: 'account', webhook: null }),
     ]);
     for (const request of requests) expect(PLAID_ENDPOINTS.has(new URL(request.url).pathname)).toBe(true);
-    expect(requests.length).toBeGreaterThanOrEqual(12);
+    expect(requests.length).toBeGreaterThanOrEqual(13);
   });
 
   it('maps API errors to PlaidApiError', async () => {
