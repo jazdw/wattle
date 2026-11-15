@@ -29,11 +29,11 @@ import type { BatchItem } from 'drizzle-orm/batch';
 import { fullDescription } from '../../shared/descriptions';
 import type { IsoDate } from '../../shared/dates';
 import { kindOf, TRANSFER_LINK_DAYS } from '../../shared/transactionKinds';
-import { inChunks, runAtomic } from '../db/batch';
+import { chunkRows, inChunks, runAtomic } from '../db/batch';
 import { accounts, jobs, securities, transactions, transfers } from '../db/schema';
 import type { Tenant } from '../db/tenant';
 import type { Deps } from '../ports';
-import { counted, pairBank, pairImported } from './importedRecord';
+import { counted, pairBank, pairImported, settleTransfers } from './importedRecord';
 import { enqueue, type JobContext } from './jobRunner';
 import { isCashSecurity } from './valuation';
 
@@ -158,6 +158,7 @@ export async function matchTransfers(deps: Deps, tenant: Tenant): Promise<{ auto
   // Bank reports' transactions paired with Plaid's, then imported ones with the institution's, which then don't count (./importedRecord).
   await pairBank(tenant);
   await pairImported(tenant);
+  await settleTransfers(tenant);
   const existing = await tenant.db.select().from(transfers).where(tenant.scope(transfers));
   const all = await moneyMoves(tenant);
   const everyId = new Map(all.map((move) => [move.id, move]));
@@ -207,13 +208,14 @@ export async function matchTransfers(deps: Deps, tenant: Tenant): Promise<{ auto
     ...inChunks(undone.filter((row) => !wanted.has(`${row.outId}|${row.inId}`)).map((row) => row.id)).map((ids) => tenant.db.delete(transfers).where(tenant.scope(transfers, inArray(transfers.id, ids)))),
     // Suggestions no longer wanted (a side linked elsewhere, or gone).
     ...inChunks(existing.filter((row) => row.status === 'suggested' && !wanted.has(`${row.outId}|${row.inId}`)).map((row) => row.id)).map((ids) => tenant.db.delete(transfers).where(tenant.scope(transfers, inArray(transfers.id, ids)))),
-    ...auto.map((pair) =>
+    // Many to a statement: a first matching can link hundreds.
+    ...chunkRows(transfers, auto.map((pair) => ({ id: crypto.randomUUID(), householdId: tenant.householdId, ...pair, status: 'auto' as const, createdAt: now }))).map((chunk) =>
       tenant.db
         .insert(transfers)
-        .values({ id: crypto.randomUUID(), householdId: tenant.householdId, ...pair, status: 'auto', createdAt: now })
+        .values(chunk)
         .onConflictDoUpdate({ target: [transfers.outId, transfers.inId], set: { status: 'auto' }, setWhere: eq(transfers.status, 'suggested') }),
     ),
-    ...suggested.map((pair) => tenant.db.insert(transfers).values({ id: crypto.randomUUID(), householdId: tenant.householdId, ...pair, status: 'suggested', createdAt: now }).onConflictDoNothing()),
+    ...chunkRows(transfers, suggested.map((pair) => ({ id: crypto.randomUUID(), householdId: tenant.householdId, ...pair, status: 'suggested' as const, createdAt: now }))).map((chunk) => tenant.db.insert(transfers).values(chunk).onConflictDoNothing()),
   ];
   if (statements.length > 0) await runAtomic(tenant.db, statements);
   return { auto: auto.length, suggested: suggested.length };

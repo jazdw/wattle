@@ -893,18 +893,18 @@ async function planTransactions(
   run: SyncRun,
   writes: BatchItem<'sqlite'>[],
 ): Promise<{ planned: number; added: number }> {
-  // Before the history is built, everything is new.
-  let added = plaidTransactions.filter((txn) => visibleAccounts.has(txn.account_id)).length;
+  // Those already stored: every fetch sends the whole two years again, and
+  // inserting them all (to be ignored) would spend D1 queries on nothing.
+  const known = new Set<string>();
+  for (const chunk of inChunks(plaidTransactions.map((txn) => txn.investment_transaction_id))) {
+    const rows = await tenant.db
+      .select({ externalId: transactions.externalId })
+      .from(transactions)
+      .where(tenant.scope(transactions, eq(transactions.source, 'plaid'), inArray(transactions.externalId, chunk)));
+    for (const row of rows) if (row.externalId) known.add(row.externalId);
+  }
+  const added = plaidTransactions.filter((txn) => visibleAccounts.has(txn.account_id) && !known.has(txn.investment_transaction_id)).length;
   if (connection.historyAsOf) {
-    const known = new Set<string>();
-    for (const chunk of inChunks(plaidTransactions.map((txn) => txn.investment_transaction_id))) {
-      const rows = await tenant.db
-        .select({ externalId: transactions.externalId })
-        .from(transactions)
-        .where(tenant.scope(transactions, eq(transactions.source, 'plaid'), inArray(transactions.externalId, chunk)));
-      for (const row of rows) if (row.externalId) known.add(row.externalId);
-    }
-    added = plaidTransactions.filter((txn) => visibleAccounts.has(txn.account_id) && !known.has(txn.investment_transaction_id)).length;
     const late = plaidTransactions.filter(
       (txn) => visibleAccounts.has(txn.account_id) && !known.has(txn.investment_transaction_id) && txn.date < connection.historyAsOf!,
     );
@@ -940,7 +940,10 @@ async function planTransactions(
       createdAt: deps.now().getTime(),
     }));
   writes.push(
-    ...chunkRows(transactions, rows).map((chunk) =>
+    ...chunkRows(
+      transactions,
+      rows.filter((row) => !known.has(row.externalId)),
+    ).map((chunk) =>
       tenant.db
         .insert(transactions)
         .values(chunk)

@@ -31,7 +31,7 @@
  * `counted()`; the history rebuild doesn't: it walks back through Plaid's
  * own, and can't overwrite an import's days anyway (shared/quality.ts).
  */
-import { and, eq, gte, inArray, isNull, lte, max, min, ne, or, sql, type SQL } from 'drizzle-orm';
+import { and, eq, gte, inArray, isNotNull, isNull, lte, max, min, ne, not, or, sql, type SQL } from 'drizzle-orm';
 import type { BatchItem } from 'drizzle-orm/batch';
 import { alias } from 'drizzle-orm/sqlite-core';
 import { addDays } from '../../shared/dates';
@@ -154,9 +154,24 @@ export function betterText(file: Described, feed: Described): { description: str
 }
 
 /**
+ * Statements setting a column of many transactions, each to its own value:
+ * `case id when … then … end`, 30 to a statement (3 parameters each, under
+ * D1's 100). One UPDATE apiece would run thousands of queries on a first
+ * pairing, past D1's 1,000 per invocation.
+ */
+function setEach(tenant: Tenant, column: 'replacedBy' | 'kind' | 'description', values: Map<string, string | null>, where?: SQL): BatchItem<'sqlite'>[] {
+  return inChunks([...values], 30).map((chunk) =>
+    tenant.db
+      .update(transactions)
+      .set({ [column]: sql`case ${transactions.id} ${sql.join(chunk.map(([id, value]) => sql`when ${id} then ${value}`), sql` `)} end` })
+      .where(tenant.scope(transactions, inArray(transactions.id, chunk.map(([id]) => id)), where)),
+  );
+}
+
+/**
  * Pair each account's imported transactions with the institution's (see
- * above), and remove automatic and suggested transfers on the institution's
- * that no longer count: matching then works on the file's.
+ * above). Transfers on the institution's that no longer count are settled
+ * afterwards (settleTransfers).
  */
 export async function pairImported(tenant: Tenant): Promise<{ paired: number }> {
   const replacer = alias(transactions, 'replacer');
@@ -165,10 +180,10 @@ export async function pairImported(tenant: Tenant): Promise<{ paired: number }> 
     .from(accountDaily)
     .where(tenant.scope(accountDaily, eq(accountDaily.source, 'import')))
     .groupBy(accountDaily.accountId);
-  const statements: BatchItem<'sqlite'>[] = [];
+  const replacedBy = new Map<string, string | null>();
+  const texts = new Map<string, string | null>();
+  const kinds = new Map<string, string | null>();
   let paired = 0;
-  // Every account's pairs, for moving transfers once: a transfer between two accounts may move on both sides.
-  const allPairs = new Map<{ id: string }, { id: string }>();
   for (const { accountId, from, to } of ranges) {
     if (!from || !to) continue;
     const rows = await tenant.db
@@ -206,23 +221,23 @@ export async function pairImported(tenant: Tenant): Promise<{ paired: number }> 
     const pairs = pairUp(file, feed);
     paired += pairs.size;
     for (const row of feed) {
-      const replacedBy = pairs.get(row)?.id ?? null;
-      if (replacedBy !== row.replacedBy) statements.push(tenant.db.update(transactions).set({ replacedBy }).where(tenant.scope(transactions, eq(transactions.id, row.id))));
+      const ours = pairs.get(row)?.id ?? null;
+      if (ours !== row.replacedBy) replacedBy.set(row.id, ours);
     }
     for (const [theirs, ours] of pairs) {
       // Plaid's bank transaction keeps its text, read with the file's (withPlaidDetails).
       const text = theirs.source === 'bank' ? null : betterText(ours, theirs);
-      if (text && (text.description !== ours.description || ours.memo !== null)) statements.push(tenant.db.update(transactions).set(text).where(tenant.scope(transactions, eq(transactions.id, ours.id))));
-      if (theirs.kind && !ours.kind) statements.push(tenant.db.update(transactions).set({ kind: theirs.kind }).where(tenant.scope(transactions, eq(transactions.id, ours.id), isNull(transactions.kind))));
-    }
-    for (const [theirs, ours] of pairs) allPairs.set(theirs, ours);
-    // The institution's that no longer count: on the import's days, or paired.
-    const left = feed.filter((row) => pairs.has(row) || (row.date >= from && row.date <= to)).map((row) => row.id);
-    for (const ids of inChunks(left, 45)) {
-      statements.push(tenant.db.delete(transfers).where(tenant.scope(transfers, inArray(transfers.status, ['auto', 'suggested']), or(inArray(transfers.outId, ids), inArray(transfers.inId, ids)))));
+      if (text && (text.description !== ours.description || ours.memo !== null)) texts.set(ours.id, text.description);
+      if (theirs.kind && !ours.kind) kinds.set(ours.id, theirs.kind);
     }
   }
-  statements.push(...(await movedTransfers(tenant, allPairs)));
+  const statements = [
+    ...setEach(tenant, 'replacedBy', replacedBy),
+    ...setEach(tenant, 'description', texts),
+    // The memo is in the institution's description now.
+    ...inChunks([...texts.keys()]).map((ids) => tenant.db.update(transactions).set({ memo: null }).where(tenant.scope(transactions, inArray(transactions.id, ids)))),
+    ...setEach(tenant, 'kind', kinds, isNull(transactions.kind)),
+  ];
   if (statements.length > 0) await runAtomic(tenant.db, statements);
   return { paired };
 }
@@ -231,19 +246,17 @@ export async function pairImported(tenant: Tenant): Promise<{ paired: number }> 
  * Pair each account's bank report transactions with Plaid's bank
  * transactions (see above): by Plaid's id where they share one, else the
  * same amount within five days (pairUp). A paired report transaction is
- * marked `replacedBy` Plaid's, which takes a kind you set on it and a
- * transfer you decided; automatic and suggested transfers on it are removed,
- * for matching to redo on Plaid's.
+ * marked `replacedBy` Plaid's, which takes a kind you set on it; transfers
+ * are settled afterwards (settleTransfers).
  */
 export async function pairBank(tenant: Tenant): Promise<{ paired: number }> {
   const withBank = await tenant.db
     .selectDistinct({ accountId: transactions.accountId })
     .from(transactions)
     .where(tenant.scope(transactions, eq(transactions.source, 'bank')));
-  const statements: BatchItem<'sqlite'>[] = [];
+  const replacedBy = new Map<string, string | null>();
+  const kinds = new Map<string, string | null>();
   let paired = 0;
-  // Newly paired, in every account at once: a transfer between two accounts may move on both sides.
-  const fresh = new Map<{ id: string }, { id: string }>();
   for (const { accountId } of withBank) {
     const rows = await tenant.db
       .select({
@@ -279,52 +292,68 @@ export async function pairBank(tenant: Tenant): Promise<{ paired: number }> {
     for (const report of reports) {
       const twin = pairs.get(report);
       // Paired, or no longer paired with Plaid's (one removed or changed); one replaced by a file's stays so.
-      if (twin && report.replacedBy !== twin.id) statements.push(tenant.db.update(transactions).set({ replacedBy: twin.id }).where(tenant.scope(transactions, eq(transactions.id, report.id))));
-      else if (!twin && report.replacedBy !== null && bankIds.has(report.replacedBy)) statements.push(tenant.db.update(transactions).set({ replacedBy: null }).where(tenant.scope(transactions, eq(transactions.id, report.id))));
-    }
-    // Newly paired: once paired, a report's doesn't count, so nothing new lands on it.
-    for (const [report, twin] of pairs) {
-      if (report.replacedBy === twin.id) continue;
-      fresh.set(report, twin);
-      if (report.kind && !twin.kind) statements.push(tenant.db.update(transactions).set({ kind: report.kind }).where(tenant.scope(transactions, eq(transactions.id, twin.id), isNull(transactions.kind))));
+      if (twin && report.replacedBy !== twin.id) {
+        replacedBy.set(report.id, twin.id);
+        if (report.kind && !twin.kind) kinds.set(twin.id, report.kind);
+      } else if (!twin && report.replacedBy !== null && bankIds.has(report.replacedBy)) replacedBy.set(report.id, null);
     }
   }
-  statements.push(...(await movedTransfers(tenant, fresh)));
-  for (const ids of inChunks([...fresh.keys()].map((row) => row.id), 45)) {
-    statements.push(tenant.db.delete(transfers).where(tenant.scope(transfers, inArray(transfers.status, ['auto', 'suggested']), or(inArray(transfers.outId, ids), inArray(transfers.inId, ids)))));
-  }
+  const statements = [...setEach(tenant, 'replacedBy', replacedBy), ...setEach(tenant, 'kind', kinds, isNull(transactions.kind))];
   if (statements.length > 0) await runAtomic(tenant.db, statements);
   return { paired };
 }
 
-/** Transfers you confirmed or rejected on the institution's transactions, moved to the file's they're paired with (unless it has its own). */
-async function movedTransfers(tenant: Tenant, pairs: Map<{ id: string }, { id: string }>): Promise<BatchItem<'sqlite'>[]> {
-  const fileOf = new Map([...pairs].map(([theirs, ours]) => [theirs.id, ours.id]));
-  if (fileOf.size === 0) return [];
-  const decided = [];
-  for (const ids of inChunks([...fileOf.keys()], 45)) {
-    decided.push(
-      ...(await tenant.db
-        .select()
+/**
+ * After the pairing: a transfer you confirmed or rejected on a transaction
+ * that another replaced moves to the one that counts in its place (along the
+ * chain: a report's to Plaid's to a file's), unless that one has its own;
+ * automatic and suggested ones on transactions that don't count go, for
+ * matching to redo. A handful of queries, however many were paired.
+ */
+export async function settleTransfers(tenant: Tenant): Promise<void> {
+  const replaced = tenant.db.select({ id: transactions.id }).from(transactions).where(tenant.scope(transactions, isNotNull(transactions.replacedBy)));
+  const decided = await tenant.db
+    .select()
+    .from(transfers)
+    .where(tenant.scope(transfers, inArray(transfers.status, ['confirmed', 'rejected']), or(inArray(transfers.outId, replaced), inArray(transfers.inId, replaced))));
+  const statements: BatchItem<'sqlite'>[] = [];
+  if (decided.length > 0) {
+    // Each side's replacement, followed to the end of its chain.
+    const next = new Map<string, string | null>();
+    let unknown = [...new Set(decided.flatMap((row) => [row.outId, row.inId]))];
+    for (let depth = 0; unknown.length > 0 && depth < 4; depth++) {
+      const found: string[] = [];
+      for (const ids of inChunks(unknown)) {
+        for (const row of await tenant.db.select({ id: transactions.id, replacedBy: transactions.replacedBy }).from(transactions).where(tenant.scope(transactions, inArray(transactions.id, ids)))) {
+          next.set(row.id, row.replacedBy);
+          if (row.replacedBy && !next.has(row.replacedBy)) found.push(row.replacedBy);
+        }
+      }
+      unknown = found;
+    }
+    const counting = (id: string) => {
+      let at = id;
+      for (let step = 0; step < 4 && next.get(at); step++) at = next.get(at)!;
+      return at;
+    };
+    const targets = [...new Set(decided.flatMap((row) => [counting(row.outId), counting(row.inId)]))];
+    const theirOwn = new Set<string>();
+    for (const ids of inChunks(targets, 45)) {
+      const rows = await tenant.db
+        .select({ outId: transfers.outId, inId: transfers.inId })
         .from(transfers)
-        .where(tenant.scope(transfers, inArray(transfers.status, ['confirmed', 'rejected']), or(inArray(transfers.outId, ids), inArray(transfers.inId, ids))))),
-    );
+        .where(tenant.scope(transfers, ne(transfers.status, 'suggested'), or(inArray(transfers.outId, ids), inArray(transfers.inId, ids))));
+      for (const row of rows) theirOwn.add(row.outId).add(row.inId);
+    }
+    for (const row of decided) {
+      const outId = counting(row.outId);
+      const inId = counting(row.inId);
+      if ((outId === row.outId && inId === row.inId) || (outId !== row.outId && theirOwn.has(outId)) || (inId !== row.inId && theirOwn.has(inId))) continue;
+      theirOwn.add(outId).add(inId);
+      statements.push(tenant.db.update(transfers).set({ outId, inId }).where(tenant.scope(transfers, eq(transfers.id, row.id))));
+    }
   }
-  if (decided.length === 0) return [];
-  const files = [...new Set(decided.flatMap((row) => [fileOf.get(row.outId), fileOf.get(row.inId)]).filter((id): id is string => Boolean(id)))];
-  const theirOwn = new Set<string>();
-  for (const ids of inChunks(files, 45)) {
-    const rows = await tenant.db
-      .select({ outId: transfers.outId, inId: transfers.inId })
-      .from(transfers)
-      .where(tenant.scope(transfers, ne(transfers.status, 'suggested'), or(inArray(transfers.outId, ids), inArray(transfers.inId, ids))));
-    for (const row of rows) theirOwn.add(row.outId).add(row.inId);
-  }
-  return decided.flatMap((row) => {
-    const outId = fileOf.get(row.outId) ?? row.outId;
-    const inId = fileOf.get(row.inId) ?? row.inId;
-    if ((outId !== row.outId && theirOwn.has(outId)) || (inId !== row.inId && theirOwn.has(inId))) return [];
-    theirOwn.add(outId).add(inId);
-    return [tenant.db.update(transfers).set({ outId, inId }).where(tenant.scope(transfers, and(eq(transfers.id, row.id))!))];
-  });
+  const uncounted = tenant.db.select({ id: transactions.id }).from(transactions).where(tenant.scope(transactions, not(counted())));
+  statements.push(tenant.db.delete(transfers).where(tenant.scope(transfers, inArray(transfers.status, ['auto', 'suggested']), or(inArray(transfers.outId, uncounted), inArray(transfers.inId, uncounted)))));
+  await runAtomic(tenant.db, statements);
 }
