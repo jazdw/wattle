@@ -384,11 +384,11 @@ async function syncPass(
     if (newTransactions > 0 || (bank?.changed ?? 0) > 0) await queueMatching(deps, tenant, `sync:${connection.id}:${fetchedAt}`);
     // Plaid has more bank transactions than a pass takes: carry on in a job of
     // its own (its own invocation, so its own D1 queries), balances and bank
-    // transactions only, once this sync has let go of the connection. Known by
-    // the cursor it carries on from, so the same work is queued once.
+    // transactions only, once this sync has let go of the connection. Named
+    // by this pass's log row: a restarted loop can stop at a cursor again.
     if (fetched.bank?.outcome === 'changes' && fetched.bank.more) {
       await enqueue(deps, tenant, [
-        { id: `bank-more:${connection.id}:${fetched.bank.cursor}`, type: 'sync', payload: { connectionId: connection.id, trigger, investments: 'none', continuation: true }, connectionId: connection.id },
+        { id: `bank-more:${connection.id}:${run.id}`, type: 'sync', payload: { connectionId: connection.id, trigger, investments: 'none', continuation: true }, connectionId: connection.id },
       ]);
     }
     return { accounts: fetched.accounts.length, holdings: holdingCount, transactions: transactionCount, status: 'ok' };

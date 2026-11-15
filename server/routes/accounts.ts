@@ -397,7 +397,7 @@ accountRoutes.patch('/:id', async (c) => {
   if (body.isHidden === false && account.isHidden && account.connectionId) {
     // Plaid's cursor never sends again what was skipped while the account was
     // hidden: the next sync reads the login's bank transactions from the start.
-    statements.push(tenant.db.update(connections).set({ bankCursor: null }).where(tenant.scope(connections, eq(connections.id, account.connectionId))));
+    statements.push(tenant.db.update(connections).set({ bankCursor: null, bankRestartCursor: null }).where(tenant.scope(connections, eq(connections.id, account.connectionId))));
   }
   if (body.isHidden) {
     statements.push(...purgeStatements(tenant, account.id));

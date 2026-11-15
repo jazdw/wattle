@@ -101,4 +101,21 @@ describe('migrations', () => {
     );
     expect((await client.execute("SELECT count(*) AS n FROM transactions WHERE source = 'bank'")).rows[0].n).toBe(1);
   });
+
+  it('0008 marks a login left part-way through a paging loop to restart it from the beginning', async () => {
+    const client = createClient({ url: ':memory:' });
+    await client.execute('PRAGMA foreign_keys = ON');
+    for (const name of files.filter((file) => file < '0008')) await apply(client, name);
+    await client.execute("INSERT INTO households (id, name, display_currency, created_at) VALUES ('h1', 'Example', 'USD', 1)");
+    await client.execute(
+      "INSERT INTO connections (id, household_id, provider, external_id, access_token_enc, kind, bank_feed, bank_cursor, created_at) VALUES ('mid', 'h1', 'plaid', 'item-1', 'enc', 'account', 'loading', 'cursor-4', 1), ('done', 'h1', 'plaid', 'item-2', 'enc', 'account', 'on', 'cursor-9', 1), ('fresh', 'h1', 'plaid', 'item-3', 'enc', 'account', 'loading', NULL, 1)",
+    );
+    for (const name of files.filter((file) => file >= '0008')) await apply(client, name);
+    const rows = (await client.execute('SELECT id, bank_cursor, bank_restart_cursor FROM connections ORDER BY id')).rows.map((row) => ({ ...row }));
+    expect(rows).toEqual([
+      { id: 'done', bank_cursor: 'cursor-9', bank_restart_cursor: null },
+      { id: 'fresh', bank_cursor: null, bank_restart_cursor: null },
+      { id: 'mid', bank_cursor: 'cursor-4', bank_restart_cursor: '' },
+    ]);
+  });
 });

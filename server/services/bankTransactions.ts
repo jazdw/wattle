@@ -60,19 +60,40 @@ export const fetchesBank = (connection: Pick<ConnectionRow, 'bankFeed'>, trigger
 /** What one pass got from /transactions/sync. */
 export type BankFetch =
   /** Changes since the stored cursor: added and modified together (the latest of each), and the ids removed. */
-  | { outcome: 'changes'; changed: Transaction[]; removed: string[]; cursor: string; feed: 'loading' | 'on'; more: boolean }
+  | {
+      outcome: 'changes';
+      changed: Transaction[];
+      removed: string[];
+      cursor: string;
+      feed: 'loading' | 'on';
+      more: boolean;
+      /** With more to come: the cursor this paging loop began from ('' from the start), for a later pass to restart from (bank_restart_cursor); null when the loop is done. */
+      restart: string | null;
+    }
   /** Plaid has nothing for the login yet. */
   | { outcome: 'loading' }
   | { outcome: 'refused'; feed: 'unsupported' | 'consent'; code: string }
   /** Left for the next sync (the cursor stays). */
   | { outcome: 'skipped'; note: string };
 
-/** Page from the login's stored cursor until Plaid has no more, or BANK_PAGES_PER_PASS. Login problems are thrown, as other calls'. */
-export async function fetchBankTransactions(plaid: PlaidApi, accessToken: string, connection: Pick<ConnectionRow, 'bankCursor'>): Promise<BankFetch> {
+/**
+ * Page from the login's stored cursor until Plaid has no more, or
+ * BANK_PAGES_PER_PASS. Login problems are thrown, as other calls'.
+ *
+ * A paging loop can span passes (a pass stops at its page cap), and Plaid's
+ * cursors from inside a loop go stale once the login's data changes: on
+ * TRANSACTIONS_SYNC_MUTATION_DURING_PAGINATION the loop starts again from
+ * the cursor it began with (bank_restart_cursor while one spans passes,
+ * else the stored cursor), never from one inside it. Pages read again are
+ * upserted again, which changes nothing.
+ */
+export async function fetchBankTransactions(plaid: PlaidApi, accessToken: string, connection: Pick<ConnectionRow, 'bankCursor' | 'bankRestartCursor'>): Promise<BankFetch> {
+  // Where this loop began: '' for the very start (no cursor).
+  const loopStart = connection.bankRestartCursor ?? connection.bankCursor ?? '';
   for (let attempt = 0; ; attempt++) {
     const changed = new Map<string, Transaction>();
     const removed = new Set<string>();
-    let cursor = connection.bankCursor;
+    let cursor = attempt === 0 ? connection.bankCursor : loopStart || null;
     let more = false;
     let status: string | undefined;
     try {
@@ -94,7 +115,7 @@ export async function fetchBankTransactions(plaid: PlaidApi, accessToken: string
       }
     } catch (error) {
       if (!(error instanceof PlaidApiError)) throw error;
-      // The login's data changed while paging: start again from the stored cursor.
+      // The login's data changed while paging: start the loop again from where it began.
       if (error.code === 'TRANSACTIONS_SYNC_MUTATION_DURING_PAGINATION') {
         if (attempt < MUTATION_RETRIES) continue;
         return { outcome: 'skipped', note: "Plaid's bank transactions kept changing while they were fetched; left for the next sync." };
@@ -104,7 +125,7 @@ export async function fetchBankTransactions(plaid: PlaidApi, accessToken: string
       if (error.code === 'ADDITIONAL_CONSENT_REQUIRED') return { outcome: 'refused', feed: 'consent', code: error.code };
       throw error;
     }
-    return { outcome: 'changes', changed: [...changed.values()], removed: [...removed], cursor: cursor!, feed: status === 'HISTORICAL_UPDATE_COMPLETE' ? 'on' : 'loading', more };
+    return { outcome: 'changes', changed: [...changed.values()], removed: [...removed], cursor: cursor!, feed: status === 'HISTORICAL_UPDATE_COMPLETE' ? 'on' : 'loading', more, restart: more ? loopStart : null };
   }
 }
 
@@ -217,5 +238,5 @@ export async function planBankTransactions(
   run.count('bankTransactions', rows.length);
   if (fetched.removed.length > 0) run.count('bankRemoved', fetched.removed.length);
   if (fetched.feed === 'loading' && connection.bankFeed !== 'loading') addNote('Plaid is still gathering the older bank transactions.');
-  return { connection: { bankCursor: fetched.cursor, bankFeed: fetched.feed, bankFeedError: null }, changed: rows.length + fetched.removed.length };
+  return { connection: { bankCursor: fetched.cursor, bankRestartCursor: fetched.restart, bankFeed: fetched.feed, bankFeedError: null }, changed: rows.length + fetched.removed.length };
 }

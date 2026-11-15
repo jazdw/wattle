@@ -57,6 +57,13 @@
       "when": 1794680227398,
       "tag": "0007_bank_transactions",
       "breakpoints": true
+    },
+    {
+      "idx": 8,
+      "version": "6",
+      "when": 1794778911530,
+      "tag": "0008_bank_restart_cursor",
+      "breakpoints": true
     }
   ]
 }

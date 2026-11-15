@@ -165,6 +165,12 @@ export const connections = sqliteTable(
     bankFeedError: text('bank_feed_error'),
     /** Where the next /transactions/sync carries on from (Plaid's cursor; not secret). */
     bankCursor: text('bank_cursor'),
+    /**
+     * While a paging loop spans passes (Plaid had more than a pass takes):
+     * the cursor it began from ('' from the start), where it restarts if
+     * the login's data changes meanwhile. Null when no loop is under way.
+     */
+    bankRestartCursor: text('bank_restart_cursor'),
     createdAt: integer('created_at').notNull(),
   },
   (table) => [

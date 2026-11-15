@@ -126,6 +126,26 @@ describe('bank transactions', () => {
     expect((await connection()).bankCursor).toBe('c9');
   });
 
+  it('a paging loop spanning passes restarts from where it began when the data changes, never from a cursor inside it', async () => {
+    const { plaid, sync, stored, connection } = await setup([{ next_cursor: '' }]);
+    const page = (index: number, more: boolean) => ({ added: [bankTxn(`b${index}`, 'chk', '2026-10-02', index + 1)], next_cursor: `c${index + 1}`, has_more: more });
+    // The sync's pass: four pages of more. Then Plaid's history finishes arriving: the cursor inside the loop is stale, and the loop is read again from the start.
+    plaid.state.bankPages.push(page(0, true), page(1, true), page(2, true), page(3, true), 'TRANSACTIONS_SYNC_MUTATION_DURING_PAGINATION', page(0, true), page(1, true), page(2, true), page(3, true), page(4, true), page(5, false));
+    const asked = plaid.state.bankCursors.length;
+    await sync();
+    // The sync from the start (none); its job from the cursor it stopped at, then, refused, from the start again; another job finishes.
+    expect(plaid.state.bankCursors.slice(asked)).toEqual([null, 'c1', 'c2', 'c3', 'c4', null, 'c1', 'c2', 'c3', 'c4', 'c5']);
+    expect((await stored()).map((row) => row.externalId).sort()).toEqual(['b0', 'b1', 'b2', 'b3', 'b4', 'b5']);
+    expect(await connection()).toMatchObject({ bankCursor: 'c6', bankRestartCursor: null, bankFeed: 'on' });
+  });
+
+  it('remembers where a paging loop began while it spans passes', async () => {
+    const { plaid, deps, tenant, connection } = await setup([{ added: [bankTxn('b0', 'chk', '2026-10-01', 1)], next_cursor: 'c0' }]);
+    plaid.state.bankPages.push(...Array.from({ length: 5 }, (_, index) => ({ added: [bankTxn(`b${index + 1}`, 'chk', '2026-10-02', index + 2)], next_cursor: `d${index + 1}`, has_more: index < 4 })));
+    await syncConnection(deps, tenant, (await connection()).id, 'manual');
+    expect(await connection()).toMatchObject({ bankCursor: 'd4', bankRestartCursor: 'c0' });
+  });
+
   it('carrying on waits while the connection is busy', async () => {
     const { deps, plaid, tenant, connection, stored } = await setup([{ next_cursor: '' }]);
     plaid.state.bankPages.push(...Array.from({ length: 5 }, (_, index) => ({ added: [bankTxn(`b${index}`, 'chk', '2026-10-02', index + 1)], next_cursor: `c${index + 1}`, has_more: index < 4 })));
