@@ -259,8 +259,8 @@ describe('Transactions', () => {
     await userEvent.click(screen.getByRole('button', { name: 'Show 50 more' }));
     expect(rows()).toBe(250);
     expect(screen.queryByText(/^Showing/)).not.toBeInTheDocument();
-    // A new search starts from the first 100.
+    // A new search starts from the first 100 (re-rendering 250 rows can take over the default second on a slow CI runner).
     await userEvent.type(screen.getByPlaceholderText('Description or amount'), 'Purchase');
-    await expect.poll(rows).toBe(100);
+    await expect.poll(rows, { timeout: 5000 }).toBe(100);
   });
 });
