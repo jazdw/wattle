@@ -46,7 +46,7 @@ export const manualAccountSchema = z.object({
   /** The kind of account within its type (shared/accounts.ts: checking, 401k, hsa…). */
   subtype: z.string().trim().max(40).nullable().optional(),
   ownerUserId: z.string().nullable().optional(),
-  /** Opening balance in major units (liabilities as positive amounts owed). */
+  /** Opening balance in major units (a card's or loan's as what's owed: below zero when in credit). */
   balance: z.number().finite().optional(),
   date: isoDate.optional(),
 });
@@ -70,7 +70,7 @@ export const accountPatchSchema = z.object({
 
 export const balanceEntrySchema = z.object({
   date: isoDate,
-  /** Major units; liabilities as positive amounts owed. */
+  /** Major units; a card's or loan's as what's owed (below zero when in credit). */
   balance: z.number().finite(),
 });
 
@@ -167,7 +167,7 @@ export const importedHoldingsSchema = z.object({
     .max(20000),
 });
 
-/** Dated balances (major units; liabilities as positive amounts owed), and the transactions they came from when the file has them. */
+/** Dated balances (major units; a card's or loan's as what's owed, below zero when in credit), and the transactions they came from when the file has them. */
 export const importedBalancesSchema = z.object({
   kind: z.literal('balances'),
   currency: z.string().length(3).optional(),

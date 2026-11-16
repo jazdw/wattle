@@ -8,7 +8,7 @@ import { queueReportCollection } from '../server/services/assetReports';
 import { queueHistory } from '../server/services/backfill';
 import { saveCloses } from '../server/services/pricing';
 import { snapshotHousehold } from '../server/services/snapshots';
-import { institutionPriceTime, shownName, syncConnection } from '../server/services/sync';
+import { institutionPriceTime, plaidBalance, shownName, syncConnection } from '../server/services/sync';
 import { runJob } from '../server/services/jobHandlers';
 import { marketDate } from '../shared/dates';
 import { account, closes, fakePlaid, fakePrices, firstBuy, holding, security } from './fakes';
@@ -456,7 +456,11 @@ describe('history backfill', () => {
           { date: '2026-10-01', current: 900 },
           { date: '2026-10-02', current: 950 },
         ],
-        card: [{ date: '2026-10-01', current: 300 }],
+        // What the card owed, and a day it was in credit (below zero, as Plaid gives it).
+        card: [
+          { date: '2026-10-01', current: 300 },
+          { date: '2026-10-02', current: -20 },
+        ],
       },
       assetReportReady: false,
     });
@@ -476,7 +480,8 @@ describe('history backfill', () => {
     await settle(deps);
 
     const rows = await deps.db.select().from(schema.accountDaily).where(eq(schema.accountDaily.source, 'rebuilt'));
-    expect(rows.map((row) => row.balance).sort((a, b) => a - b)).toEqual([-300_00, 900_00, 950_00]);
+    // The card: owing is below zero, in credit above.
+    expect(rows.map((row) => row.balance).sort((a, b) => a - b)).toEqual([-300_00, 20_00, 900_00, 950_00]);
     const [after] = await deps.db.select().from(schema.connections);
     expect(after).toMatchObject({ backfillStatus: 'done', assetReportTokenEnc: null });
     expect(plaid.state.calls).toContain('asset_report:remove');
@@ -1095,3 +1100,31 @@ describe('account names', () => {
     expect((await names()).map((row) => row.name)).toEqual(['Brokerage Account', 'Our IRA']);
   });
 });
+
+describe("a card's or loan's balance", () => {
+  const balances = (type: string, current: number | null, available: number | null = null) => plaidBalance({ type, balances: { current, available, iso_currency_code: 'USD' } } as Parameters<typeof plaidBalance>[0]);
+
+  it("keeps its sign: what's owed below zero, in credit above, and never the credit left to spend", () => {
+    expect(balances('credit', 250)).toBe(-250_00);
+    expect(balances('credit', -20.5)).toBe(20_50); // overpaid, or refunded
+    expect(Object.is(balances('credit', 0), 0)).toBe(true);
+    expect(balances('loan', 200000)).toBe(-200000_00);
+    // A card's `available` is its credit left, not a balance.
+    expect(balances('credit', null, 4000)).toBeNull();
+    expect(balances('depository', null, 50)).toBe(50_00);
+    expect(balances('depository', -12)).toBe(-12_00); // overdrawn
+  });
+
+  it('counts a linked card in credit as money you have', async () => {
+    const plaid = fakePlaid({ accounts: [account('chk', 'depository', 1000), account('card', 'credit', -20)] });
+    const deps = await createTestDeps({ plaid });
+    const home = await createHousehold(deps, 'Home', 'me@example.com');
+    const api = client(deps, home.cookie);
+    await api('/api/plaid/exchange', { method: 'POST', json: { publicToken: 'p', kind: 'account' } });
+    await flush(deps);
+    const [card] = await deps.db.select().from(schema.accounts).where(eq(schema.accounts.externalId, 'card'));
+    expect(card.balance).toBe(20_00);
+    expect((await api('/api/portfolio')).body).toMatchObject({ netWorth: 1020_00, liabilities: 20_00 });
+  });
+});
+

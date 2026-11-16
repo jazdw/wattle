@@ -16,7 +16,7 @@ import type { HistoryGroup, HistoryResponse, HistorySeries } from '../../shared/
 import { accountDaily, accounts, holdingDaily, securities } from '../db/schema';
 import type { Tenant } from '../db/tenant';
 import type { Deps } from '../ports';
-import { accountLabel } from '../../shared/accounts';
+import { accountLabel, isLiability } from '../../shared/accounts';
 import { breakdown } from './breakdown';
 import { inTransit, inTransitByAccount, linkedTransfers } from './transfers';
 import { defaultCategory, toCurrency } from './portfolio';
@@ -316,8 +316,7 @@ async function categorySeries(
   for (const account of accountRows) {
     const values = perAccount.get(account.id)!;
     const quality = perAccountQuality.get(account.id)!;
-    const liability = account.type === 'credit' || account.type === 'loan';
-    const category = liability ? 'liabilities' : ((account.category as Category | null) ?? defaultCategory(account.type));
+    const category = isLiability(account.type) ? 'liabilities' : ((account.category as Category | null) ?? defaultCategory(account.type));
     // A day without holdings (a missed sync) carries the last day's split, as its balance is carried.
     let last: Map<string, number> | null = null;
     for (const [position, date] of dates.entries()) {

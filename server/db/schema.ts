@@ -214,7 +214,7 @@ export const accounts = sqliteTable(
     isHidden: integer('is_hidden', { mode: 'boolean' }).notNull().default(false),
     /** Allocation category used when the account has no holdings (cash, property, super…). */
     category: text('category'),
-    /** Latest balance (minor units, account currency; liabilities negative). */
+    /** Latest balance (minor units, account currency): what it adds to net worth, so a card or loan is below zero when it owes, above when in credit. */
     balance: integer('balance'),
     balanceAsOf: integer('balance_as_of'),
     /**
@@ -463,7 +463,7 @@ export const accountDaily = sqliteTable(
       .notNull()
       .references(() => accounts.id, { onDelete: 'cascade' }),
     date: text('date').notNull(),
-    /** Minor units in `currency`; liabilities negative. */
+    /** Minor units in `currency`: what it adds to net worth (a card or loan below zero when it owes, above when in credit). */
     balance: integer('balance').notNull(),
     currency: text('currency').notNull(),
     source: text('source', { enum: DAILY_SOURCES }).notNull(),

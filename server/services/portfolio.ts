@@ -3,6 +3,7 @@
  * across accounts, and the equity style grid — all in one display currency.
  */
 import { and, eq } from 'drizzle-orm';
+import { isLiability } from '../../shared/accounts';
 import { categoryTotals, styleBreakdown, type Position } from '../../shared/allocation';
 import { marketDate } from '../../shared/dates';
 import { convertMinor, currencyName, isCurrency, type Currency, type FxRates } from '../../shared/money';
@@ -13,8 +14,6 @@ import type { Tenant } from '../db/tenant';
 import type { Deps } from '../ports';
 import { closeLookup, fxLookup } from './pricing';
 import { isCashSecurity } from './valuation';
-
-const LIABILITY_TYPES = new Set(['credit', 'loan']);
 
 const cashKey = (code: string) => `cash:${code}`;
 
@@ -164,7 +163,7 @@ export async function loadPortfolio(deps: Deps, tenant: Tenant, currency: Curren
   for (const account of accountRows) {
     const fromHoldings = byAccountTotal.get(account.id);
     const value = fromHoldings ?? (account.balance !== null ? convert(account.balance, account.currency) : 0);
-    if (LIABILITY_TYPES.has(account.type) || value < 0) {
+    if (isLiability(account.type) || value < 0) {
       liabilities += value;
       continue;
     }

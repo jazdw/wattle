@@ -3,6 +3,7 @@
  * so a manual account's current balance always follows its newest entry.
  */
 import { desc, eq, inArray, sql } from 'drizzle-orm';
+import { storedBalance } from '../../shared/accounts';
 import { addDays, marketDate } from '../../shared/dates';
 import { toMinor } from '../../shared/money';
 import { chunkRows, runAtomic } from '../db/batch';
@@ -13,12 +14,9 @@ import { accountLease, Lease } from './lease';
 import { QUALITY_SET, replaceWhere } from './quality';
 import { snapshotHousehold } from './snapshots';
 
-const LIABILITY_TYPES = new Set(['credit', 'loan']);
-
-/** Minor units, liabilities negative (entered as positive amounts owed). */
+/** An entered or imported balance (major units; a card's or loan's as what's owed, below zero when in credit) as it's stored. */
 export function signedBalance(type: string, amount: number): number {
-  const minor = toMinor(amount);
-  return LIABILITY_TYPES.has(type) ? -Math.abs(minor) : minor;
+  return storedBalance(type, toMinor(amount));
 }
 
 type Account = typeof accounts.$inferSelect;

@@ -50,6 +50,10 @@ describe('accounts', () => {
     const { deps, api, create } = await household();
     const card = await create({ name: 'Card', type: 'credit', balance: 250 });
     expect((await api('/api/portfolio')).body.liabilities).toBe(-250_00);
+    // Entered below zero, it's in credit: stored above zero, not as owing.
+    expect((await api(`/api/accounts/${card}/balances`, { method: 'POST', json: { date: TODAY, balance: -20 } })).status).toBe(200);
+    expect((await deps.db.select().from(schema.accounts).where(eq(schema.accounts.id, card)))[0].balance).toBe(20_00);
+    expect((await api('/api/portfolio')).body.liabilities).toBe(20_00);
     expect((await api(`/api/accounts/${card}`, { method: 'DELETE' })).status).toBe(200);
     expect(await deps.db.select().from(schema.accountDaily)).toHaveLength(0);
   });

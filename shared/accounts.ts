@@ -32,3 +32,17 @@ export const ACCOUNT_SUBTYPES: Record<string, string[]> = {
 export function knownDigits(account: { mask: string | null; maskAliases?: string[] }): string[] {
   return [account.mask, ...(account.maskAliases ?? [])].flatMap((digits) => (digits ? [digits.slice(-4)] : []));
 }
+
+/** The types of account that owe money: a card's or a loan's balance is what's owed. */
+export const isLiability = (type: string) => type === 'credit' || type === 'loan';
+
+/**
+ * A balance as it's stored (minor units): what the account adds to net
+ * worth. A card's or loan's is given as what's owed (by the institution, a
+ * statement, or you), so it's stored with the other sign: below zero when it
+ * owes, above when it's in credit (overpaid, or refunded). Never forced
+ * either way: a card in credit is real.
+ */
+export function storedBalance(type: string, minor: number): number {
+  return isLiability(type) ? -minor || 0 : minor; // nothing owed is 0, not -0
+}

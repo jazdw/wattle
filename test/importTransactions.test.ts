@@ -122,6 +122,30 @@ describe('imported transactions', () => {
     ]);
   });
 
+  it("stores a card's days in credit above zero, and agrees with them when the file is checked again", async () => {
+    const { deps, api, importing } = await household();
+    // A card statement's balances are what's owed: $100 owed, then overpaid by $25.
+    const file: ImportedFile = {
+      kind: 'balances',
+      rows: [
+        { date: '2026-09-15', balance: 100 },
+        { date: '2026-09-25', balance: -25 },
+      ],
+      transactions: [
+        { id: 'T0', date: '2026-09-15', kind: 'withdrawal', label: 'DEBIT', description: 'Example store', amount: -100_00 },
+        { id: 'T1', date: '2026-09-25', kind: 'deposit', label: 'CREDIT', description: 'Payment', amount: 125_00 },
+      ],
+    };
+    const response = await importing({ new: { name: 'Card', type: 'credit', currency: 'USD' } }, file);
+    expect(response.status).toBe(200);
+    await settle(deps);
+    const accountId = response.body.accounts[0].accountId as string;
+    const days = await deps.db.select().from(schema.accountDaily).where(eq(schema.accountDaily.accountId, accountId)).orderBy(asc(schema.accountDaily.date));
+    expect(days.filter((day) => day.date === '2026-09-15' || day.date === '2026-09-25').map((day) => day.balance)).toEqual([-100_00, 25_00]);
+    const check = await api('/api/imports/check', { method: 'POST', json: { accounts: [{ label: 'The file', target: { accountId }, file }] } });
+    expect(check.body.warnings).toEqual([]);
+  });
+
   it("in a linked account, counts the file's transactions on its days and the institution's after, each of theirs that's one of the file's paired", async () => {
     const plaidRow = (id: string, date: string, subtype: string, security: string | null, amount: number, name = subtype) => ({ investment_transaction_id: id, account_id: 'brk', security_id: security, date, name, type: 'cash', subtype, quantity: 0, amount, price: 0, fees: 0, iso_currency_code: 'USD' });
     const plaid = fakePlaid({

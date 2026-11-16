@@ -14,6 +14,7 @@
 import { eq, gt, inArray, lt, ne, sql } from 'drizzle-orm';
 import type { BatchItem } from 'drizzle-orm/batch';
 import type { AssetReport } from 'plaid';
+import { storedBalance } from '../../shared/accounts';
 import { addDays, marketDate, type IsoDate } from '../../shared/dates';
 import { toMinor } from '../../shared/money';
 import { PlaidApiError } from '../adapters/plaid';
@@ -146,15 +147,14 @@ async function reportByAccount(deps: Deps, tenant: Tenant, connection: Connectio
       if (!account) continue;
       // Investment accounts' history is rebuilt from their transactions.
       if (connection.hasInvestments && account.type === 'investment') continue;
-      const liability = account.type === 'credit' || account.type === 'loan';
       const rows = result.get(account.id) ?? { accountId: account.id, balances: [], transactions: [] };
       for (const balance of reportAccount.historical_balances ?? []) {
-        const minor = toMinor(balance.current);
         rows.balances.push({
           householdId: tenant.householdId,
           accountId: account.id,
           date: balance.date,
-          balance: liability ? -Math.abs(minor) : minor,
+          // As Plaid's balances are: a card's is what was owed, below zero on a day it was in credit.
+          balance: storedBalance(account.type, toMinor(balance.current)),
           currency: balance.iso_currency_code ?? account.currency,
           // The institution's reconstruction of past days, not a reported balance.
           source: 'rebuilt',

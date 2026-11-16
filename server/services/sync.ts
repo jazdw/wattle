@@ -5,6 +5,7 @@
  */
 import { eq, inArray, isNotNull, isNull, lte, ne, notInArray, or, sql } from 'drizzle-orm';
 import type { AccountBase, Holding, InvestmentTransaction, Security as PlaidSecurity } from 'plaid';
+import { isLiability, storedBalance } from '../../shared/accounts';
 import { holdingLabel } from '../../shared/holdings';
 import { suggestClassification } from '../../shared/classify';
 import { addDays, lastMarketClose, marketDate } from '../../shared/dates';
@@ -32,19 +33,21 @@ export type ConnectionRow = typeof connections.$inferSelect;
 /** Two years: the most investment history Plaid returns. */
 export const HISTORY_DAYS = 730;
 
-const LIABILITY_TYPES = new Set(['credit', 'loan']);
-
 function requirePlaid(deps: Deps) {
   if (!deps.plaid) throw new Error('Plaid is not configured (PLAID_CLIENT_ID / PLAID_SECRET).');
   return deps.plaid;
 }
 
-/** Signed balance in minor units: liabilities are negative. */
+/**
+ * Plaid's balance as it's stored (shared/accounts.ts storedBalance): a card's
+ * or loan's `current` is what's owed, below zero when it's in credit. Its
+ * `available` is the credit left to spend, not a balance, so it's only the
+ * fallback for other accounts.
+ */
 export function plaidBalance(account: Pick<AccountBase, 'type' | 'balances'>): number | null {
-  const amount = account.balances.current ?? account.balances.available;
+  const amount = isLiability(account.type) ? account.balances.current : (account.balances.current ?? account.balances.available);
   if (amount === null || amount === undefined) return null;
-  const minor = toMinor(amount);
-  return LIABILITY_TYPES.has(account.type) ? -Math.abs(minor) : minor;
+  return storedBalance(account.type, toMinor(amount));
 }
 
 export async function accessTokenFor(deps: Deps, connection: ConnectionRow): Promise<string> {
