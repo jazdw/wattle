@@ -1,7 +1,7 @@
 import { screen, within } from '@testing-library/react';
 import { http, HttpResponse } from 'msw';
 import { describe, expect, it } from 'vitest';
-import { CONNECTIONS } from '../test/fixtures';
+import { CONNECTIONS, history } from '../test/fixtures';
 import { renderPage } from '../test/render';
 import { sent, server } from '../test/server';
 import { NetWorth } from './NetWorth';
@@ -13,6 +13,17 @@ describe('Net worth page', () => {
     expect(screen.getByText(/^\$66,200\.00 \(/)).toBeInTheDocument(); // first → last point of the 1Y history; no + on a gain
     expect(screen.getByText('$1,368,500.00')).toBeInTheDocument();
     expect(screen.getByText('-$2,300.00', { selector: 'p' })).toBeInTheDocument();
+  });
+
+  it('leaves accounts\' opening balances out of the change, and marks where they start', async () => {
+    const starts = [
+      { date: '2026-10-06', accountId: 'a1', label: 'Example Bank · Savings', institution: 'Example Bank', amount: 20000_00 },
+      { date: '2026-10-07', accountId: 'a2', label: 'Example Bank · Checking', institution: 'Example Bank', amount: 5000_00 },
+    ];
+    server.use(http.get('*/api/history', () => HttpResponse.json({ ...history('total'), change: { amount: 41200_00, base: 1300000_00, starts } })));
+    renderPage(<NetWorth />);
+    expect(await screen.findByText(/^\$41,200\.00 \(3\.1%\)/)).toBeInTheDocument(); // of $1,325,000: the first day's and what they opened with
+    expect(screen.getByText(/opening balances of 2 accounts not counted/)).toBeInTheDocument();
   });
 
   it('groups visible accounts by type with owner badges', async () => {

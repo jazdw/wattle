@@ -377,6 +377,21 @@ export interface HistoryResponse {
   series: HistorySeries[];
   /** Grouped by source: where each account's value (and the household's) came from over the range. */
   breakdown?: BreakdownRow[];
+  /**
+   * The total's change over the range (display currency cents): every
+   * account's, less the balance any account's history opens with inside the
+   * range (money it already held, not a gain); `base` is the first day's total.
+   */
+  change?: { amount: number; base: number; starts: AccountStart[] };
+}
+
+/** An account whose history starts inside a range with money in it: its first day and opening balance (display currency cents). */
+export interface AccountStart {
+  date: IsoDate;
+  accountId: string;
+  label: string;
+  institution: string | null;
+  amount: number;
 }
 
 /**

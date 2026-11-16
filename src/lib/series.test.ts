@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { stackAreas } from './series';
+import { stackAreas, startMarkers } from './series';
 
 describe('stackAreas', () => {
   const other = { key: '__other', label: 'Other (3)', color: 'grey', values: [50, -20, null, 10] };
@@ -22,5 +22,19 @@ describe('stackAreas', () => {
   it('leaves a series below zero out where it is zero (a card paid off)', () => {
     const card = { key: 'card', label: 'Card', color: 'red', values: [-300, 0, null, -50] };
     expect(stackAreas([card], true)).toEqual([{ ...card, values: [-300, null, null, -50], gaps: true }]);
+  });
+});
+
+describe('startMarkers', () => {
+  const start = (date: string, accountId: string, institution: string | null) => ({ date, accountId, label: `${institution} · ${accountId}`, institution, amount: 100_00 });
+  const dates = Array.from({ length: 365 }, (_, index) => `2026-${String(Math.floor(index / 28) + 1).padStart(2, '0')}-01`);
+  it('groups starts within a few days, named by the account, the institution they share, or how many', () => {
+    const markers = startMarkers(dates, [start('2026-04-30', 'c', 'Northwind'), start('2026-04-25', 'a', 'Northwind'), start('2026-04-29', 'b', 'Northwind'), start('2026-08-01', 'd', 'Contoso'), start('2026-10-01', 'e', 'Contoso'), start('2026-10-03', 'f', 'Example'), start('2026-12-01', 'g', null)]);
+    expect(markers.map(({ date, label, starts }) => [date, label, starts.length])).toEqual([
+      ['2026-04-25', 'Northwind', 3],
+      ['2026-08-01', 'Contoso', 1],
+      ['2026-10-01', '2 accounts', 2],
+      ['2026-12-01', 'null · g', 1],
+    ]);
   });
 });

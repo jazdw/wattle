@@ -13,7 +13,6 @@ import { convertMinor, type Currency } from '../../shared/money';
 import { dayQuality, type DailySource, type PriceSource, type Quality } from '../../shared/quality';
 import { fixedRangeStart, type Range } from '../../shared/ranges';
 import type { HistoryGroup, HistoryResponse, HistorySeries } from '../../shared/types';
-import { inChunks } from '../db/batch';
 import { accountDaily, accounts, holdingDaily, securities } from '../db/schema';
 import type { Tenant } from '../db/tenant';
 import type { Deps } from '../ports';
@@ -83,32 +82,14 @@ export async function loadHistory(deps: Deps, tenant: Tenant, options: Options):
 
   const index = new Map(dates.map((date, position) => [date, position]));
 
-  // Per account: carried-forward display-currency value for each date.
-  //
-  // A linked account with no history before some date (a loan, which Plaid's
-  // balance history doesn't cover; accounts at an investment login other
-  // than the investment ones) would otherwise appear from nowhere on that day
-  // and make the total lurch. Its first known balance is carried back
-  // instead, and those days are marked carried. Manual accounts aren't:
-  // their first entry is a date you chose.
-  // Each account's first stored day overall (the rows above start just
-  // before the range, so they can't tell "no history" from a gap).
-  const firstDays = new Map<string, IsoDate>();
-  for (const chunk of inChunks(accountIds)) {
-    const rows = await tenant.db
-      .select({ accountId: accountDaily.accountId, first: min(accountDaily.date) })
-      .from(accountDaily)
-      .where(tenant.scope(accountDaily, inArray(accountDaily.accountId, chunk)))
-      .groupBy(accountDaily.accountId);
-    for (const row of rows) if (row.first) firstDays.set(row.accountId, row.first);
-  }
+  // Per account: carried-forward display-currency value for each date. An
+  // account starts on its first known day: none before it, so the total
+  // steps up where an account's history begins (the change over the range
+  // leaves it out: `change` below).
   const perAccount = new Map<string, (number | null)[]>();
   const perAccountQuality = new Map<string, (Quality | null)[]>();
   for (const account of accountRows) {
     const rows = balanceRows.filter((row) => row.accountId === account.id);
-    const firstDay = firstDays.get(account.id);
-    // Only if its history starts inside the range (then it's in `rows`).
-    const first = account.source === 'plaid' && firstDay ? rows.find((row) => row.date === firstDay) : undefined;
     // No longer reported (closed, or deselected in Plaid): out of totals from that day on, as it is from today's.
     const gone = account.missingSince !== null ? marketDate(new Date(account.missingSince)) : null;
     const values: (number | null)[] = [];
@@ -120,11 +101,6 @@ export async function loadHistory(deps: Deps, tenant: Tenant, options: Options):
       if (gone && date >= gone) {
         values.push(null);
         quality.push(null);
-        continue;
-      }
-      if (!last && first && date < first.date) {
-        values.push(convert(first.balance, first.currency, date));
-        quality.push(carriedFrom(first));
         continue;
       }
       values.push(last ? convert(last.balance, last.currency, date) : null);
@@ -151,9 +127,19 @@ export async function loadHistory(deps: Deps, tenant: Tenant, options: Options):
 
   let series: HistorySeries[];
   switch (options.group) {
-    case 'total':
+    case 'total': {
       series = [{ key: 'total', label: 'Net worth', values: withTransit(sum([...perAccount.values()])), quality: combined(dates, [...perAccountQuality.values()]) }];
-      break;
+      // The change over the range: an account whose history starts inside it opens with money it already held, which isn't a gain.
+      const starts = accountRows.flatMap((account) => {
+        const values = perAccount.get(account.id)!;
+        const first = values.findIndex((value) => value !== null);
+        return first > 0 && values[first] !== 0 ? [{ date: dates[first], accountId: account.id, label: accountLabel(account), institution: account.institutionName, amount: values[first]! }] : [];
+      });
+      const at = (position: number) => [...perAccount.values()].reduce((total, values) => total + (values.at(position) ?? 0), transit.at(position)!);
+      const base = at(0);
+      const amount = at(-1) - base - starts.reduce((total, start) => total + start.amount, 0);
+      return { currency: options.currency, group: options.group, dates, series, change: { amount, base, starts } };
+    }
     case 'account':
       series = accountRows.map((account) => ({
         key: account.id,

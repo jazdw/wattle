@@ -1,4 +1,4 @@
-import type { HistoryResponse } from '../../shared/types';
+import type { AccountStart, HistoryResponse } from '../../shared/types';
 import { MAX_SERIES, OTHER_COLOR, OTHER_DEBTS_COLOR, seriesColor } from './colors';
 
 export interface ChartSeries {
@@ -81,5 +81,37 @@ export function stackAreas(series: ChartSeries[], stacked: boolean): StackedArea
       { ...item, values: part(item.values, (value) => value > 0), gaps: true },
       { ...item, key: `${item.key}:below`, values: part(item.values, (value) => value < 0), gaps: true },
     ];
+  });
+}
+
+/** A day marked on a chart with a dashed line and a short label: accounts whose history starts there, named in the tooltip. */
+export interface ChartMarker {
+  date: string;
+  label: string;
+  starts: { accountId: string; label: string; amount: number }[];
+}
+
+/**
+ * Where accounts' histories start inside the range with money in them, one
+ * marker for those close together (within 5% of the range, at least 3 days),
+ * named shortly (the tooltip names each account): by the institution they
+ * share, else the account's name, else how many.
+ */
+export function startMarkers(dates: string[], starts: AccountStart[]): ChartMarker[] {
+  const near = Math.max(3, Math.round(dates.length * 0.05));
+  const groups: AccountStart[][] = [];
+  for (const start of [...starts].sort((a, b) => a.date.localeCompare(b.date))) {
+    const last = groups.at(-1);
+    if (last && (Date.parse(start.date) - Date.parse(last[0].date)) / 86_400_000 <= near) last.push(start);
+    else groups.push([start]);
+  }
+  return groups.map((group) => {
+    const institutions = new Set(group.map((start) => start.institution));
+    const [institution] = institutions;
+    return {
+      date: group[0].date,
+      label: institutions.size === 1 && institution ? institution : group.length === 1 ? group[0].label : `${group.length} accounts`,
+      starts: group,
+    };
   });
 }

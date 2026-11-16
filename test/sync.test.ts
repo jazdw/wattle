@@ -402,7 +402,7 @@ describe('disconnecting', () => {
 });
 
 describe('history backfill', () => {
-  it("carries a linked account's first balance back as an estimate, but not a manual account's", async () => {
+  it("starts every account on its first known day, and leaves one starting inside the range out of the total's change", async () => {
     const plaid = brokerage();
     // A mortgage at an investment login: no history before today's snapshot.
     plaid.state.accounts.push(account('mtg', 'loan', 200000));
@@ -415,12 +415,19 @@ describe('history backfill', () => {
     const row = (name: string) => history.series.find((entry: { key: string }) => entry.key === accounts.find((account) => account.name === name)!.id);
     const series = (name: string) => row(name).values as (number | null)[];
     const yesterday = history.dates.length - 2;
-    expect(series('mtg')[0]).toBe(-200000_00); // carried back from today
-    expect(series('mtg')[yesterday]).toBe(-200000_00);
-    expect(series('House')[0]).toBeNull(); // manual: starts on its entry date
-    const quality = row('mtg').quality;
-    expect(quality[0].source).toBe('carried');
-    expect(quality.at(-1).source).toBe('snapshot'); // today is reported
+    expect(series('mtg')[0]).toBeNull(); // not carried back from today
+    expect(series('mtg')[yesterday]).toBeNull();
+    expect(series('mtg').at(-1)).toBe(-200000_00);
+    expect(row('mtg').quality.at(-1).source).toBe('snapshot'); // today is reported
+    expect(series('House')[0]).toBeNull();
+
+    // The total's change leaves out what an account's history opens with inside the range: the mortgage and the house start today.
+    const total = (await api('/api/history?range=1M&group=total&currency=USD')).body;
+    const values = total.series[0].values as (number | null)[];
+    const opening = total.change.starts.reduce((sum: number, start: { amount: number }) => sum + start.amount, 0);
+    expect(total.change.starts.map((start: { label: string }) => start.label)).toEqual(expect.arrayContaining([expect.stringContaining('House')]));
+    expect(total.change.starts.every((start: { amount: number }) => start.amount !== 0)).toBe(true);
+    expect(total.change.amount).toBe((values.at(-1) ?? 0) - total.change.base - opening);
   });
 
   it('rebuilds investment history from transactions and daily closes', async () => {

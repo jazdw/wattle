@@ -200,7 +200,9 @@ export function history(group = 'total'): HistoryResponse {
     { source: 'rebuilt', priceSource: 'close', unmatched: false },
     ...dates.slice(1).map(() => ({ source: 'snapshot' as const, priceSource: 'close' as const, unmatched: false })),
   ];
-  return { currency: 'USD', group: group as HistoryResponse['group'], dates, series: series.map((item) => ({ ...item, quality })) };
+  // The total's change: no account's history opens inside the range.
+  const change = group === 'total' ? { change: { amount: 66200_00, base: 1300000_00, starts: [] } } : {};
+  return { currency: 'USD', group: group as HistoryResponse['group'], dates, series: series.map((item) => ({ ...item, quality })), ...change };
 }
 
 export const TARGET: TargetResponse = {

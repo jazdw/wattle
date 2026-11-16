@@ -13,6 +13,7 @@ import { Alert, EmptyState, Skeleton } from '../components/ui/misc';
 import { RangePicker } from '../components/RangePicker';
 import { useAccounts, useConnections, useHistory, usePortfolio, type Range } from '../hooks/queries';
 import { useAuth, useOwnerName } from '../hooks/useAuth';
+import { startMarkers } from '../lib/series';
 import { ACCOUNT_TYPE_LABELS, ACCOUNT_TYPE_ORDER, changeClass, formatPercent, money, relativeTime } from '../lib/format';
 
 export function NetWorth() {
@@ -30,13 +31,15 @@ export function NetWorth() {
     onSuccess: () => void queryClient.invalidateQueries(),
   });
 
+  // Less the balances accounts open with inside the range (money they already held), marked on the chart where they start.
   const change = useMemo(() => {
-    const values = history.data?.series[0]?.values.filter((value): value is number => value !== null) ?? [];
-    if (values.length < 2) return null;
-    const first = values[0];
-    const last = values.at(-1)!;
-    return { amount: last - first, percent: first !== 0 ? (last - first) / Math.abs(first) : 0 };
+    const found = history.data?.change;
+    if (!found || (history.data?.dates.length ?? 0) < 2) return null;
+    // As a share of all the money it started from: the first day's, and what accounts opened with.
+    const from = found.base + found.starts.reduce((total, start) => total + start.amount, 0);
+    return { amount: found.amount, percent: from !== 0 ? found.amount / Math.abs(from) : 0, starts: found.starts.length };
   }, [history.data]);
+  const markers = useMemo(() => (history.data ? startMarkers(history.data.dates, history.data.change?.starts ?? []) : []), [history.data]);
 
   const groups = useMemo(() => {
     const visible = (accounts.data?.accounts ?? []).filter((account) => !account.isHidden);
@@ -105,7 +108,10 @@ export function NetWorth() {
                   {change && (
                     <p className={`text-sm ${changeClass(change.amount)}`}>
                       {money(change.amount, currency)} ({formatPercent(change.percent, 1)}){' '}
-                      <span className="text-muted-foreground">{range === 'ALL' ? 'all time' : range === 'YTD' ? 'this year' : `past ${range}`}</span>
+                      <span className="text-muted-foreground">
+                        {range === 'ALL' ? 'all time' : range === 'YTD' ? 'this year' : `past ${range}`}
+                        {change.starts > 0 && ` · opening balance${change.starts === 1 ? ' of 1 account' : `s of ${change.starts} accounts`} not counted`}
+                      </span>
                     </p>
                   )}
                 </div>
@@ -131,6 +137,7 @@ export function NetWorth() {
                   series={[{ key: 'total', label: 'Net worth', color: 'var(--series-1)', values: history.data.series[0].values }]}
                   currency={currency}
                   stacked={false}
+                  markers={markers}
                 />
               ) : history.isPending ? (
                 <Skeleton className="h-[280px] w-full" />

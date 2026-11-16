@@ -123,6 +123,7 @@ migrations/  drizzle-kit SQL, applied by Wrangler (D1) or Drizzle's migrator (li
 - **Missed days.** Each night's snapshot records the day's balance. Which figure wins for a day:
   - A linked account's balance reported that day is the bank's figure (`snapshot`), and replaces rebuilt and carried values, never entered or imported ones. It's only as fresh as Plaid's last update of the login (see Linking): on a login Plaid doesn't refresh, the same figure every day.
   - If a sync fails (or the login is disconnected), the last balance and holdings are carried forward (`carried`).
+  - Before an account's first known day there's nothing: charts start each account where its history does, so a total steps up on the day an account's history begins (nothing is carried back to fill it in). The net worth change over a range counts only the accounts known on its first day, and says how many starting later it leaves out: an account's first balance isn't a gain.
   - After each sync, each account's last day covered by the institution's figure (a reported balance or bank history) is checked. Days after it, up to yesterday, were missed, and so is any day still carrying a balance forward (a fill that failed leaves those, even with known days after them). Recorded and imported days don't count, since the fill never replaces them.
   - A fill that fails is tried again by the first sync at least 6 hours later (`missed_retry_at`), not by every webhook sync in between: a bank fill asks Plaid for a new report each time.
   - Bank accounts on an Assets login: a small asset report is requested for just those days. Its balances (`rebuilt`) replace the carried ones, but never reported, entered or imported days.
@@ -295,7 +296,6 @@ Background jobs run in the same process: the fairest due job, one at a time, swe
 - **Rebuild history on request** for investment logins: a button that marks the history stale and rebuilds it, rather than a change in the database.
 - **History older than a download reaches.** Institution downloads can be capped (e.g. 18 months); earlier history could come from statements.
 - **Account number aliases.** Other last digits an account is also known by, for matching a file's account to one of yours and for matching transfers: an authorized user's card, for one, is numbered differently in the cardholder's downloads.
-- **Where history starts.** Charts carry a linked account's first stored balance back to the range's start so totals don't jump when its history begins later, which draws a flat line before its first known day. Keeping it for totals only, so each account starts where its history does, would be clearer.
 - **CUSIP lookups.** A security a file names only by CUSIP is matched by name today; a CUSIP-to-ticker service (e.g. OpenFIGI) would find any, at the cost of an outside service.
 
 ### Transactions phase (checking and credit cards)

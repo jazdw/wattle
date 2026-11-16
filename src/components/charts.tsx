@@ -6,6 +6,7 @@ import {
   Cell,
   Pie,
   PieChart,
+  ReferenceLine,
   ResponsiveContainer,
   Tooltip,
   XAxis,
@@ -14,7 +15,7 @@ import {
 import type { Currency } from '../../shared/money';
 import type { HistoryResponse } from '../../shared/types';
 import { longDate, money, shortDate } from '../lib/format';
-import { stackAreas, type ChartSeries } from '../lib/series';
+import { stackAreas, type ChartMarker, type ChartSeries } from '../lib/series';
 
 /* ------------------------------------------------------------------ */
 /* Time series                                                         */
@@ -48,6 +49,7 @@ function SeriesTooltip({
   currency,
   showTotal,
   band,
+  markers = [],
 }: {
   active?: boolean;
   payload?: TooltipPayload[];
@@ -55,6 +57,7 @@ function SeriesTooltip({
   currency: Currency;
   showTotal: boolean;
   band?: ChartBand;
+  markers?: ChartMarker[];
 }) {
   if (!active || !payload?.length || !label) return null;
   // A series stacked as its parts above and below zero (see TimeSeriesChart) is one row again.
@@ -92,6 +95,15 @@ function SeriesTooltip({
           <span>{money(row.value, currency)}</span>
         </p>
       ))}
+      {markers
+        .filter((marker) => marker.date === label)
+        .flatMap((marker) => marker.starts)
+        .map((start) => (
+          <p key={start.accountId} className="mt-1 flex justify-between gap-4 text-muted-foreground">
+            <span>History starts: {start.label}</span>
+            <span>{money(start.amount, currency)}</span>
+          </p>
+        ))}
     </div>
   );
 }
@@ -107,6 +119,7 @@ export function TimeSeriesChart({
   stacked,
   lines = false,
   band,
+  markers = [],
   height = 280,
 }: {
   history: HistoryResponse;
@@ -116,6 +129,7 @@ export function TimeSeriesChart({
   /** Lines only, no fill (unstacked). */
   lines?: boolean;
   band?: ChartBand;
+  markers?: ChartMarker[];
   height?: number;
 }) {
   const areas = useMemo(() => stackAreas(series, stacked), [series, stacked]);
@@ -142,7 +156,7 @@ export function TimeSeriesChart({
   return (
     <div style={{ height }} className="w-full">
       <ResponsiveContainer>
-        <AreaChart data={data} margin={{ top: 8, right: 8, bottom: 0, left: 8 }} stackOffset={stacked ? 'sign' : 'none'}>
+        <AreaChart data={data} margin={{ top: markers.length > 0 ? 20 : 8, right: 8, bottom: 0, left: 8 }} stackOffset={stacked ? 'sign' : 'none'}>
           <defs>
             {single && (
               <linearGradient id="fill-single" x1="0" y1="0" x2="0" y2="1">
@@ -161,7 +175,7 @@ export function TimeSeriesChart({
             domain={['auto', 'auto']}
           />
           <Tooltip
-            content={<SeriesTooltip currency={currency} showTotal={stacked} band={band} />}
+            content={<SeriesTooltip currency={currency} showTotal={stacked} band={band} markers={markers} />}
             cursor={{ stroke: 'var(--color-muted-foreground)', strokeWidth: 1 }}
           />
           {band && <Area dataKey={BAND_KEY} name={band.label} type="monotone" stroke="none" fill={band.color} fillOpacity={0.18} isAnimationActive={false} activeDot={false} dot={false} />}
@@ -181,6 +195,16 @@ export function TimeSeriesChart({
               isAnimationActive={false}
               activeDot={{ r: 4, strokeWidth: 2, stroke: 'var(--color-card)' }}
               dot={false}
+            />
+          ))}
+          {markers.map((marker) => (
+            <ReferenceLine
+              key={marker.date}
+              x={marker.date}
+              stroke="var(--color-muted-foreground)"
+              strokeDasharray="3 3"
+              strokeOpacity={0.6}
+              label={{ value: marker.label, position: 'top', fontSize: 11, fill: 'var(--color-muted-foreground)' }}
             />
           ))}
         </AreaChart>
