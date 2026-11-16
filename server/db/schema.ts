@@ -198,6 +198,12 @@ export const accounts = sqliteTable(
     institutionName: text('institution_name'),
     /** Last ≤4 characters of the account number, as Plaid's `mask`. Never more. */
     mask: text('mask'),
+    /**
+     * Other last digits the account is also known by (≤4 characters each):
+     * an authorized user's card, say, numbered differently in the files you
+     * download. Matched like the mask, by imports and transfer matching.
+     */
+    maskAliases: text('mask_aliases', { mode: 'json' }).$type<string[]>().notNull().default([]),
     /** depository | credit | loan | investment | property | other */
     type: text('type').notNull(),
     subtype: text('subtype'),

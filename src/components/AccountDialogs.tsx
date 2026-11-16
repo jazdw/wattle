@@ -169,6 +169,9 @@ export function NewAccountDialog({ open, onOpenChange }: { open: boolean; onOpen
 /* Edit account                                                        */
 /* ------------------------------------------------------------------ */
 
+/** Last digits typed as a list ("1234, 5678"): each one's last four. */
+const digitList = (text: string) => [...new Set(text.split(/[\s,;]+/).flatMap((part) => (part ? [part.slice(-4)] : [])))];
+
 export function EditAccountDialog({
   account,
   duplicateOf,
@@ -180,7 +183,7 @@ export function EditAccountDialog({
   onClose: () => void;
 }) {
   const invalidate = useInvalidate();
-  const [form, setForm] = useState<{ id: string; name: string; institutionName: string; subtype: string; ownerUserId: string | null; category: string; isHidden: boolean; purge: boolean } | null>(null);
+  const [form, setForm] = useState<{ id: string; name: string; institutionName: string; subtype: string; mask: string; aliases: string; ownerUserId: string | null; category: string; isHidden: boolean; purge: boolean } | null>(null);
   const [balance, setBalance] = useState(() => ({ amount: '', date: marketDate(new Date()) }));
 
   if (account && form?.id !== account.id) {
@@ -189,6 +192,8 @@ export function EditAccountDialog({
       name: account.name,
       institutionName: account.institutionName ?? '',
       subtype: account.subtype ?? '',
+      mask: account.mask ?? '',
+      aliases: account.maskAliases.join(', '),
       ownerUserId: account.ownerUserId,
       category: account.category ?? '',
       isHidden: account.isHidden,
@@ -209,7 +214,8 @@ export function EditAccountDialog({
         body: JSON.stringify({
           name: form!.name,
           // A linked account's institution comes from Plaid.
-          ...(account!.source === 'manual' ? { institutionName: form!.institutionName.trim() || null, subtype: form!.subtype || null } : {}),
+          ...(account!.source === 'manual' ? { institutionName: form!.institutionName.trim() || null, subtype: form!.subtype || null, mask: form!.mask.trim() || null } : {}),
+          maskAliases: digitList(form!.aliases),
           ownerUserId: form!.ownerUserId,
           category: form!.category || null,
           isHidden: form!.isHidden,
@@ -255,6 +261,9 @@ export function EditAccountDialog({
                 <Input value={form.institutionName} onChange={(event) => setForm({ ...form, institutionName: event.target.value })} placeholder="None" />
               </Field>
               <SubtypeSelect type={account.type} value={form.subtype} onChange={(subtype) => setForm({ ...form, subtype })} />
+              <Field label="Last digits" hint="The account number's last four, to match the files you import.">
+                <Input value={form.mask} maxLength={4} onChange={(event) => setForm({ ...form, mask: event.target.value })} placeholder="None" />
+              </Field>
             </>
           )}
           <Field label="Owner">
@@ -269,6 +278,9 @@ export function EditAccountDialog({
                 </option>
               ))}
             </NativeSelect>
+          </Field>
+          <Field label="Also known as" hint="Other last digits for this account, e.g. an authorized user's card: files and transfers that use them match it.">
+            <Input value={form.aliases} onChange={(event) => setForm({ ...form, aliases: event.target.value })} placeholder="e.g. 1234, 5678" />
           </Field>
         </div>
 

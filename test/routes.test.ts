@@ -36,6 +36,14 @@ describe('accounts', () => {
     // Cleared, it's none.
     expect((await api(`/api/accounts/${id}`, { method: 'PATCH', json: { institutionName: '' } })).status).toBe(200);
     expect((await deps.db.select().from(schema.accounts).where(eq(schema.accounts.id, id)))[0].institutionName).toBeNull();
+    // Its last digits, to match imported files; more than four isn't one.
+    expect((await api(`/api/accounts/${id}`, { method: 'PATCH', json: { mask: '1234' } })).status).toBe(200);
+    expect((await deps.db.select().from(schema.accounts).where(eq(schema.accounts.id, id)))[0].mask).toBe('1234');
+    expect((await api(`/api/accounts/${id}`, { method: 'PATCH', json: { mask: '12345' } })).status).toBe(400);
+    // Other digits it's known by, once each.
+    expect((await api(`/api/accounts/${id}`, { method: 'PATCH', json: { maskAliases: ['5678', '9012', '5678'] } })).status).toBe(200);
+    expect((await deps.db.select().from(schema.accounts).where(eq(schema.accounts.id, id)))[0].maskAliases).toEqual(['5678', '9012']);
+    expect((await api('/api/accounts')).body.accounts.find((account: { id: string }) => account.id === id).maskAliases).toEqual(['5678', '9012']);
   });
 
   it('stores liabilities as negative and deletes manual accounts with their history', async () => {

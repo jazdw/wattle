@@ -27,3 +27,8 @@ export const ACCOUNT_SUBTYPES: Record<string, string[]> = {
   property: [],
   other: [],
 };
+
+/** The last digits an account is known by: its own (the mask) and its aliases, each as its last four. */
+export function knownDigits(account: { mask: string | null; maskAliases?: string[] }): string[] {
+  return [account.mask, ...(account.maskAliases ?? [])].flatMap((digits) => (digits ? [digits.slice(-4)] : []));
+}

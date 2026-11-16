@@ -362,6 +362,7 @@ async function prepareImport(deps: Deps, tenant: Tenant, request: ImportRequest)
         officialName: null,
         institutionName: fresh.institutionName ?? null,
         mask: fresh.mask ?? null,
+        maskAliases: [],
         type: fresh.type,
         subtype: fresh.subtype || null,
         currency: fresh.currency,

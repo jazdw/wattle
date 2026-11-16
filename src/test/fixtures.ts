@@ -34,6 +34,7 @@ export function account(overrides: Partial<AccountSummary>): AccountSummary {
     name: 'Account',
     officialName: null,
     mask: null,
+    maskAliases: [],
     type: 'depository',
     subtype: null,
     currency: 'USD',

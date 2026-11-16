@@ -45,6 +45,9 @@ describe('accounts named in descriptions', () => {
     expect(namesAnother(out('Transfer to Northwind'), savings, institutions)).toBe(true);
     expect(namesAnother(out('Transfer to Contoso, not Northwind'), savings, institutions)).toBe(false);
     expect(namesAnother(out('Online transfer'), savings, institutions)).toBe(false);
+    // Digits the account is also known by name it too.
+    expect(namesAnother(out('Transfer to Contoso Savings XXXX3333'), savings, institutions)).toBe(true);
+    expect(namesAnother(out('Transfer to Contoso Savings XXXX3333'), { ...savings, maskAliases: ['3333'] }, institutions)).toBe(false);
   });
 });
 

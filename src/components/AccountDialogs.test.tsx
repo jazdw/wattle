@@ -107,6 +107,24 @@ describe('manual accounts', () => {
     });
   });
 
+  it("sets a manual account's last digits, and other digits any account is known by", async () => {
+    const { user } = await openAccounts();
+    await user.click(within(rowFor('Example Super')).getByRole('button', { name: 'Edit account' }));
+    let dialog = await screen.findByRole('dialog');
+    await user.type(within(dialog).getByLabelText(/^Last digits/), '4321');
+    await user.type(within(dialog).getByLabelText(/^Also known as/), '1111, 22223333');
+    await user.click(within(dialog).getByRole('button', { name: 'Save' }));
+    await expect.poll(() => sent('PATCH /api/accounts/super')[0]?.body).toMatchObject({ mask: '4321', maskAliases: ['1111', '3333'] });
+
+    // A linked account's own digits are Plaid's: only others it's known by.
+    await user.click(within(rowFor('Northwind Checking')).getByRole('button', { name: 'Edit account' }));
+    dialog = await screen.findByRole('dialog', { name: 'Northwind Checking ··1234' });
+    expect(within(dialog).queryByLabelText(/^Last digits/)).not.toBeInTheDocument();
+    await user.type(within(dialog).getByLabelText(/^Also known as/), '5555');
+    await user.click(within(dialog).getByRole('button', { name: 'Save' }));
+    await expect.poll(() => sent('PATCH /api/accounts/chk')[0]?.body).toMatchObject({ maskAliases: ['5555'] });
+  });
+
   it('hides a linked account, optionally deleting its history', async () => {
     const { user } = await openAccounts();
     await user.click(within(rowFor('Northwind Checking')).getByRole('button', { name: 'Edit account' }));

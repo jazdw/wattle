@@ -1,0 +1,1 @@
+ALTER TABLE `accounts` ADD `mask_aliases` text DEFAULT '[]' NOT NULL;

@@ -193,6 +193,8 @@ export interface AccountSummary {
   name: string;
   officialName: string | null;
   mask: string | null;
+  /** Other last digits it's also known by (see accounts.mask_aliases). */
+  maskAliases: string[];
   type: string;
   subtype: string | null;
   currency: Currency;

@@ -275,6 +275,7 @@ accountRoutes.get('/', async (c) => {
         name: row.name,
         officialName: row.officialName,
         mask: row.mask,
+        maskAliases: row.maskAliases,
         type: row.type,
         subtype: row.subtype,
         currency: toCurrency(row.currency),
@@ -382,6 +383,8 @@ accountRoutes.patch('/:id', async (c) => {
   if (body.currency !== undefined && account.source === 'manual') update.currency = body.currency;
   if (body.institutionName !== undefined && account.source === 'manual') update.institutionName = body.institutionName || null;
   if (body.subtype !== undefined && account.source === 'manual') update.subtype = body.subtype || null;
+  if (body.mask !== undefined && account.source === 'manual') update.mask = body.mask || null;
+  if (body.maskAliases !== undefined) update.maskAliases = [...new Set(body.maskAliases)];
   if (body.isHidden !== undefined) {
     update.isHidden = body.isHidden;
     if (body.isHidden) {

@@ -99,6 +99,14 @@ describe('Import page', () => {
     expect(within(bars.parentElement!).getByRole('status')).toHaveTextContent(/^Jan 15, 2026Balance Plaid/);
   });
 
+  it('matches a file account by digits the account is also known by', async () => {
+    server.use(http.get('*/api/accounts', () => HttpResponse.json({ accounts: ACCOUNTS.map((account) => (account.id === 'brk' ? { ...account, mask: '4321', maskAliases: ['8765'] } : account)) })));
+    server.use(http.post('*/api/imports/tickers', () => HttpResponse.json({ suggestions: [] })));
+    await openImport();
+    upload(sgmlAccounts(['55558765']));
+    expect(await screen.findByLabelText('Import ··8765 into')).toHaveValue('brk');
+  });
+
   it('imports every account in a download: matched by last digits, new, or skipped', async () => {
     server.use(http.get('*/api/accounts', () => HttpResponse.json({ accounts: ACCOUNTS.map((account) => (account.id === 'brk' ? { ...account, mask: '4321' } : account)) })));
     server.use(http.post('*/api/imports/tickers', () => HttpResponse.json({ suggestions: [] })));

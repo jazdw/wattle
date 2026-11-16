@@ -62,6 +62,10 @@ export const accountPatchSchema = z.object({
   /** A manual account's institution and kind (a linked one's come from Plaid). */
   institutionName: z.string().trim().max(100).nullable().optional(),
   subtype: z.string().trim().max(40).nullable().optional(),
+  /** A manual account's last digits (its mask), matching it to the files you import; a linked one's come from Plaid. */
+  mask: z.string().trim().regex(/^[0-9A-Za-z]{0,4}$/, 'Up to four letters or digits.').nullable().optional(),
+  /** Any account's other last digits (see accounts.mask_aliases). */
+  maskAliases: z.array(z.string().trim().regex(/^[0-9A-Za-z]{1,4}$/, 'Up to four letters or digits.')).max(10).optional(),
 });
 
 export const balanceEntrySchema = z.object({

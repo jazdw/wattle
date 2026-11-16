@@ -26,6 +26,7 @@
  */
 import { eq, inArray } from 'drizzle-orm';
 import type { BatchItem } from 'drizzle-orm/batch';
+import { knownDigits } from '../../shared/accounts';
 import { fullDescription } from '../../shared/descriptions';
 import type { IsoDate } from '../../shared/dates';
 import { kindOf, TRANSFER_LINK_DAYS } from '../../shared/transactionKinds';
@@ -57,8 +58,9 @@ export interface MoneyMove {
   institution?: string | null;
   /** The account's type: two credit cards aren't matched automatically. */
   accountType?: string;
-  /** The account's last digits, which the other side's description may quote. */
+  /** The account's last digits, and others it's known by, which the other side's description may quote. */
   mask?: string | null;
+  maskAliases?: string[];
 }
 
 /** The household's money in and out (by kind) in visible accounts. */
@@ -82,6 +84,7 @@ export async function moneyMoves(tenant: Tenant): Promise<MoneyMove[]> {
       institution: accounts.institutionName,
       accountType: accounts.type,
       mask: accounts.mask,
+      maskAliases: accounts.maskAliases,
       securityType: securities.type,
       ticker: securities.ticker,
       hasSecurity: securities.id,
@@ -97,7 +100,7 @@ export async function moneyMoves(tenant: Tenant): Promise<MoneyMove[]> {
       return kind === 'deposit' || kind === 'withdrawal';
     })
     // Its whole text: a reference number can run from a file's NAME on into its MEMO.
-    .map(({ id, accountId, date, amount, currency, description, memo, institution, accountType, mask }) => ({ id, accountId, date, amount, currency, description: fullDescription(description, memo), institution, accountType, mask }));
+    .map(({ id, accountId, date, amount, currency, description, memo, institution, accountType, mask, maskAliases }) => ({ id, accountId, date, amount, currency, description: fullDescription(description, memo), institution, accountType, mask, maskAliases }));
 }
 
 /** Each pair that could be one transfer: `out` leaves one account (not a credit card's purchase), `in` arrives in another. */
@@ -148,7 +151,8 @@ export function quotedMasks(description: string | null | undefined): string[] {
  */
 export function namesAnother(move: MoneyMove, other: MoneyMove, institutions: string[]): boolean {
   const digits = quotedMasks(move.description);
-  if (digits.length > 0 && !digits.some((mask) => mask === other.mask || mask === move.mask)) return true;
+  const known = [...knownDigits({ mask: other.mask ?? null, maskAliases: other.maskAliases }), ...knownDigits({ mask: move.mask ?? null, maskAliases: move.maskAliases })];
+  if (digits.length > 0 && !digits.some((mask) => known.includes(mask))) return true;
   if (names(move.description, other.institution)) return false;
   return institutions.some((institution) => institution !== other.institution && institution !== move.institution && names(move.description, institution));
 }

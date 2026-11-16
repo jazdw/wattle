@@ -8,7 +8,7 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { ArrowLeft } from 'lucide-react';
 import { useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
-import { accountLabel } from '../../shared/accounts';
+import { accountLabel, knownDigits } from '../../shared/accounts';
 import { holdingLabel } from '../../shared/holdings';
 import { addDays, dateRange, type IsoDate } from '../../shared/dates';
 import { CURRENCIES, type Currency } from '../../shared/money';
@@ -97,7 +97,7 @@ export function Import({ checkDelay = CHECK_DELAY_MS }: { checkDelay?: number })
   const visible = (accounts.data?.accounts ?? []).filter((candidate) => !candidate.isHidden);
 
   /** The account you have with the same last digits, when it can take the file. */
-  const matchOf = (account: FileAccount) => (account.number ? visible.find((candidate) => candidate.mask && last4(candidate.mask) === last4(account.number) && fits(candidate, account)) : undefined);
+  const matchOf = (account: FileAccount) => (account.number ? visible.find((candidate) => knownDigits(candidate).includes(last4(account.number)!) && fits(candidate, account)) : undefined);
 
   async function loadFiles(files: File[]) {
     setFileError(null);
@@ -186,7 +186,7 @@ export function Import({ checkDelay = CHECK_DELAY_MS }: { checkDelay?: number })
     if (choice.to === 'new') {
       if (!choice.name.trim()) errors.push('Give the new account a name.');
       if (currency && currency !== choice.currency) errors.push(`The file is in ${currency}.`);
-      const linked = account.number ? visible.find((candidate) => candidate.source === 'plaid' && candidate.mask && last4(candidate.mask) === last4(account.number)) : undefined;
+      const linked = account.number ? visible.find((candidate) => candidate.source === 'plaid' && knownDigits(candidate).includes(last4(account.number)!)) : undefined;
       if (linked) warnings.push(`${linked.name} is linked with the same last digits: a new account would count this money twice.`);
     }
     return { errors, warnings };
