@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { ImportedHoldings } from '../../shared/schemas';
-import { combineAccounts, mergeAccounts, readFiles, type FileAccount } from './imports';
+import { combineAccounts, mergeAccounts, owedAs, readFiles, type FileAccount } from './imports';
 import { csvAccounts } from './csv';
 import { withKnown } from './known';
 import { bankSgml, buy, sgml } from '../test/ofx';
@@ -60,6 +60,22 @@ describe('readFiles', () => {
     expect(bank.unanchored).toMatchObject({ from: '2026-09-01', to: '2026-10-08', fileBalance: { amount: 600, asOf: '2026-10-08', atEnd: true } });
     expect(bank.unanchored?.transactions).toHaveLength(2);
     expect(worked(bank, 'end', 600)).toMatchObject({ rows: [{ date: '2026-09-01', balance: 200 }, { date: '2026-09-10', balance: 700 }, { date: '2026-10-01', balance: 600 }, { date: '2026-10-08', balance: 600 }] });
+  });
+
+  it("reads a statement's balances as what's owed or as a bank account's, whichever the account it goes into is", () => {
+    // A card's export written as a bank statement: $40 in credit at the close, after a $20 charge and a $60 payment.
+    const read = readFiles([bankSgml([['20260910', '-20.00'], ['20261001', '60.00']], '40.00')]);
+    if (read.kind !== 'accounts') throw new Error('expected accounts');
+    const [bank] = read.accounts;
+    expect(bank.unanchored).toMatchObject({ owed: false, fileBalance: { amount: 40 } });
+    expect(owedAs(bank, false)).toBe(bank);
+    // Into a card: what's owed, so in credit is below zero; the file's own figures are untouched.
+    const card = owedAs(bank, true);
+    expect(card.unanchored).toMatchObject({ owed: true, fileBalance: { amount: -40, atEnd: true } });
+    expect(card.statement).toMatchObject({ owed: true, closing: 40_00 });
+    expect(worked(card, 'end', -40)).toMatchObject({ rows: [{ date: '2026-09-09', balance: 0 }, { date: '2026-09-10', balance: 20 }, { date: '2026-10-01', balance: -40 }, { date: '2026-10-08', balance: -40 }] });
+    // And back: a card statement going into a bank account.
+    expect(owedAs(card, false).unanchored).toMatchObject({ owed: false, fileBalance: { amount: 40 } });
   });
 
   it("works a card's statements of different years from either end, the same in any order", () => {

@@ -325,6 +325,7 @@ export function EditAccountDialog({
               />
               <Input type="date" value={balance.date} onChange={(event) => setBalance({ ...balance, date: event.target.value })} />
             </div>
+            {liability && <p className="text-xs text-muted-foreground">What's owed: below zero when it's in credit.</p>}
             {(history.data?.balances.length ?? 0) > 0 && (
               <ul className="max-h-32 overflow-y-auto text-xs text-muted-foreground">
                 {history.data!.balances.slice(0, 12).map((row) => (

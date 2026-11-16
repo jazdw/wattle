@@ -164,6 +164,41 @@ describe('Import page', () => {
     });
   });
 
+  it("reads a bank-format statement going into a card as what's owed, a day in credit below zero", async () => {
+    server.use(http.post('*/api/imports', () => HttpResponse.json(accepted)), http.get('*/api/accounts/card/balances', () => HttpResponse.json({ balances: [] })));
+    checked();
+    const { user } = await openImport();
+    // A card's export written as a bank statement: $40 in credit at the close, after a $20 charge and a $60 payment.
+    upload(bankSgml([['20260910', '-20.00'], ['20261001', '60.00']], '40.00', { number: '99995555' }));
+    await user.selectOptions(await screen.findByLabelText('Import ··5555 into'), 'card');
+    expect(screen.getByText(/what's owed: below zero when it's in credit/)).toBeInTheDocument();
+    await waitFor(() => expect(screen.getByLabelText('Ending balance, Oct 8, 2026')).toHaveValue('-40.00'));
+    await importIt(user);
+    await expect.poll(() => sent('POST /api/imports')[0]?.body).toMatchObject({
+      accounts: [{ target: { accountId: 'card' }, file: { kind: 'balances', rows: [{ date: '2026-09-09', balance: 0 }, { date: '2026-09-10', balance: 20 }, { date: '2026-10-01', balance: -40 }, { date: '2026-10-08', balance: -40 }] } }],
+    });
+  });
+
+  it('asks how a CSV of balances going into a card signs them, and sends them as what is owed', async () => {
+    server.use(http.post('*/api/imports', () => HttpResponse.json(accepted)));
+    checked();
+    const { user } = await openImport();
+    // Made up: a card's balances written as a bank's are, owed below zero, with one day in credit.
+    upload('Date,Balance\n2026-09-01,-300.00\n2026-09-02,-250.00\n2026-09-03,15.00\n');
+    // Into a bank account it isn't asked.
+    await user.selectOptions(await screen.findByLabelText('Import The file into'), 'wbc');
+    expect(screen.queryByLabelText(/^Balances in this file are/)).not.toBeInTheDocument();
+    await user.selectOptions(screen.getByLabelText('Import The file into'), 'card');
+    // One is above zero, so it's taken as amounts owed until you say.
+    const as = screen.getByLabelText(/^Balances in this file are/);
+    expect(as).toHaveValue('owed');
+    await user.selectOptions(as, 'balance');
+    await importIt(user);
+    await expect.poll(() => sent('POST /api/imports')[0]?.body).toMatchObject({
+      accounts: [{ target: { accountId: 'card' }, file: { kind: 'balances', rows: [{ date: '2026-09-01', balance: 300 }, { date: '2026-09-02', balance: 250 }, { date: '2026-09-03', balance: -15 }] } }],
+    });
+  });
+
   it("shows each file's days and balance, and takes the ending balance from the account's balance Wattle has that day when the file's is later", async () => {
     server.use(
       http.post('*/api/imports', () => HttpResponse.json(accepted)),

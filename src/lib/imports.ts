@@ -196,6 +196,20 @@ function settleStatements(copies: FileAccount[], name: string): FileAccount {
 }
 
 /**
+ * A file of transactions with its balances read as what's owed (a card's or
+ * loan's, above zero when it owes) or as a bank account's, whichever the
+ * account it goes into is: a card's export written as a bank statement, or a
+ * CSV, doesn't say. The file's own figures stay as it signs them; only how
+ * its balance is shown, asked for and sent changes.
+ */
+export function owedAs(account: FileAccount, owed: boolean): FileAccount {
+  const pending = account.unanchored;
+  if (pending?.kind !== 'cash' || Boolean(pending.owed) === owed) return account;
+  const fileBalance = pending.fileBalance && { ...pending.fileBalance, amount: -pending.fileBalance.amount || 0 };
+  return { ...account, ...(account.statement ? { statement: { ...account.statement, owed } } : {}), unanchored: { ...pending, owed, ...(fileBalance ? { fileBalance } : {}) } };
+}
+
+/**
  * One account read from several files (the same number, or files you said
  * are the same account) as one. Holdings come from the latest file that has
  * them; with none, it still needs a balance known (./known). A Quicken file

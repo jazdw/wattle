@@ -8,7 +8,7 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { ArrowLeft } from 'lucide-react';
 import { useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
-import { accountLabel, knownDigits } from '../../shared/accounts';
+import { accountLabel, isLiability, knownDigits } from '../../shared/accounts';
 import { holdingLabel } from '../../shared/holdings';
 import { addDays, dateRange, type IsoDate } from '../../shared/dates';
 import { CURRENCIES, type Currency } from '../../shared/money';
@@ -30,7 +30,7 @@ import { extractBalances, parseAmount, type BalanceMapping, type DateFormat } fr
 import { ACCOUNT_TYPE_OPTIONS, accountKind, localDateTime, longDate, money, quantity } from '../lib/format';
 import { previewRows } from '../lib/importPreview';
 import { withImport } from '../lib/coverage';
-import { balanceAtEnd, combineAccounts, fileValue, last4, readFiles, type FileAccount, type ReadFiles, type StatementFile } from '../lib/imports';
+import { balanceAtEnd, combineAccounts, fileValue, last4, owedAs, readFiles, type FileAccount, type ReadFiles, type StatementFile } from '../lib/imports';
 import { cashEffect, withKnown, type Known } from '../lib/known';
 import { cn } from '../lib/utils';
 
@@ -63,6 +63,8 @@ const TICKER = /^[A-Z][A-Z0-9.-]{0,9}$/;
 /** How the import names an account in the files: its last digits, or the file for one without a number. */
 const labelOf = (account: FileAccount) => (account.number ? `··${last4(account.number)}` : (account.fileName ?? 'The file'));
 /** Holdings go in investment accounts, or a bank account as its daily balance (a brokerage's cash management account); balances in any. */
+/** How a CSV of balances going into a card or loan signs them: what's owed, or the account's balance (owed below zero). */
+type BalancesAs = 'owed' | 'balance';
 const fits = (target: AccountSummary, account: FileAccount) => account.file.kind === 'balances' || target.type === 'investment' || target.type === 'depository';
 const typed = (value: string | undefined) => (value?.trim() ? parseAmount(value) : null);
 const toKnown = (input: KnownInput): Known => ({ at: input.at, cash: typed(input.cash), shares: Object.fromEntries(Object.entries(input.shares).map(([id, value]) => [id, typed(value)])) });
@@ -93,6 +95,8 @@ export function Import({ checkDelay = CHECK_DELAY_MS }: { checkDelay?: number })
   const [noPrice, setNoPrice] = useState<Record<string, boolean>>({});
   // Known balances typed for files of transactions with none (by the account's place in the files).
   const [knowns, setKnowns] = useState<Record<number, KnownInput>>({});
+  // How a CSV of balances going into a card or loan signs them, once you've said (by the account's place in the files).
+  const [balancesAs, setBalancesAs] = useState<Record<number, BalancesAs>>({});
   const [fileKey, setFileKey] = useState(0);
   const visible = (accounts.data?.accounts ?? []).filter((candidate) => !candidate.isHidden);
 
@@ -103,6 +107,7 @@ export function Import({ checkDelay = CHECK_DELAY_MS }: { checkDelay?: number })
     setFileError(null);
     setRead(null);
     setKnowns({});
+    setBalancesAs({});
     commit.reset();
     try {
       const result = readFiles(await Promise.all(files.map((file) => file.text())), files.map((file) => file.name));
@@ -127,18 +132,41 @@ export function Import({ checkDelay = CHECK_DELAY_MS }: { checkDelay?: number })
   const preview = read?.kind === 'table' ? extractBalances(read.rows, mapping) : null;
   const fileAccounts: FileAccount[] =
     read?.kind === 'accounts' ? read.accounts : preview ? [{ number: null, institution: null, unknownTypes: [], file: { kind: 'balances', rows: preview.rows } }] : [];
+  /** Whether the account a file goes into is a card or loan, whose balances are what's owed; null until it's chosen. */
+  const owedTarget = (index: number): boolean | null => {
+    const choice = choices[index];
+    if (choice?.to === 'new') return isLiability(choice.type);
+    const target = choice?.to === 'account' ? visible.find((candidate) => candidate.id === choice.accountId) : undefined;
+    return target ? isLiability(target.type) : null;
+  };
   // Files you've said are the same account join the one they name (null for those joining another).
   const combined = fileAccounts.map((account, index): { account: FileAccount; error: string | null } | null => {
     if (choices[index]?.to === 'with') return null;
     const members = fileAccounts.filter((_, at) => at === index || (choices[at]?.to === 'with' && (choices[at] as { index: number }).index === index));
     try {
-      return { account: combineAccounts(members), error: null };
+      // Its balances as the account it goes into has them (the file's own way until one is chosen).
+      const together = combineAccounts(members);
+      const owed = owedTarget(index);
+      return { account: owed === null ? together : owedAs(together, owed), error: null };
     } catch (error) {
       return { account, error: error instanceof Error ? error.message : String(error) };
     }
   });
+  /**
+   * A CSV of balances alone going into a card or loan: whether its figures
+   * are what's owed, or the account's balance (owed below zero). Nothing in
+   * it says, so it's asked: taken as the balance when none is above zero.
+   */
+  const balancesAsOf = (index: number, account: FileAccount): BalancesAs | null => {
+    if (!owedTarget(index) || account.unanchored || account.file.kind !== 'balances' || account.file.transactions?.length) return null;
+    return balancesAs[index] ?? (account.file.rows.some((row) => row.balance < 0) && !account.file.rows.some((row) => row.balance > 0) ? 'balance' : 'owed');
+  };
   // Files of transactions are worked out once their known balance is given (null until then).
-  const resolved = combined.map((entry, index) => (entry ? withKnown(entry.account, knowns[index] && toKnown(knowns[index])) : null));
+  const resolved = combined.map((entry, index) => {
+    const account = entry ? withKnown(entry.account, knowns[index] && toKnown(knowns[index])) : null;
+    if (!account || account.file.kind !== 'balances' || balancesAsOf(index, account) !== 'balance') return account;
+    return { ...account, file: { ...account.file, rows: account.file.rows.map((row) => ({ ...row, balance: -row.balance || 0 })) } };
+  });
   /** The other files an account with no number may be combined with: ones of the same kind not already joining another. */
   const partnersOf = (index: number) =>
     fileAccounts.flatMap((other, at) => (at !== index && !fileAccounts[index].number && !other.number && other.file.kind === fileAccounts[index].file.kind && choices[at]?.to !== 'with' ? [{ index: at, label: labelOf(other) }] : []));
@@ -396,6 +424,8 @@ export function Import({ checkDelay = CHECK_DELAY_MS }: { checkDelay?: number })
             onChoose={(choice) => choose(index, choice.to === 'new' && choices[index]?.to !== 'new' ? defaultNew(account) : choice)}
             known={knowns[index] ?? NO_KNOWN}
             onKnown={(known) => setKnowns((all) => ({ ...all, [index]: known }))}
+            balancesAs={balancesAsOf(index, combined[index]?.account ?? account)}
+            onBalancesAs={(as) => setBalancesAs((all) => ({ ...all, [index]: as }))}
             check={checks[index]}
             problems={problems.filter((found) => found.label === labelOf(account))}
             warnings={warnings.filter((found) => found.label === labelOf(account))}
@@ -448,6 +478,8 @@ function AccountSection({
   onChoose,
   known,
   onKnown,
+  balancesAs,
+  onBalancesAs,
   check,
   problems,
   warnings,
@@ -466,6 +498,9 @@ function AccountSection({
   onChoose: (choice: Choice) => void;
   known: KnownInput;
   onKnown: (known: KnownInput) => void;
+  /** For a CSV of balances going into a card or loan: how it signs them (null when it isn't asked). */
+  balancesAs: BalancesAs | null;
+  onBalancesAs: (as: BalancesAs) => void;
   check: { errors: string[]; warnings: string[] };
   problems: ImportProblem[];
   warnings: ImportProblem[];
@@ -562,6 +597,16 @@ function AccountSection({
           )}
         </div>
         {joined && <p className="text-muted-foreground">Imported together with that file, where it goes; its preview shows them both.</p>}
+        {balancesAs && choice.to !== 'skip' && (
+          <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-4">
+            <Field label="Balances in this file are" hint="A card or loan can be written either way round.">
+              <NativeSelect value={balancesAs} onChange={(event) => onBalancesAs(event.target.value as BalancesAs)}>
+                <option value="owed">Amounts owed (in credit below zero)</option>
+                <option value="balance">The account's balance (owed below zero)</option>
+              </NativeSelect>
+            </Field>
+          </div>
+        )}
         {read.unanchored?.kind === 'holdings' && choice.to !== 'skip' && !joined && <KnownFields pending={read.unanchored} known={known} onKnown={onKnown} />}
         {read.unanchored?.kind === 'cash' && choice.to !== 'skip' && !joined && <BalanceFields pending={read.unanchored} files={read.statement?.files ?? []} known={known} onKnown={onKnown} accountId={target?.id} currency={currency} />}
         {check.errors.map((error) => (
@@ -777,6 +822,7 @@ function BalanceFields({
   const set = (at: KnownInput['at']) => (event: { target: { value: string } }) => onKnown({ ...known, at, cash: event.target.value, source: 'you' });
   return (
     <div className="grid gap-3 rounded-md bg-muted/40 p-3">
+      {pending.owed && <p className="text-xs text-muted-foreground">A card's or loan's balances here are what's owed: below zero when it's in credit.</p>}
       {files.length > 0 && (
         <ul className="grid gap-1.5">
           {files.map((file, index) => (
