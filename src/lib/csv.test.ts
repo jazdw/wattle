@@ -61,6 +61,26 @@ describe('generic CSV', () => {
     expect(parseDate('31/13/2026', 'DD/MM/YYYY')).toBeNull();
     expect(parseDate('5/6/26', 'DD/MM/YYYY')).toBe('2026-06-05');
   });
+
+  it('reads digits run together, and a month by name, whatever the format says', async () => {
+    const { parseDate } = await import('./csv');
+    for (const format of ['YYYY-MM-DD', 'DD/MM/YYYY', 'MM/DD/YYYY'] as const) {
+      expect(parseDate('20260601', format)).toBe('2026-06-01');
+      expect(parseDate('20260601000000', format)).toBe('2026-06-01');
+      expect(parseDate('01 Jun 2026', format)).toBe('2026-06-01');
+      expect(parseDate('Jun 1, 2026', format)).toBe('2026-06-01');
+      expect(parseDate('1-JUNE-26', format)).toBe('2026-06-01');
+    }
+    expect(parseDate('20261301', 'DD/MM/YYYY')).toBeNull();
+    expect(parseDate('01 Foo 2026', 'DD/MM/YYYY')).toBeNull();
+  });
+
+  it('reads a balance export with digits-run-together dates', () => {
+    const rows = parseCsv('Account,Date,Narrative,Debit Amount,Credit Amount,Balance\n123,20260601000000,FEE,5.00,,100.00\n123,20260501000000,FEE,5.00,,105.00');
+    const mapping = guessMapping(rows)!;
+    expect(mapping.dateFormat).toBe('YYYY-MM-DD');
+    expect(extractBalances(rows, mapping)).toEqual({ rows: [{ date: '2026-05-01', balance: 105 }, { date: '2026-06-01', balance: 100 }], skipped: 0 });
+  });
 });
 
 // Made up: a fund account's transaction export, with no balance or holdings in it.

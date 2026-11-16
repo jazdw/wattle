@@ -46,13 +46,30 @@ export function parseCsv(text: string, keepBlank = false): string[][] {
 
 export type DateFormat = 'YYYY-MM-DD' | 'DD/MM/YYYY' | 'MM/DD/YYYY';
 
+const MONTHS = ['jan', 'feb', 'mar', 'apr', 'may', 'jun', 'jul', 'aug', 'sep', 'oct', 'nov', 'dec'];
+
+/**
+ * A CSV date as YYYY-MM-DD, or null. Two forms are read whatever the format
+ * says, since they can't be misread: digits run together (20260601, or
+ * 20260601000000 with a time of day, which is dropped), and a month by name
+ * (01 Jun 2026, Jun 1, 2026).
+ */
 export function parseDate(value: string, format: DateFormat): string | null {
-  const parts = value.match(/\d+/g);
-  if (!parts || parts.length < 3) return null;
+  const compact = value.trim().match(/^(\d{4})(\d{2})(\d{2})(\d{4}(\d{2})?)?$/);
+  const named = MONTHS.indexOf(value.match(/[a-z]{3,}/i)?.[0].slice(0, 3).toLowerCase() ?? '') + 1;
+  const parts = compact ? compact.slice(1, 4) : value.match(/\d+/g);
+  if (!parts || parts.length < (named ? 2 : 3)) return null;
   let [year, month, day] = [0, 0, 0];
-  if (format === 'YYYY-MM-DD') [year, month, day] = parts.map(Number);
-  if (format === 'DD/MM/YYYY') [day, month, year] = parts.map(Number);
-  if (format === 'MM/DD/YYYY') [month, day, year] = parts.map(Number);
+  if (compact) [year, month, day] = parts.map(Number);
+  else if (named) {
+    // The year is the number of four digits, else the last; the day is the other.
+    const yearAt = parts.findIndex((part) => part.length === 4);
+    year = Number(parts[yearAt >= 0 ? yearAt : parts.length - 1]);
+    day = Number(parts.find((_, index) => index !== (yearAt >= 0 ? yearAt : parts.length - 1)));
+    month = named;
+  } else if (format === 'YYYY-MM-DD') [year, month, day] = parts.map(Number);
+  else if (format === 'DD/MM/YYYY') [day, month, year] = parts.map(Number);
+  else if (format === 'MM/DD/YYYY') [month, day, year] = parts.map(Number);
   if (year < 100) year += 2000;
   if (month < 1 || month > 12 || day < 1 || day > 31) return null;
   return `${year}-${String(month).padStart(2, '0')}-${String(day).padStart(2, '0')}`;
@@ -92,6 +109,8 @@ export function guessMapping(rows: string[][]): BalanceMapping | null {
 
 function guessDateFormat(values: string[]): DateFormat {
   const parts = values.map((value) => value.match(/\d+/g)?.map(Number) ?? []).filter((found) => found.length >= 3);
+  // Digits run together (20260601) are year first, whatever is chosen.
+  if (values.some((value) => /^\d{8}(\d{4}(\d{2})?)?$/.test(value.trim()))) return 'YYYY-MM-DD';
   if (parts.length > 0 && parts.every((found) => found[0] > 31)) return 'YYYY-MM-DD';
   if (parts.some((found) => found[0] > 12)) return 'DD/MM/YYYY';
   return 'MM/DD/YYYY';
